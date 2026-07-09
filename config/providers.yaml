@@ -1,0 +1,33 @@
+# Provider definitions for the merchant routing engine
+# Used by external_failover.py to know which providers exist and their endpoints.
+# API keys are NOT stored here — they come from environment variables.
+
+providers:
+  ppq:
+    base_url: "https://api.ppq.ai/v1"
+    key_env: "PPQ_API_KEY"
+    # Pricing: deepseek-v4-flash = $0.09 input / $0.19 output per 1M
+
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1"
+    key_env: "OPENROUTER_API_KEY"
+    headers:
+      HTTP-Referer: "https://hermes.local"
+      X-Title: "Hermes Agent"
+    # Pricing: deepseek-v4-flash = $0.09 input / $0.18 output per 1M
+
+zai:
+  upstream: "https://api.z.ai/api/coding/paas/v4"
+  keys:
+    ours:
+      key_env: "ZAI_OUR_KEY"
+      monthly_fee_usd: 155
+    friend:
+      key_env: "ZAI_API_KEY"
+      monthly_fee_usd: 0  # shared key, no direct cost
+      penalty_pct: 21
+
+fallback_model: "deepseek/deepseek-v4-flash"  # ~$0.09/1M on both PPQ and OpenRouter
+
+exhausted_retry_seconds: 300    # z.ai key cooldown after quota error
+unfunded_retry_seconds: 3600    # external provider cooldown after 402
