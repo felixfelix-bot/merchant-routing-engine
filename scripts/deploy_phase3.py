@@ -29,7 +29,7 @@ PRE_PHASE3 = Path.home() / ".hermes" / "bot" / "zai_proxy.py.bak-phase2"
 # delegation, keeping best_key() as a fallback wrapper.
 PATCH_MARKER = "# ── Phase 3: PrimaryRouter delegation ──"
 PATCH_CODE = '''
-    # ── Phase 3: PrimaryRouter delegation ──
+    # ── Phase 3: PrimaryRouter delegation ──────────────────────────────
     # Use the price-first optimizer as the PRIMARY routing decision.
     # Falls back to the original best_key logic if PrimaryRouter is unavailable.
     global _primary_router
@@ -38,16 +38,17 @@ PATCH_CODE = '''
             quota = _snapshot_quota()
             health = _snapshot_health()
             choice = _primary_router.route(
-                model=getattr(self, '_current_model', None),
+                model=None,
                 tokens=0,  # unknown before request
                 quota_state=quota,
                 health_state=health,
             )
             if choice in ("ours", "friend"):
+                op = _max_pct(quota_cache.get("ours", ([], 0.0))[0])
+                fp = _max_pct(quota_cache.get("friend", ([], 0.0))[0])
                 _log_key_decision(chosen_key=choice,
                                   reason="phase3_primary_router",
-                                  ours_pct=_max_pct(quota_cache.get("ours", ([], 0.0))[0]),
-                                  friend_pct=_max_pct(quota_cache.get("friend", ([], 0.0))[0]),
+                                  ours_pct=op, friend_pct=fp,
                                   ours_available=1, friend_available=1)
                 return choice
             # None → optimizer says skip z.ai (ollama/external). Return None.
