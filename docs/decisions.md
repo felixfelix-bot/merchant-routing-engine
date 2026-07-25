@@ -139,3 +139,26 @@
 **Rationale**: The engine needs real production traffic to validate price estimates, Kalman convergence, and routing quality. Shadow mode collects this data without risking live operations. Validation criteria: >99% decision coverage, >70% agreement with live, disagreement cases must show lower effective price.
 
 **Trade-off**: 48h delay before any improvement. But the alternative (deploying untested routing) risks production outages.
+
+---
+
+## 15. Three operation modes — consumer, merchant, arbiter
+
+**Decision**: The module supports three distinct operation modes:
+1. **Consumer** — operator owns API keys, routes between them to minimize cost.
+2. **Merchant** — operator runs a Routster node, sells LLM access to maximize profit.
+3. **Arbiter** — operator does BOTH simultaneously: buys from Routster network when cheaper than own keys, sells to Routster network when own keys are cheaper than competitors. Maximizes profit on sell side while minimizing cost on buy side.
+
+**Rationale**: A Routster node operator isn't just a seller. They also consume LLM access — for their own Hermes agents, cron jobs, and workers. When network providers offer cheaper rates than their own keys, they should buy from the network. When their own keys are cheaper, they serve their own traffic internally and sell excess capacity to the network. The routing optimizer treats own keys and network providers as competing upstream candidates. The profit optimizer handles the sell side. Both run simultaneously.
+
+**Trade-off**: Mode 3 (arbiter) requires scraping Routster network for competitor prices and maintaining provider reliability tracking. Near-term: use a whitelist/web-of-trust for trusted network providers. Long-term roadmap: automated quality verification (did provider deliver expected model quality?) and malicious-provider detection.
+
+---
+
+## 16. Provider reliability tracking via web of trust (near-term) with quality verification (roadmap)
+
+**Decision**: Network providers (Routster) are initially filtered by a manually-maintained whitelist (web of trust). A reliability tracker records delivery outcomes per provider. Future roadmap: automated quality verification comparing delivered responses against expected model benchmarks, and malicious-provider detection (bait-and-switch: advertising one model but serving a cheaper one).
+
+**Rationale**: When buying from the Routster network, price alone is insufficient. A provider advertising $0.02/M might be serving a cheaper, lower-quality model. Near-term, a whitelist of trusted npubs provides safety. Long-term, statistical quality verification (response latency distribution, token count distribution, content quality scoring) detects providers systematically underperforming.
+
+**Trade-off**: Whitelist limits network liquidity early on. Quality verification requires calibration data and adds latency. Phased approach: whitelist first, verification later.

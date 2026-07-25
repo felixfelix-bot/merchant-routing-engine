@@ -191,24 +191,24 @@ As tokens increase, subscription rate decreases (amortization). This is the smoo
 
 > **IMPORTANT**: `base_rate` is the ONLY Kalman-smoothed term. `peak_multiplier`, `scarcity_factor`, and `health_factor` are all deterministic functions applied instantaneously. `effective_price` can step-change instantly when peak hours begin/end or when a circuit breaker trips. This is intentional — the operator wants immediate routing response to these events, not Kalman-lagged transitions.
 
-### 3.4 Consumer vs Merchant Systems
+### 3.4 Three Operation Modes — Consumer, Merchant, Arbiter
 
-The module exposes two separate system roles with different entry points, because the optimization problems are fundamentally different.
+The module supports three distinct operation modes, because the optimization problem differs by role.
 
-**Consumer System** (runs in Hermes proxy):
+**Mode 1: Consumer** (runs in Hermes proxy):
 
 ```
-Input:  all provider prices + quotas + health
+Input:  all owned-provider prices + quotas + health
 Pipeline:
   Base-Rate Kalman ──→ base_rate per provider
   Consumption Kalman ──→ exhaustion prediction per provider
   Deterministic Pricing Engine ──→ effective_price per provider
   Routing Optimizer ──→ cheapest viable provider
 Output: {provider, key, model, effective_price}
-Question: "Which provider do I use?"
+Question: "Which of my own providers do I use?"
 ```
 
-**Merchant System** (runs in Routster node):
+**Mode 2: Merchant** (runs in Routster sell node):
 
 ```
 Input:  upstream costs (via Consumer System), competitor prices, demand signal
@@ -217,10 +217,32 @@ Pipeline:
   Demand Kalman ──→ demand curve estimate
   Profit Optimizer ──→ customer-facing price
 Output: {customer_price, upstream_cost, expected_profit}
-Question: "What do I charge?"
+Question: "What do I charge customers?"
 ```
 
-**Key insight**: these can be run by two different entities. A merchant selling API access over Routster uses the Merchant System to set prices. A customer (e.g., another Hermes agent) uses the Consumer System to choose between merchants. The Consumer System is embedded within the Merchant System — a merchant needs to know its own cheapest upstream before it can set a customer price.
+**Mode 3: Arbiter** (buys AND sells simultaneously):
+
+```
+Input:  own keys + Routster network providers + competitor sell prices + demand
+Pipeline:
+  Network Scraper ──→ competitor buy/sell prices from Routster
+  Provider Whitelist ──→ trusted npubs (web of trust)
+  Routing Optimizer ──→ cheapest viable upstream (own key OR network provider)
+    IF own_key cheaper: serve internally, sell excess to network
+    IF network cheaper: buy from network for internal use
+  Profit Optimizer ──→ sell price (based on cheapest upstream + margin)
+  Reliability Tracker ──→ per-provider delivery outcomes (roadmap)
+Output: buy_decision + sell_price (both continuously updated)
+Question: "Do I buy from network or use my own keys? And what do I charge?"
+```
+
+The arbiter mode is the natural endpoint: a Routster node operator isn't just a seller. They also consume LLM access for their own Hermes agents, cron jobs, and workers. When network providers offer cheaper rates than their own keys, they buy from the network. When their own keys are cheaper, they serve their own traffic internally and sell excess capacity to the network.
+
+**Near-term trust**: manually-maintained whitelist of trusted provider npubs. No untrusted provider gets traffic.
+
+**Roadmap trust**: automated quality verification — statistical comparison of delivered responses against expected model benchmarks. Detects bait-and-switch (advertising glm-5.2 but serving a cheaper model) via latency distribution, token count distribution, and content quality scoring. Malicious providers get auto-blacklisted.
+
+**Key insight**: all three modes share the same Routing Optimizer core. The difference is what's in the candidate pool (own keys only vs own keys + network providers) and whether a profit layer sits on top.
 
 ### 3.5 Profit Optimization (Routster)
 
@@ -270,20 +292,35 @@ CREATE TABLE IF NOT EXISTS profit_log (
 
 ### 3.6 Entry Points
 
-Two clean entry points for two different consumers of the module:
+Three clean entry points for three operation modes:
 
 ```python
-# ── Consumer entry point (Hermes proxy) ──────────────────────
+# ── Mode 1: Consumer entry point (Hermes proxy) ──────────────
 from merchant_routing import RoutingOptimizer
 router = RoutingOptimizer(config="providers.yaml")
 decision = router.route(estimated_tokens=1000, difficulty="medium")
 # → {provider: "ollama_cloud", effective_price: 0.069, reason: "cheapest_viable"}
 
-# ── Merchant entry point (Routster node) ─────────────────────
+# ── Mode 2: Merchant entry point (Routster sell node) ────────
 from merchant_routing import ProfitOptimizer
 merchant = ProfitOptimizer(config="providers.yaml", margin_strategy="elastic")
 price = merchant.set_price(model="glm-5.2")
 # → {customer_price: 0.12, upstream_cost: 0.069, expected_profit: 0.051}
+
+# ── Mode 3: Arbiter entry point (buy + sell simultaneously) ──
+from merchant_routing import ArbiterNode
+node = ArbiterNode(
+    config="providers.yaml",
+    routster_config="routster.yaml",
+    trusted_npubs=["npub1...", "npub1..."],  # web of trust whitelist
+)
+# Routes internal traffic to cheapest upstream (own keys OR network)
+buy_decision = node.route_internal(estimated_tokens=1000)
+# → {source: "network", provider: "npub1abc...", effective_price: 0.05, cheaper_than_own: True}
+
+# Sets sell price based on cheapest upstream + demand-aware margin
+sell_price = node.set_sell_price(model="glm-5.2")
+# → {sell_price: 0.08, cheapest_upstream: 0.05, expected_margin: 0.03}
 ```
 
 ---
