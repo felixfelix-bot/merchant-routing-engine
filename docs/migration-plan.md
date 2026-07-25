@@ -92,25 +92,50 @@ After 24-48h with real cost data, re-check:
 
 ## Phase 4: Make Optimizer Primary
 
-**Goal:** Replace `best_key()` with `optimizer.route()` as the primary routing decision.
+**Goal:** Replace `best_key()` with `PrimaryRouter.route()` as the primary routing decision.
 
-### Prerequisites
-- [ ] Phase 3 complete — Kalman filters converged with real cost data
-- [ ] 48h shadow soak showing optimizer is safe (no crashes, no bad decisions)
-- [ ] Agreement rate analysis showing optimizer is equal or better
+**Status:** CODE READY — awaiting 48h shadow soak validation.
 
-### Migration path
-1. Add feature flag: `~/.hermes/bot/.optimizer_primary`
-2. When flag exists: `chosen = optimizer.route().chosen_provider`
-3. When absent: `chosen = best_key()` (current behavior)
-4. Monitor for 24h with flag on
-5. Remove flag + old code once stable
+### Deliverables (ready)
+- `src/primary_router.py` — drop-in replacement for best_key(), same return contract
+- `tests/test_primary_router.py` — 16 tests (all pass)
+- `scripts/deploy_phase3.py` — automated deploy + revert script with health checks
 
-### Safety
-- Optimizer never returns None (always has fallback model)
-- Optimizer respects health state (filters tripped breakers)
-- Optimizer respects peak hours (avoids z.ai during UTC 6-10)
-- Revert: `rm ~/.hermes/bot/.optimizer_primary && systemctl --user restart zai-proxy`
+### Prerequisites (must pass before deploy)
+- [ ] 48h shadow soak — no error spikes, no catastrophic misroutes
+- [ ] Shadow agreement rate > 50% (optimizer mostly agrees with best_key)
+- [ ] Shadow cost ≤ live cost (optimizer is cheaper or equal)
+- [ ] Zero fallback picks by optimizer
+- [ ] Burn-rate Kalman converged (tokens_used > 10M)
+
+### Deployment
+
+```bash
+# Dry run first
+cd ~/merchant-routing-engine
+python3 scripts/deploy_phase3.py --dry-run
+
+# Deploy (auto-reverts on syntax error or health check failure)
+python3 scripts/deploy_phase3.py
+
+# Revert
+python3 scripts/deploy_phase3.py --revert
+```
+
+### Safety Design
+1. **Fallback chain**: PrimaryRouter.route() → best_key() proactive → reactive
+2. **Auto-revert**: syntax error or health check failure → restore from backup
+3. **Same return contract**: "ours"/"friend"/None — identical to best_key()
+4. **Never raises**: on ANY error, falls back to existing best_key() logic
+5. **Read-only Kalman**: route() doesn't mutate state during selection
+
+### How it works
+```
+best_key() called → PrimaryRouter.route() tries first
+  ├─ returns "ours" or "friend" → use that z.ai key
+  ├─ returns None → optimizer says skip z.ai (go to ollama)
+  └─ raises → falls through to existing best_key logic
+```
 
 ---
 

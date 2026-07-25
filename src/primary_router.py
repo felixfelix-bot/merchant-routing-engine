@@ -1,0 +1,234 @@
+"""primary_router.py — Phase 3: optimizer as PRIMARY routing decision.
+
+Drop-in replacement for best_key(). Uses the same persistent Kalman state as
+ShadowHook, but returns the routing decision instead of just logging it.
+
+Design:
+  - Maintains Kalman state across calls (same singleton as ShadowHook).
+  - Each call: feed live quota/burn data → optimizer decides → return key name.
+  - Maps optimizer's provider names to the proxy's key namespace.
+  - NEVER raises. On any error, falls back to None (proxy handles gracefully).
+
+Return contract (identical to best_key()):
+  - "ours"       → use our z.ai key
+  - "friend"     → use friend's z.ai key
+  - None         → skip z.ai, go to ollama_cloud / external failover
+
+The optimizer may choose "ollama_cloud" or "ppq" — these map to None because
+the proxy's existing failover path will reach them naturally. The optimizer's
+value is in the z.ai key selection (ours vs friend) and in signaling when to
+skip z.ai entirely (go straight to ollama during peak).
+
+Safety:
+  - If the optimizer fails for ANY reason, primary_router returns None.
+    The proxy's existing failover handles None correctly.
+  - The optimizer never returns a dead/exhausted provider (filtered by
+    health + exhaustion gates in _evaluate_provider).
+  - Quality tier gate ensures the provider can serve the requested difficulty.
+"""
+from __future__ import annotations
+
+import os
+import sys
+import time
+from typing import Any
+
+_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
+from src.price_kalman import PriceKalman, peak_multiplier
+from src.consumption_kalman import ConsumptionKalman
+from src.routing_optimizer import RoutingOptimizer
+
+__all__ = ["PrimaryRouter"]
+
+
+# Seed costs ($/M) — same as ShadowHook, kept in sync
+_SEED_COSTS = {
+    "ours":          0.31,
+    "friend":        0.375,
+    "ollama_cloud":  0.50,
+    "ppq":           0.14,
+    "openrouter":    0.135,
+}
+
+_QUOTA_TOTALS = {
+    "ours":         2_000_000,
+    "friend":       2_000_000,
+    "ollama_cloud": 1_000_000,
+    "ppq":          float("inf"),
+    "openrouter":   float("inf"),
+}
+
+_ZAI_PEAK = (6, 10)
+
+# Providers that are z.ai keys (returnable as string)
+_ZAI_KEYS = {"ours", "friend"}
+
+
+class PrimaryRouter:
+    """Phase 3 primary router. Uses optimizer to select the best provider.
+
+    Singleton — maintains Kalman state across calls. Thread-safe (each call
+    builds a fresh optimizer from immutable Kalman instances; the Kalman
+    instances themselves are not modified during route()).
+    """
+
+    _instance: "PrimaryRouter | None" = None
+
+    @classmethod
+    def get_instance(cls) -> "PrimaryRouter":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self._price_kalmans: dict[str, PriceKalman] = {}
+        self._consumption_kalmans: dict[str, ConsumptionKalman] = {}
+        self._call_count = 0
+        self._last_decision = "init"
+
+        for name in _SEED_COSTS:
+            self._price_kalmans[name] = PriceKalman(
+                initial_rate=_SEED_COSTS[name],
+                process_noise=1e-6,
+                measurement_noise=1e-4,
+            )
+            self._consumption_kalmans[name] = ConsumptionKalman(
+                process_noise=1.0,
+                measurement_noise=1e6,
+            )
+
+    def route(
+        self,
+        model: str | None = None,
+        tokens: int = 0,
+        quota_state: dict[str, Any] | None = None,
+        health_state: dict[str, bool] | None = None,
+        difficulty: str | None = None,
+    ) -> str | None:
+        """Select the best provider. Drop-in for best_key().
+
+        Returns:
+            "ours" or "friend" for z.ai keys.
+            None to skip z.ai (ollama/external failover handles it).
+
+        NEVER raises. Falls back to None on any error.
+        """
+        try:
+            return self._do_route(model, tokens, quota_state, health_state, difficulty)
+        except Exception:
+            self._last_decision = "error_fallback_none"
+            return None
+
+    def _do_route(
+        self,
+        model: str | None,
+        tokens: int,
+        quota_state: dict[str, Any] | None,
+        health_state: dict[str, bool] | None,
+        difficulty: str | None,
+    ) -> str | None:
+        self._call_count += 1
+
+        if not quota_state:
+            quota_state = {}
+        if not health_state:
+            health_state = {}
+
+        optimizer = RoutingOptimizer(
+            peak_hours_utc=_ZAI_PEAK,
+            peak_mult=3.0,
+            exhaustion_horizon=1,
+        )
+
+        diff = difficulty or self._model_to_difficulty(model)
+
+        for name in _SEED_COSTS:
+            qs = quota_state.get(name, {})
+            remaining = float(qs.get("remaining", _QUOTA_TOTALS.get(name, 1e9)))
+            total = float(qs.get("total", _QUOTA_TOTALS.get(name, 1e9)))
+            healthy = health_state.get(name, True)
+
+            if name in _ZAI_KEYS:
+                tier = "high"
+                mdl = "glm-5.2"
+                prov_peak = _ZAI_PEAK
+                prov_peak_mult = 3.0
+            elif name == "ollama_cloud":
+                tier = "high"
+                mdl = "glm-5.2"
+                prov_peak = None
+                prov_peak_mult = 1.0
+            else:
+                tier = "low"
+                mdl = "deepseek/deepseek-v4-flash"
+                prov_peak = None
+                prov_peak_mult = 1.0
+
+            optimizer.add_provider(
+                name=name,
+                price_kalman=self._price_kalmans[name],
+                consumption_kalman=self._consumption_kalmans[name],
+                quota_remaining=remaining,
+                breaker_tripped=not healthy,
+                model_tier=tier,
+                model=mdl,
+                quota_total=total if total != float("inf") else None,
+                peak_hours_utc=prov_peak,
+                peak_mult=prov_peak_mult,
+            )
+
+        result = optimizer.route(
+            difficulty=diff,
+            estimated_tokens=max(tokens, 1000),
+            hour=int(time.gmtime().tm_hour),
+        )
+
+        chosen = result.get("chosen_provider", "fallback")
+        self._last_decision = f"optimizer→{chosen}"
+
+        # Map optimizer's choice to proxy's key namespace
+        if chosen in _ZAI_KEYS:
+            return chosen
+        # ollama_cloud / ppq / openrouter / fallback → None
+        # Proxy's failover path will reach the correct provider
+        return None
+
+    @staticmethod
+    def _model_to_difficulty(model: str | None) -> str:
+        """Map model name to difficulty tier."""
+        if not model:
+            return "medium"
+        m = model.lower()
+        if "flash" in m:
+            return "low"
+        if "air" in m:
+            return "low"
+        if "5.2" in m or "4.5" in m or "pro" in m:
+            return "high"
+        return "medium"
+
+    def update_burn_rate(self, provider: str, tokens: int) -> None:
+        """Feed actual token usage to the consumption Kalman.
+
+        Called after a request completes to keep burn-rate predictions current.
+        """
+        try:
+            if provider in self._consumption_kalmans and tokens > 0:
+                self._consumption_kalmans[provider].update(float(tokens))
+        except Exception:
+            pass
+
+    @property
+    def stats(self) -> dict:
+        """Return routing statistics for monitoring."""
+        return {
+            "call_count": self._call_count,
+            "last_decision": self._last_decision,
+            "burn_rates": {
+                name: round(ck.tokens_used, 0)
+                for name, ck in self._consumption_kalmans.items()
+            },
+        }
