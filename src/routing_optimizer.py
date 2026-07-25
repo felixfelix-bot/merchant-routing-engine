@@ -92,6 +92,8 @@ class RoutingOptimizer:
         model_tier: str = "high",
         model: str | None = None,
         quota_total: float | None = None,
+        peak_hours_utc: tuple[int, int] | None = None,
+        peak_mult: float = 1.0,
     ) -> None:
         """Register a provider with its Kalman instances.
 
@@ -117,6 +119,13 @@ class RoutingOptimizer:
         quota_total:
             Optional full quota size. When supplied, enables the scarcity
             multiplier; otherwise scarcity defaults to 1.0.
+        peak_hours_utc:
+            Optional (start, end) UTC hour pair. When None (default), this
+            provider has no peak hours — flat rate always. z.ai providers
+            should pass their peak window here (ADR-003).
+        peak_mult:
+            Peak-hour price multiplier (default 1.0 = no peak surcharge).
+            z.ai providers typically pass 3.0.
         """
         if model_tier not in TIER_RANK:
             raise ValueError(
@@ -131,6 +140,8 @@ class RoutingOptimizer:
             "breaker_tripped": bool(breaker_tripped),
             "model_tier": model_tier,
             "model": model if model is not None else TIER_MODELS[model_tier],
+            "peak_hours_utc": tuple(peak_hours_utc) if peak_hours_utc else None,
+            "peak_mult": float(peak_mult),
         }
 
     # ── Core routing ────────────────────────────────────────────────────
@@ -170,16 +181,23 @@ class RoutingOptimizer:
             )
         required_rank = TIER_RANK[DIFFICULTY_TO_TIER[difficulty]]
 
-        peak_mult = peak_multiplier(
-            hour=hour,
-            peak_hours_utc=self._peak_hours_utc,
-            peak_mult=self._peak_mult,
-        )
-
+        # Peak multiplier is per-provider (ADR-003): z.ai has peak hours,
+        # Ollama/PPQ/OpenRouter do not. Each provider carries its own
+        # peak_hours_utc + peak_mult registered via add_provider().
         candidates: list[dict] = []
         for name, provider in self._providers.items():
+            # Compute this provider's peak multiplier (1.0 if no peak window)
+            prov_ph = provider.get("peak_hours_utc")
+            if prov_ph:
+                prov_peak = peak_multiplier(
+                    hour=hour,
+                    peak_hours_utc=prov_ph,
+                    peak_mult=provider.get("peak_mult", 1.0),
+                )
+            else:
+                prov_peak = 1.0
             price, viable, reason = self._evaluate_provider(
-                provider, peak_mult, required_rank, estimated_tokens
+                provider, prov_peak, required_rank, estimated_tokens
             )
             candidates.append(
                 {
@@ -291,9 +309,9 @@ class RoutingOptimizer:
             health=health,
         )
 
-        # ADR-004: viable effective price is always strictly positive.
-        if math.isnan(effective_price) or effective_price <= 0:
-            effective_price = MIN_EFFECTIVE_PRICE
+        # ADR-004: effective_price() already floors at MIN_EFFECTIVE_PRICE,
+        # so no additional positivity check needed here. The invariant is
+        # enforced inside PriceKalman.effective_price().
 
         return (
             float(effective_price),

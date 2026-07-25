@@ -205,3 +205,44 @@ def test_none_none_is_agreement(logger):
     # live_provider == shadow_provider (both None) → agree
     logger.log_decision(None, None, None, None, None, None, None)
     assert logger.get_agreement_rate() == 1.0
+
+
+# ── Thread-safety test (cold-review major fix) ─────────────────────────────
+
+def test_concurrent_writes_thread_safe(tmp_path):
+    """Spawn N threads each logging M decisions. Verify row count and no exception."""
+    import threading
+    from src.shadow_logger import ShadowLogger
+
+    db = tmp_path / "concurrent.db"
+    logger = ShadowLogger(str(db))
+
+    N_THREADS = 10
+    M_PER_THREAD = 50
+    errors = []
+
+    def worker(tid):
+        try:
+            for i in range(M_PER_THREAD):
+                logger.log_decision(
+                    ts=time.time(),
+                    live_provider=f"prov_{tid % 3}",
+                    live_model="glm-5.2",
+                    shadow_provider="prov_opt",
+                    shadow_model="glm-5.2",
+                    shadow_cost=0.05,
+                    tokens=1000,
+                    reason=f"thread_{tid}_iter_{i}",
+                )
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(N_THREADS)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"Threads raised: {errors}"
+    assert logger.get_count() == N_THREADS * M_PER_THREAD
+    logger.close()

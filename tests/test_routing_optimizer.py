@@ -193,9 +193,10 @@ def test_peak_hours_triple_price():
 
     Uses the configured peak window [6, 10] inclusive with peak_mult=3.0.
     """
-    opt = RoutingOptimizer()  # default peak_hours_utc=(6,10), peak_mult=3.0
+    opt = RoutingOptimizer()
     pk = _pk(0.068)  # canonical z.ai off-peak $/M
-    opt.add_provider("zai_ours", pk, _ck(), quota_remaining=1_000_000)
+    opt.add_provider("zai_ours", pk, _ck(), quota_remaining=1_000_000,
+                     peak_hours_utc=(6, 10), peak_mult=3.0)
 
     offpeak = opt.route(difficulty="medium", hour=3)
     peak = opt.route(difficulty="medium", hour=8)
