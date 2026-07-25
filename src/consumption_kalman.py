@@ -1,6 +1,6 @@
 """consumption_kalman.py — Provider-agnostic token-burn Kalman filter.
 
-Extracted from ~/.hermes/bot/burn_predictor.py (``KalmanPredictor``, lines 65-138)
+Extracted from the production proxy's KalmanPredictor class (lines 65-138)
 and generalised. This is the Consumption Kalman from ADR-002 (Multi-Kalman
 Separation): it estimates how fast a provider is burning tokens and predicts
 quota exhaustion.
@@ -12,7 +12,7 @@ State vector (3-state constant-acceleration model, ADR-002 invariant #2):
         velocity     = first derivative  — trend of burn_rate
         acceleration = second derivative — curvature of the trend
 
-The original burn_predictor was a 2-state local-linear-trend filter
+The original production filter was a 2-state local-linear-trend filter
 ``[volume, velocity]``. Extending to 3-state adds an acceleration term so the
 filter can track accelerating/decelerating burn instead of only constant-rate
 trends, while remaining a textbook constant-acceleration kinematic model.
@@ -27,8 +27,8 @@ Scope / invariants (ADR-002):
   - Knows nothing about price, cost, peak hours, or health — those live in
     ``pricing_engine.py`` as deterministic multipliers applied AFTER this
     filter's output.
-  - Standalone: depends only on numpy + stdlib. No imports from zai_proxy,
-    hermes, multi_resource_kalman, sqlite, or any provider-specific code.
+  - Standalone: depends only on numpy + stdlib. No external dependencies
+    hermes internals, sqlite, or any provider-specific code.
 
 The unit of a "period" (hour, minute, call) is caller-defined — the filter is
 unit-agnostic. Pass consistent per-period token counts to ``update()``.
@@ -111,7 +111,7 @@ class ConsumptionKalman:
     def update(self, measurement: float) -> None:
         """Incorporate a new per-period token-consumption observation.
 
-        Implements the standard Kalman measurement update. The first call
+        Implements the standard predict-update Kalman cycle. The first call
         seeds the state position (no covariance update) so the filter can
         start from a single observation.
         """
@@ -125,6 +125,13 @@ class ConsumptionKalman:
             self._initialized = True
             return
 
+        # ── Predict step (time update) ───────────────────────────────────
+        # Without this, cross-covariance between position and velocity stays
+        # zero, and velocity/acceleration never get updated by measurements.
+        self.x = self.F @ self.x
+        self.P = self.F @ self.P @ self.F.T + self.Q
+
+        # ── Update step (measurement update) ─────────────────────────────
         z = np.array([[m]])
         # Innovation (prediction residual)
         y = z - self.H @ self.x
@@ -203,7 +210,7 @@ class ConsumptionKalman:
                 return (True, float(i - 1 + frac))
         return (False, None)
 
-    # ── Adaptive factory (mirrors burn_predictor._train_kalman) ───────────
+    # ── Adaptive factory ───────────────────────────────────────────────
 
     @classmethod
     def from_history(
@@ -218,7 +225,7 @@ class ConsumptionKalman:
         Auto-tunes ``R`` to the empirical observation variance and ``Q`` to a
         small fraction of ``R`` (burn rate should not swing wildly period to
         period). Explicit overrides win over the adaptive estimate. This is
-        the extraction of ``burn_predictor._train_kalman``'s adaptive path,
+        the extraction of the production proxy's adaptive training path,
         with a unit-agnostic floor (1.0) instead of the production 1e6 floor.
         """
         obs = [float(o) for o in observations]

@@ -170,11 +170,13 @@ def test_predict_cumulative_sums_horizon():
 
 
 def test_acceleration_tracks_trend():
-    """Linearly increasing burn → positive acceleration estimate."""
+    """Linearly increasing burn → positive velocity; acceleration near zero
+    (constant slope). Acceleration becomes positive for quadratic growth."""
     obs = [10_000.0 * (i + 1) for i in range(20)]  # 10k, 20k, ..., 200k
     kf = ConsumptionKalman.from_history(obs)
-    assert kf.acceleration > 0
     assert kf.velocity > 0
+    # Linear growth → acceleration should be small relative to velocity
+    assert abs(kf.acceleration) < abs(kf.velocity) * 0.1
 
 
 # ── Instance independence (one per provider) ─────────────────────────────────

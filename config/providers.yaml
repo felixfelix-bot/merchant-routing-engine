@@ -1,141 +1,94 @@
-# =============================================================================
-# Unified provider + pricing config for the merchant routing engine.
-# =============================================================================
-# Single source of truth that merges connection details (base_url, key_env)
-# with the pricing models from docs/price-first-kalman-plan.md §3.3 and the
-# ADRs in docs/decisions.md. Consumed by config_loader.py (Phase 1) and the
-# pricing/routing modules (pricing_engine.py, routing_optimizer.py).
-#
-# Pricing model types (plan §3.3, ADR-13 dynamic amortized pricing):
-#
-#   flat_rate_subscription
-#       base_rate = monthly_cost / cumulative_tokens_this_cycle × 1e6
-#       Per-token cost DECREASES as usage amortizes the subscription.
-#       Example: zai_ours.
-#
-#   cloud_flat_rate
-#       Same amortization formula as flat_rate_subscription, but for a cloud
-#       monthly plan (no peak multiplier). Example: ollama_cloud.
-#
-#   derived
-#       base_rate = upstream.base_rate × (1 + premium_pct / 100)
-#       Inherits its upstream's multiplier behaviour. Example: zai_friend.
-#
-#   per_token
-#       base_rate = fixed published rate (constant; no amortization).
-#       Example: ppq, openrouter.
-#
-# INVARIANT (ADR-004): every provider's effective_price is ALWAYS > 0.
-#   effective_price = base_rate × peak_mult(t) × scarcity_factor × health_factor
-#   `strategy.min_effective_price` is the global floor enforced on base_rate so
-#   the routing optimizer's argmin never hits a degenerate zero / div-by-zero.
-#   A provider is made unreachable only via health_factor = infinity (circuit
-#   breaker), NEVER via zero price.
-# =============================================================================
+# Provider definitions for the merchant routing engine
+# API keys are NEVER stored here — they come from environment variables.
 
+# ── z.ai (primary, flat-rate subscription) ──────────────────────────────────
+zai:
+  upstream: "https://api.z.ai/api/coding/paas/v4"
+  keys:
+    ours:
+      key_env: "ZAI_OUR_KEY"
+      monthly_fee_usd: 155
+      # Cost formula: 155 / tokens_consumed_this_month * 1e6 = $/M
+      # Decreases as tokens accumulate (amortization)
+      quota_api: "https://api.z.ai/api/coding/paas/v4/quota"
+      quota_windows: [5h, weekly, monthly]
+    friend:
+      key_env: "ZAI_API_KEY"
+      monthly_fee_usd: 0  # shared key, no direct cost to us
+      penalty_pct: 21     # 21% premium vs our key (ADR-005)
+      quota_api: "https://api.z.ai/api/coding/paas/v4/quota"
+      quota_windows: [5h, weekly, monthly]
 
-# -----------------------------------------------------------------------------
-# Strategy — global routing/optimization knobs.
-# -----------------------------------------------------------------------------
-strategy:
-  # Global floor on base_rate ($/M tokens). Applies to ALL providers including
-  # "free" ones, per ADR-004. 0.001 is small enough to always beat a real rate
-  # like 0.068/M but never break the optimizer's math.
-  min_effective_price: 0.001
+  # Peak hours: UTC 06:00–09:59 (Beijing 14:00–17:59)
+  # Price triples during peak (deterministic step, ADR-003)
+  peak_hours_utc: [6, 10]  # [start, end] inclusive
+  peak_multiplier: 3.0
 
-  # Difficulty bucket → minimum quality score (0-100) a provider must meet to
-  # be eligible. The routing optimizer filters out providers whose
-  # `quality_score` is below the threshold for the request's difficulty.
-  quality_thresholds:
-    simple: 60
-    medium: 75
-    complex: 85
+# ── Ollama Cloud (secondary, flat-rate with rate limits) ────────────────────
+ollama_cloud:
+  base_url: "https://api.ollama.cloud/v1"
+  key_env: "OLLAMA_CLOUD_KEY"
+  monthly_fee_usd: 100
+  # Cost formula: 100 / tokens_consumed_this_month * 1e6 = $/M
+  # When rate-limited (429): effective_price = infinity (health_factor)
+  rate_limit_resets_every_hours: 24
 
-  # Fallback model when the primary provider family is unavailable.
-  # deepseek-v4-flash ≈ $0.09/1M on both PPQ and OpenRouter (decisions.md §7).
-  fallback_model: "deepseek/deepseek-v4-flash"
-
-
-# -----------------------------------------------------------------------------
-# Providers — connection details + pricing model, one entry per provider/key.
-# API keys are NEVER stored here; `key_env` names the environment variable the
-# loader resolves to the live key at runtime.
-# -----------------------------------------------------------------------------
-providers:
-
-  # --- z.ai "ours" — operator's own flat-rate subscription (PRIMARY) ---------
-  # base_rate amortizes: €144 / cumulative_tokens_this_cycle (ADR-13).
-  # Peak hours (UTC 06-09) apply an instantaneous 3.0× step multiplier on top
-  # of base_rate (ADR-3, plan §3.1). Peak is a DETERMINISTIC multiplier, NOT
-  # Kalman state — preserves instant step change at the hour boundary.
-  zai_ours:
-    type: flat_rate_subscription
-    base_url: "https://api.z.ai/api/coding/paas/v4"
-    key_env: "ZAI_OUR_KEY"
-    currency: "EUR"
-    monthly_cost_eur: 144          # ≈ $155 USD at ~1.075 EUR/USD
-    peak_hours_utc: [6, 7, 8, 9]
-    peak_multiplier: 3.0
-    quality_score: 92              # glm-5.2 coding benchmark (decisions.md §7)
-    # Exponential backoff for z.ai key rotation / rate-limit recovery.
-    backoff:
-      base_seconds: 30
-      cap_seconds: 3600
-
-  # --- z.ai "friend" — shared key, no direct cost to the operator ------------
-  # Price is DERIVED from zai_ours with a 21% premium (plan §3.3 example:
-  # $0.068 × 1.21 = $0.082/M). Inherits peak hours/multiplier from upstream.
-  zai_friend:
-    type: derived
-    base_url: "https://api.z.ai/api/coding/paas/v4"
-    key_env: "ZAI_API_KEY"
-    upstream: zai_ours
-    premium_pct: 21
-    quality_score: 92              # same model (glm-5.2) as upstream
-    backoff:
-      base_seconds: 30
-      cap_seconds: 3600
-
-  # --- Ollama Cloud — flat-rate monthly cloud plan, NO peak multiplier -------
-  # base_rate amortizes: $100 / cumulative_tokens_this_cycle (ADR-13).
-  # peak_multiplier is fixed at 1.0 (cloud plan, no peak surcharge).
-  ollama_cloud:
-    type: cloud_flat_rate
-    base_url: "TODO: set Ollama Cloud endpoint before wiring"  # not yet known
-    key_env: "OLLAMA_CLOUD_KEY"
-    currency: "USD"
-    monthly_cost_usd: 100
-    peak_multiplier: 1.0           # explicitly no peak multiplier
-    quality_score: 80              # inferred; verify against served model
-
-  # --- PPQ — per-token pricing (deepseek-v4-flash) ---------------------------
-  # base_rate is the constant published rate; no amortization.
+# ── External per-token providers (last resort) ─────────────────────────────
+external:
   ppq:
-    type: per_token
     base_url: "https://api.ppq.ai/v1"
     key_env: "PPQ_API_KEY"
-    currency: "USD"
-    cost_per_1m_input: 0.09        # $/M input tokens
-    cost_per_1m_output: 0.19       # $/M output tokens
-    quality_score: 85              # deepseek-v4-flash (decisions.md §7)
+    pricing_model: per_token
+    # Fixed price — no Kalman needed (constant)
+    models:
+      deepseek-v4-flash:
+        cost_per_1m_input: 0.09
+        cost_per_1m_output: 0.19
 
-  # --- OpenRouter — per-token pricing (deepseek-v4-flash) --------------------
   openrouter:
-    type: per_token
     base_url: "https://openrouter.ai/api/v1"
     key_env: "OPENROUTER_API_KEY"
     headers:
       HTTP-Referer: "https://hermes.local"
       X-Title: "Hermes Agent"
-    currency: "USD"
-    cost_per_1m_input: 0.09        # $/M input tokens
-    cost_per_1m_output: 0.18       # $/M output tokens
-    quality_score: 85              # deepseek-v4-flash (decisions.md §7)
+    pricing_model: per_token
+    models:
+      deepseek-v4-flash:
+        cost_per_1m_input: 0.09
+        cost_per_1m_output: 0.18
 
+# ── Strategy configuration ─────────────────────────────────────────────────
+strategy:
+  # Minimum effective price — never zero, even for free providers (ADR-004)
+  min_effective_price: 0.001  # $/M
 
-# -----------------------------------------------------------------------------
-# Cooldowns — how long a provider stays "exhausted" / "unfunded" before the
-# engine re-checks it. Independent of the per-key backoff above.
-# -----------------------------------------------------------------------------
-exhausted_retry_seconds: 300       # z.ai key cooldown after a quota error
-unfunded_retry_seconds: 3600       # external provider cooldown after HTTP 402
+  # Quality thresholds — models below these tiers are filtered out
+  quality_tiers:
+    high: ["glm-5.2", "glm-4.5"]
+    standard: ["glm-4.5-air"]
+    low: ["glm-4.5-flash"]
+
+  # Default difficulty → tier mapping
+  difficulty_mapping:
+    high: high
+    medium: standard
+    low: low
+
+  # Fallback model when all z.ai keys exhausted
+  fallback_model: "deepseek/deepseek-v4-flash"
+
+  # Circuit breaker: trip after N consecutive failures
+  circuit_breaker_threshold: 5
+  circuit_breaker_cooldown_seconds: 300
+
+  # Exhausted key cooldown
+  exhausted_retry_seconds: 300
+  unfunded_retry_seconds: 3600
+
+# ── Shadow mode configuration (Phase 1) ────────────────────────────────────
+shadow_mode:
+  enabled: false  # set true when shadow logger is wired
+  db_path: "~/.hermes/bot/zai_usage.db"
+  log_table: "routing_shadow_decisions"
+  # Log both live (best_key) and shadow (routing_optimizer) decisions
+  # Compare after 48h to validate the price-first engine
