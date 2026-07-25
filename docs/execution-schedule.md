@@ -147,10 +147,40 @@ git push github master && ngit sync
 - Dispatch daemon checks resource gate + quota gate before spawning
 - If resources tight, tasks queue — they don't fail
 
+## Phase 2 — Advisor Mode (5 tasks)
+
+Wire shadow logger into live proxy (read-only), then add optimizer as
+hot-swappable advisor with feature flag. Profit tracking for savings visualization.
+
+### Dependency Graph
+
+```
+P2.1 (shadow wire-in) → P2.2 (advisor mode) ──┐
+                                               ↓
+P2.3 (profit tracker) → P2.4 (tests) ────────→ R2.1 (review)
+```
+
+### Task Breakdown
+
+| ID | Task | Assignee | Priority | Dependencies | Est. Time |
+|----|------|----------|----------|--------------|-----------|
+| P2.1 | Wire shadow_logger into zai_proxy.py (read-only tap) | worker-merchant | 0 | none | 20 min |
+| P2.2 | Wire routing_optimizer as ADVISOR (feature-flagged) | worker-merchant | 1 | P2.1 | 30 min |
+| P2.3 | Write src/profit_tracker.py — per-request savings | worker-merchant | 2 | none | 20 min |
+| P2.4 | Tests for Phase 2 modules | worker-merchant | 3 | P2.3 | 20 min |
+| R2.1 | Code review — proxy integration safety | worker-inspector | 4 | P2.2, P2.4 | 20 min |
+
+**Safety**: P2.1 is read-only (zero routing changes). P2.2 is feature-flagged
+(`touch ~/.hermes/bot/.optimizer_advisor_mode` to enable, `rm` to disable).
+best_key() fallback on ANY optimizer exception.
+
 ## Current Status
 
-- **P1.1**: RUNNING (dispatch daemon picked up)
-- **P1.2–P1.7, R1.1**: BLOCKED (waiting on dependencies)
-- **Resource gate**: PASS (warning level)
+- **Phase 1**: COMPLETE (8/8 tasks done, 128 tests pass)
+- **Phase 2**: IN PROGRESS
+  - P2.1 (shadow wire-in): READY
+  - P2.3 (profit tracker): READY
+  - P2.2, P2.4, R2.1: BLOCKED on dependencies
+- **Resource gate**: PASS
 - **Quota gate**: PASS
-- **Dispatch daemon**: RUNNING (PID 5593)
+- **Dispatch daemon**: RUNNING
