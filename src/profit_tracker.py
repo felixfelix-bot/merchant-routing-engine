@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 import queue
+import math
 import sqlite3
 import sys
 import threading
@@ -169,10 +170,12 @@ class ProfitTracker:
         """Build the INSERT row tuple. Pure / side-effect free / never raises."""
         if ts is None:
             ts = time.time()
-        # Coerce defensively — a stray None / NaN must not violate NOT NULL or
-        # poison an aggregate later.
+        # Coerce defensively — a stray None / NaN / inf must not violate
+        # NOT NULL (SQLite stores NaN as NULL) or poison an aggregate later.
         try:
             eff = float(effective_price)
+            if not math.isfinite(eff):
+                eff = 0.0
         except (TypeError, ValueError):
             eff = 0.0
         try:
@@ -186,6 +189,8 @@ class ProfitTracker:
         else:
             try:
                 nbp = float(next_best_price)
+                if not math.isfinite(nbp):
+                    nbp = None
             except (TypeError, ValueError):
                 nbp = None
             if nbp is None:
