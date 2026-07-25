@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from typing import Optional
 
@@ -77,7 +78,8 @@ class ShadowLogger:
         os.makedirs(parent or ".", exist_ok=True)
 
         # check_same_thread=False: the proxy may call from worker threads.
-        # A single connection keeps the hot path connection-free.
+        # We guard every DB access with _lock to ensure thread-safe writes.
+        self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         # Durable-enough, fast defaults for a low-volume decision log.
         self._conn.execute("PRAGMA journal_mode=WAL;")
@@ -96,7 +98,7 @@ class ShadowLogger:
         shadow_model,
         shadow_cost,
         tokens,
-        reason: str = "",
+        reason: Optional[str] = "",
         live_cost: Optional[float] = None,
     ) -> None:
         """Insert a row into ``routing_shadow_decisions``.
@@ -122,22 +124,23 @@ class ShadowLogger:
         if ts is None:
             ts = time.time()
         agree = 1 if live_provider == shadow_provider else 0
-        self._conn.execute(
-            _INSERT_SQL,
-            (
-                float(ts),
-                live_provider,
-                live_model,
-                shadow_provider,
-                shadow_model,
-                shadow_cost,
-                live_cost,
-                tokens,
-                agree,
-                reason,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                _INSERT_SQL,
+                (
+                    float(ts),
+                    live_provider,
+                    live_model,
+                    shadow_provider,
+                    shadow_model,
+                    shadow_cost,
+                    live_cost,
+                    tokens,
+                    agree,
+                    reason if reason is not None else "",
+                ),
+            )
+            self._conn.commit()
 
     # ── Read paths ───────────────────────────────────────────────────────
 
@@ -152,15 +155,17 @@ class ShadowLogger:
         perfect agreement.
         """
         if since_ts is None:
-            row = self._conn.execute(
-                "SELECT AVG(agree), COUNT(*) FROM routing_shadow_decisions;"
-            ).fetchone()
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT AVG(agree), COUNT(*) FROM routing_shadow_decisions;"
+                ).fetchone()
         else:
-            row = self._conn.execute(
-                "SELECT AVG(agree), COUNT(*) FROM routing_shadow_decisions "
-                "WHERE ts >= ?;",
-                (float(since_ts),),
-            ).fetchone()
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT AVG(agree), COUNT(*) FROM routing_shadow_decisions "
+                    "WHERE ts >= ?;",
+                    (float(since_ts),),
+                ).fetchone()
         avg, count = row
         if not count or avg is None:
             return 0.0
@@ -176,29 +181,56 @@ class ShadowLogger:
         data so callers can compare unconditionally.
         """
         if since_ts is None:
-            row = self._conn.execute(
-                "SELECT AVG(live_cost), AVG(shadow_cost), COUNT(*) "
-                "FROM routing_shadow_decisions;"
-            ).fetchone()
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT AVG(live_cost), AVG(shadow_cost), COUNT(*) "
+                    "FROM routing_shadow_decisions;"
+                ).fetchone()
         else:
-            row = self._conn.execute(
-                "SELECT AVG(live_cost), AVG(shadow_cost), COUNT(*) "
-                "FROM routing_shadow_decisions WHERE ts >= ?;",
-                (float(since_ts),),
-            ).fetchone()
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT AVG(live_cost), AVG(shadow_cost), COUNT(*) "
+                    "FROM routing_shadow_decisions WHERE ts >= ?;",
+                    (float(since_ts),),
+                ).fetchone()
         live_avg, shadow_avg, count = row
         if not count:
             return (0.0, 0.0)
         return (float(live_avg or 0.0), float(shadow_avg or 0.0))
 
+    def get_count(self, since_ts: Optional[float] = None) -> int:
+        """Total number of logged decisions (optionally since a timestamp)."""
+        if since_ts is None:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM routing_shadow_decisions;"
+                ).fetchone()
+        else:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM routing_shadow_decisions WHERE ts >= ?;",
+                    (float(since_ts),),
+                ).fetchone()
+        return row[0] if row else 0
+
     # ── Lifecycle ────────────────────────────────────────────────────────
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
     def close(self) -> None:
-        """Close the underlying connection. Idempotent."""
-        try:
-            self._conn.close()
-        except Exception:
-            pass
+        """Close the underlying connection. Thread-safe and idempotent."""
+        with self._lock:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
 
     def __del__(self):
-        self.close()
+        # Guard against partial init — _lock may not exist if __init__ failed
+        if hasattr(self, '_lock'):
+            self.close()
