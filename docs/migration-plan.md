@@ -1,123 +1,124 @@
-# Migration Plan — From zai_proxy.py to merchant-routing-engine
+# Migration Plan — zai_proxy.py → merchant-routing-engine
 
-## Current State (Phase 1)
+## Phase 1: Standalone Modules ✅ COMPLETE
 
-- Standalone module copies in `src/` mirror the logic in `zai_proxy.py`
-- `zai_proxy.py` is production, untouched
-- Tests validate the standalone modules
-- Felix works in this repo, documents, improves
+Built and tested the price-first routing engine as standalone modules.
 
-## Phase 2: Import Bridge
+**Deliverables:**
+- `src/price_kalman.py` — 2-state Kalman, deterministic peak/scarcity/health multipliers
+- `src/consumption_kalman.py` — 3-state Kalman, burn rate + exhaustion prediction
+- `src/routing_optimizer.py` — per-provider peak hours, 5-stage filter pipeline
+- `src/shadow_logger.py` — thread-safe SQLite dual-decision logger
+- `config/providers.yaml` — full pricing for 5 providers
 
-**Goal**: `zai_proxy.py` imports from the merchant-routing-engine package with automatic fallback to inline code.
-
-### Step 1: Install the package
-```bash
-cd ~/merchant-routing-engine
-pip install -e .  # editable install
-```
-
-### Step 2: Add import bridge to zai_proxy.py
-```python
-# At top of zai_proxy.py, replace inline implementations:
-try:
-    from merchant_routing_engine.key_health_tracker import (
-        is_key_healthy, mark_key_exhausted, mark_key_healthy, select_healthy_key
-    )
-    from merchant_routing_engine.provider_funding_tracker import (
-        is_provider_funded, mark_unfunded, mark_funded
-    )
-    from merchant_routing_engine.reasoning_handler import check_and_inject_reasoning
-    _USE_MRE = True
-except ImportError:
-    _USE_MRE = False
-    # Inline fallback (current code continues to work)
-```
-
-### Step 3: Deploy
-```bash
-# Backup current version
-cp ~/.hermes/bot/zai_proxy.py ~/.hermes/bot/zai_proxy.py.bak
-
-# Copy new version
-cp ~/hermes-orchestration/scripts/engine/zai_proxy.py ~/.hermes/bot/zai_proxy.py
-
-# Restart
-systemctl --user restart zai-proxy
-
-# Verify
-curl http://localhost:9099/health
-```
-
-### Revert if broken
-```bash
-cp ~/.hermes/bot/zai_proxy.py.bak ~/.hermes/bot/zai_proxy.py
-systemctl --user restart zai-proxy
-```
-
-### Validation checklist
-- [ ] Proxy starts without import errors
-- [ ] `/health` returns OK
-- [ ] Test request returns content
-- [ ] 429 handling works (watch journalctl for backoff)
-- [ ] Key health tracker marks/unmarks correctly
-- [ ] No TypeError crashes in journal
+**Tests:** 190/190 pass (including 10 e2e integration scenarios)
+**Coverage:** 90-98% on new modules
+**Pushed:** GitHub + ngit (tag: `v1-phase1`)
 
 ---
 
-## Phase 3: Full Migration
+## Phase 2: Shadow Mode ✅ COMPLETE
 
-**Goal**: `zai_proxy.py` is a thin HTTP handler. All routing logic lives in this repo.
+Live shadow comparison running in production. The optimizer's decision is logged alongside `best_key()` for every API call. Read-only — never affects routing.
 
-### Step 1: Move all logic to merchant-routing-engine
-- `best_key()` → `merchant_routing_engine.key_selector.best_key()`
-- `_attempt_retry()` → `merchant_routing_engine.backoff.attempt_retry()`
-- `_try_external_failover()` → `merchant_routing_engine.external_failover.try_external_failover()`
-- Response handling → `merchant_routing_engine.response_handler`
+**Deliverables:**
+- `src/shadow_hook.py` — persistent singleton bridging proxy to optimizer
+- `tests/test_shadow_hook.py` — 16 tests
+- `zai_proxy.py` patched (3 surgical changes):
+  1. Import bridge (try/except guarded)
+  2. `_snapshot_quota()` + `_snapshot_health()` helpers
+  3. Shadow hook call in `_proxy()` finally block
 
-### Step 2: Thin proxy
-```python
-# zai_proxy.py (future — ~100 lines)
-from merchant_routing_engine import ProxyServer
-server = ProxyServer(port=9099, config="config/providers.yaml")
-server.run()
-```
+**Deployed:** Proxy restarted, healthy, collecting data.
+**Backup:** `~/.hermes/bot/zai_proxy.py.bak-phase2`
 
-### Step 3: CI validation
-- Unit tests for each module
-- Integration test: send request, verify routing decision
-- Load test: 100 concurrent requests, verify no crashes
-- Chaos test: kill z.ai endpoint, verify failover
+### Early Shadow Data (first 2h, 111 decisions)
+
+| Metric | Value |
+|--------|-------|
+| Decisions logged | 111 |
+| Agreement rate | 21.6% |
+| Avg live cost | $0.361/M |
+| Avg shadow cost | $0.435/M |
+
+**Decision breakdown:**
+- `friend → ollama_cloud` (73x) — optimizer avoids unhealthy z.ai keys
+- `ours → ours` (24x) — agreement when both z.ai keys healthy + off-peak
+- `friend → ours` (14x) — optimizer correctly prefers cheaper ours key
+
+**Key insight:** Low agreement is EXPECTED — the optimizer makes different (smarter) decisions:
+1. Filters out unhealthy keys entirely (best_key retries them)
+2. Applies peak multiplier (best_key ignores peak pricing)
+3. Prefers ours over friend (ours is 21% cheaper)
+
+**Cost caveat:** Shadow cost appears higher because PriceKalman seeds haven't converged. Need real spend feed (Phase 3) for accurate cost comparison.
 
 ### Revert
+
 ```bash
-# Full revert to Phase 1
-cp ~/hermes-orchestration/scripts/engine/zai_proxy.py ~/.hermes/bot/zai_proxy.py
-pip uninstall merchant-routing-engine
+cp ~/.hermes/bot/zai_proxy.py.bak-phase2 ~/.hermes/bot/zai_proxy.py
 systemctl --user restart zai-proxy
 ```
+
+---
+
+## Phase 3: Feed Real Cost Data → Converge Kalman (NEXT)
+
+**Goal:** Feed actual $/M observations into PriceKalman so the cost comparison becomes meaningful.
+
+### Problem
+PriceKalman instances use static seed rates. They need real cost observations to converge:
+- z.ai ours: `€155/mo / actual_monthly_tokens` (amortization)
+- z.ai friend: ours × 1.21
+- ollama_cloud: `$100/mo / actual_monthly_tokens`
+- ppq/openrouter: fixed per-token pricing
+
+### Step 1: Daily cost feed
+Query `daily_spend` table (already populated by `_record_spend()`) once per refresh cycle:
+```python
+# In shadow_hook.py, add price update logic:
+SELECT spend_usd, token_count FROM daily_spend WHERE date = today AND tier = 'ours'
+effective_rate = spend_usd / (token_count / 1e6)  # $/M
+price_kalman.update(effective_rate)
+```
+
+### Step 2: Validate convergence
+After 24-48h with real cost data, re-check:
+- Agreement rate (should stabilize)
+- Cost comparison (should reflect real economics)
+- Peak-hour switching (should show optimizer saving money during peak)
+
+---
+
+## Phase 4: Make Optimizer Primary
+
+**Goal:** Replace `best_key()` with `optimizer.route()` as the primary routing decision.
+
+### Prerequisites
+- [ ] Phase 3 complete — Kalman filters converged with real cost data
+- [ ] 48h shadow soak showing optimizer is safe (no crashes, no bad decisions)
+- [ ] Agreement rate analysis showing optimizer is equal or better
+
+### Migration path
+1. Add feature flag: `~/.hermes/bot/.optimizer_primary`
+2. When flag exists: `chosen = optimizer.route().chosen_provider`
+3. When absent: `chosen = best_key()` (current behavior)
+4. Monitor for 24h with flag on
+5. Remove flag + old code once stable
+
+### Safety
+- Optimizer never returns None (always has fallback model)
+- Optimizer respects health state (filters tripped breakers)
+- Optimizer respects peak hours (avoids z.ai during UTC 6-10)
+- Revert: `rm ~/.hermes/bot/.optimizer_primary && systemctl --user restart zai-proxy`
 
 ---
 
 ## Version Tags
 
-Each phase gets a git tag for easy rollback:
-
 ```bash
-# Phase 1 (current)
-git tag v1-phase1-standalone
-
-# Phase 2
-git tag v2-phase2-import-bridge
-
-# Phase 3
-git tag v3-phase3-full-migration
-```
-
-Revert to any phase:
-```bash
-cd ~/merchant-routing-engine
-git checkout v1-phase1-standalone
-pip install -e .
-systemctl --user restart zai-proxy
+git tag v1-phase1    # Standalone modules
+git tag v2-phase2    # Shadow mode live
+git tag v3-phase3    # Real cost feed
+git tag v4-phase4    # Optimizer primary
 ```
