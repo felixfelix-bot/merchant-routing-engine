@@ -1,9 +1,10 @@
 # Price-First Kalman Routing — Comprehensive Plan (v2)
 
-**Date**: 2026-07-25
+**Date**: 2025-07-25
 **Author**: Felix (operator) + Hermes
 **Status**: AWAITING APPROVAL
 **Repo**: `merchant-routing-engine/`
+**ADRs**: ADR-001 through ADR-007 (see `docs/adr/`)
 
 ---
 
