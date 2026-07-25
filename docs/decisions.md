@@ -67,3 +67,75 @@
 **Rationale**: deepseek-v4-flash costs $0.09/1M on both PPQ and OpenRouter. glm-5.2 costs $0.42/1M on OpenRouter and $1.00/1M on PPQ. For a fallback (when the primary provider is down), the cheaper model is better — quality difference is marginal (85 vs 92 on coding benchmarks).
 
 **Trade-off**: deepseek-v4-flash is slightly lower quality than glm-5.2. For a fallback scenario (z.ai is down), this is acceptable — the alternative is no response at all.
+
+---
+
+## 8. Price-driven routing replaces hardcoded cascade
+
+**Decision**: All routing decisions are made by minimizing `effective_price` across all providers. Hardcoded cascade (peak-hour Ollama-first, z.ai-primary, external-failover) is removed.
+
+**Rationale**: Price captures all routing-relevant information (quota state, peak hours, health) in one comparable metric. A cascade requires N! code paths for N providers; price-based routing requires one comparison regardless of provider count.
+
+**Trade-off**: Requires accurate price computation. Bad prices = bad routing. Mitigated by shadow-mode validation before deployment.
+
+**SUPERSEDES ADR-2** (z.ai flat rate always primary).
+
+---
+
+## 9. Multiplier decomposition — peak/scarcity/health outside Kalman
+
+**Decision**: The effective price formula decomposes into `base_rate` (Kalman-smoothed) × `peak_mult` (deterministic) × `scarcity_mult` (deterministic) × `health_mult` (deterministic). Only `base_rate` passes through a Kalman filter.
+
+**Rationale**: Peak hours cause instantaneous step changes (1× → 3×). Kalman filters smooth transitions by design — putting peak inside the filter would lag the step by several update cycles. The operator explicitly wants immediate routing response to peak transitions, not gradual shifts. Scarcity and health have the same requirement.
+
+**Trade-off**: `base_rate` alone doesn't capture all price dynamics. But `base_rate` genuinely IS smooth (subscription_fee / cumulative_tokens amortizes monotonically), making it the ideal Kalman target.
+
+---
+
+## 10. Two Kalman types — base-rate and consumption
+
+**Decision**: Two distinct Kalman filter types, each with a narrow state vector. Base-Rate Kalman: `[amortized_cost, cost_velocity]`. Consumption Kalman: `[burn_rate, burn_acceleration]`. No combined filter.
+
+**Rationale**: These estimate fundamentally different quantities. Base-rate is a financial amortization (deterministic formula smoothed for noise). Consumption is a physical burn rate (stochastic, bursty). Combining them creates a non-linear state space requiring an Extended Kalman Filter (harder to tune, more fragile). Separation allows independent tuning, independent failure, and clean extensibility.
+
+**Trade-off**: More filter instances to manage. But each is simple, well-understood, and independently testable.
+
+---
+
+## 11. Consumer vs Merchant system separation
+
+**Decision**: The module has two entry points. `RoutingOptimizer` (consumer: "which provider do I use?") and `ProfitOptimizer` (merchant: "what do I charge?"). These can be used by different entities.
+
+**Rationale**: A merchant running a Routster node needs to set prices for customers. A customer (e.g., another Hermes agent) needs to choose between merchants. These are different optimization problems with different objectives (cost minimization vs profit maximization). Coupling them into one system conflates roles.
+
+**Trade-off**: Slight code duplication (merchant uses consumer internally). But the abstraction is clean: merchant = consumer + demand_estimation + margin.
+
+---
+
+## 12. Profit = traffic × margin, not just margin
+
+**Decision**: The merchant pricing optimizer maximizes `profit = traffic(price) × (price - cost)`, not just margin per request.
+
+**Rationale**: Lowering price below competitors increases traffic volume, which can increase total profit despite lower per-unit margin. A demand Kalman estimates price elasticity from observed traffic patterns. The optimal price is where marginal revenue equals marginal cost, not where margin is maximized.
+
+**Trade-off**: Requires demand data to estimate elasticity. Cold-start uses a default elasticity assumption. Over time, the Kalman converges to the true demand curve.
+
+---
+
+## 13. Dynamic amortized pricing — price decreases as usage increases
+
+**Decision**: For flat-rate subscriptions (z.ai, Ollama Cloud), `base_rate = subscription_fee / cumulative_tokens_this_cycle × 1e6`. This means per-token cost DECREASES as more tokens are consumed.
+
+**Rationale**: A flat €144/mo subscription that processes 1B tokens costs €0.144/M. The same subscription processing 5B tokens costs €0.029/M. The true cost per token is the amortized rate, not a static estimate. As usage increases, flat-rate providers become cheaper relative to per-token providers — the system naturally prefers them more as the billing cycle progresses.
+
+**Trade-off**: At start of billing cycle (few tokens), flat-rate appears expensive. This may route to per-token providers early. Corrects naturally as data accumulates.
+
+---
+
+## 14. Shadow-mode incremental deployment
+
+**Decision**: The price-first engine runs in shadow mode for 48h before any routing changes. It logs every decision alongside the live system's decision for comparison.
+
+**Rationale**: The engine needs real production traffic to validate price estimates, Kalman convergence, and routing quality. Shadow mode collects this data without risking live operations. Validation criteria: >99% decision coverage, >70% agreement with live, disagreement cases must show lower effective price.
+
+**Trade-off**: 48h delay before any improvement. But the alternative (deploying untested routing) risks production outages.

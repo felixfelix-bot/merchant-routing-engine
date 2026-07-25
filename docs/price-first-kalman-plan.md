@@ -1,6 +1,6 @@
 # Price-First Kalman Routing — Comprehensive Plan (v2)
 
-**Date**: 2025-07-25
+**Date**: 2026-07-25
 **Author**: Felix (operator) + Hermes
 **Status**: AWAITING APPROVAL
 **Repo**: `merchant-routing-engine/`
@@ -13,6 +13,8 @@ The live proxy (`zai_proxy.py`) routes API requests through a hardcoded cascade.
 
 The operator wants all routing decisions driven by price signals, with multiple Kalman filters feeding a routing optimizer. The module must be standalone — others can point their Hermes agents at it. Future: supports Routster nodes (resell LLM access for ecash).
 
+---
+
 ## 2. THREE-LAYER ARCHITECTURE
 
 ### Layer 1 — Cost Tracking (per key, private to key owner)
@@ -22,6 +24,33 @@ The operator wants all routing decisions driven by price signals, with multiple 
 A Kalman filter estimates the smooth component of the effective cost per million tokens. The filter tracks base_rate and its velocity — the amortized cost that changes slowly as tokens accumulate against a subscription.
 
 **Peak hours are NOT a Kalman input.** Peak multiplier is a deterministic step function of time, applied AFTER the Kalman output. This preserves instant step changes when peak starts/ends. The Kalman is responsible only for the smooth trend underneath.
+
+> **NOTE**: Peak multiplier, scarcity factor, and health factor are DETERMINISTIC multipliers applied OUTSIDE the Kalman filters. They are NOT Kalman state. This preserves instantaneous step changes (e.g., peak hour boundary) without Kalman smoothing lag.
+
+```
+                    ┌─────────────────────┐
+                    │   Cost Kalman       │
+                    │  [base_rate,        │
+                    │   rate_velocity]    │
+                    └────────┬────────────┘
+                             │ base_rate (smooth)
+                             ▼
+               ┌──────────────────────────────┐
+               │  DETERMINISTIC MULTIPLIER    │
+               │  LAYER  (pricing_engine.py)  │
+               │                              │
+               │  × peak_mult(clock)          │  ← step function (instant)
+               │  × scarcity_mult(quota)      │  ← ramp function (5min)
+               │  × health_mult(circuit)      │  ← instant (breaker trip)
+               └──────────────┬───────────────┘
+                              │ effective_price
+                              ▼
+               ┌──────────────────────────────┐
+               │  Routing Optimizer           │
+               │  (sort by effective_price,   │
+               │   filter unhealthy/exhausted)│
+               └──────────────────────────────┘
+```
 
 ```
 State: [base_rate, rate_velocity]
@@ -76,11 +105,68 @@ This layer is NOT a Kalman. It's a deterministic sort-and-filter:
 
 ---
 
-## 3. EFFECTIVE PRICE FORMULA
+## 3. EFFECTIVE PRICE SYSTEM
+
+### 3.1 Multi-Kalman Design
+
+> **NOTE**: Peak multiplier, scarcity factor, and health factor are DETERMINISTIC multipliers applied OUTSIDE the Kalman filters. They are NOT Kalman state. This preserves instantaneous step changes (e.g., peak hour boundary) without Kalman smoothing lag.
+
+The system uses two distinct Kalman filter types, each with a narrow state vector:
+
+**Base-Rate Kalman** — estimates the slow amortized cost per provider/key:
+
+```
+State: [base_rate, rate_velocity]
+  base_rate     = subscription_fee / cumulative_tokens_this_cycle × 1e6
+  rate_velocity = d(base_rate)/dt  (cost decreasing as tokens accumulate)
+
+Observes: tokens_this_cycle, billing_cost
+Updates:  on each request completion
+Output:   base_rate_now (smooth amortized cost per M tokens)
+```
+
+**Consumption Kalman** — predicts burn rate and quota exhaustion (extracted from `burn_predictor.py`):
+
+```
+State: [burn_rate, burn_acceleration]
+  burn_rate        = tokens_per_hour (current)
+  burn_acceleration = d(burn_rate)/dt
+
+Observes: tokens consumed per request, timestamps
+Retrained: batch retrain from history on each call
+Output:   predicted_exhaustion_time, quota_remaining_at_time(t)
+```
+
+**Multiplier Layer** (deterministic, in `pricing_engine.py`):
+
+```
+peak_mult(t)     = 3.0 if UTC hour in {6,7,8,9} else 1.0     [step function]
+scarcity_mult(q) = 1 + max(0, (quota_used_pct - 50) / 50)     [ramp 1.0→2.0]
+health_mult(c)   = ∞ if circuit breaker tripped else 1.0       [instant]
+```
+
+The multiplier layer sits between Kalman outputs and the routing optimizer. It is NOT part of any Kalman state.
+
+### 3.2 Why Two Kalman Types (Different Roles, NOT Time Constants)
+
+The two Kalman types are separated because they estimate fundamentally **different quantities**, not because they evolve at different speeds. Price CAN be abrupt (peak hour is a step change) — that is exactly why peak cannot be inside the Kalman.
+
+**Base-Rate Kalman** estimates the slow amortized cost (`subscription_fee / cumulative_tokens`). This IS smooth — it amortizes monotonically as tokens accumulate within a billing cycle. Kalman filtering genuinely reduces noise on this signal.
+
+**Consumption Kalman** predicts burn rate and exhaustion (the existing `burn_predictor.py`, extracted). It is batch-retrained on each call from history. Burn rate is stochastic and bursty, but the Kalman smooths the prediction to avoid overreacting to individual requests.
+
+**Peak, scarcity, and health are NOT Kalman state.** They are deterministic functions applied as multipliers AFTER the Kalman produces `base_rate`. The effective price steps instantly when peak hours begin or a circuit breaker trips — this is by design. The operator wants immediate routing response to these events, not Kalman-lagged gradual transitions.
+
+| Kalman Type | State Vector | What It Tracks | Smooth? | Retraining |
+|---|---|---|---|---|
+| Base-Rate | `[base_rate, rate_velocity]` | Amortized cost per M tokens | Yes (monotonic) | Online (per request) |
+| Consumption | `[burn_rate, burn_acceleration]` | Token burn & exhaustion time | Somewhat (bursty) | Batch (per call) |
+
+### 3.3 Effective Price Formula
 
 ```
 effective_price(provider, t) =
-    base_rate(provider, t)          ← from Cost Kalman (smooth)
+    base_rate(provider, t)          ← from Base-Rate Kalman (smooth)
   × peak_multiplier(t)              ← deterministic step function (instant)
   × scarcity_factor(provider, t)    ← deterministic (updates every 5min with quota)
   × health_factor(provider)         ← deterministic (instant on circuit breaker)
@@ -103,15 +189,112 @@ effective_price(provider, t) =
 
 As tokens increase, subscription rate decreases (amortization). This is the smooth trend the Kalman tracks.
 
+> **IMPORTANT**: `base_rate` is the ONLY Kalman-smoothed term. `peak_multiplier`, `scarcity_factor`, and `health_factor` are all deterministic functions applied instantaneously. `effective_price` can step-change instantly when peak hours begin/end or when a circuit breaker trips. This is intentional — the operator wants immediate routing response to these events, not Kalman-lagged transitions.
+
+### 3.4 Consumer vs Merchant Systems
+
+The module exposes two separate system roles with different entry points, because the optimization problems are fundamentally different.
+
+**Consumer System** (runs in Hermes proxy):
+
+```
+Input:  all provider prices + quotas + health
+Pipeline:
+  Base-Rate Kalman ──→ base_rate per provider
+  Consumption Kalman ──→ exhaustion prediction per provider
+  Deterministic Pricing Engine ──→ effective_price per provider
+  Routing Optimizer ──→ cheapest viable provider
+Output: {provider, key, model, effective_price}
+Question: "Which provider do I use?"
+```
+
+**Merchant System** (runs in Routster node):
+
+```
+Input:  upstream costs (via Consumer System), competitor prices, demand signal
+Pipeline:
+  Consumer System ──→ cheapest upstream cost
+  Demand Kalman ──→ demand curve estimate
+  Profit Optimizer ──→ customer-facing price
+Output: {customer_price, upstream_cost, expected_profit}
+Question: "What do I charge?"
+```
+
+**Key insight**: these can be run by two different entities. A merchant selling API access over Routster uses the Merchant System to set prices. A customer (e.g., another Hermes agent) uses the Consumer System to choose between merchants. The Consumer System is embedded within the Merchant System — a merchant needs to know its own cheapest upstream before it can set a customer price.
+
+### 3.5 Profit Optimization (Routster)
+
+Profit is NOT just margin per request. It is:
+
+```
+profit = traffic(price) × (price - cost)
+```
+
+Being cheaper than competitors increases traffic volume, which increases total profit even at lower per-unit margin. The Demand Kalman captures this elasticity.
+
+**Demand Kalman** — state `[demand_rate, price_elasticity]`, observes request volume at different price points:
+
+```
+demand_at_price(P) = demand_rate × (P / reference_price) ^ price_elasticity
+
+State: [demand_rate, price_elasticity]
+Observes: (price_offered, traffic_received) pairs per hour
+Output:   predicted traffic at any candidate price P
+```
+
+**Profit Optimizer** — finds the price that maximizes total profit:
+
+```
+customer_price = argmax(demand_at_price(P) × (P - upstream_cost))
+                 P
+```
+
+The optimizer respects a ceiling (must be below cheapest competitor to capture traffic) and a floor (must exceed upstream_cost).
+
+**Profit Tracking Table** — per-request profit is recorded and aggregatable per-key, per-provider, per-hour:
+
+```sql
+CREATE TABLE IF NOT EXISTS profit_log (
+    id INTEGER PRIMARY KEY,
+    ts REAL NOT NULL,
+    provider TEXT,
+    key_id TEXT,
+    customer_price REAL,    -- what customer paid (ecash)
+    upstream_cost REAL,     -- effective_price paid upstream
+    profit REAL,            -- customer_price - upstream_cost
+    tokens INTEGER
+);
+```
+
+**For internal use (no Routster yet)**: "profit" = savings vs next-cheapest alternative. If the engine routes to a provider at $0.069/M when the next option is $0.280/M, the "profit" (savings) is $0.211/M. This validates the engine's value even without external customers.
+
+### 3.6 Entry Points
+
+Two clean entry points for two different consumers of the module:
+
+```python
+# ── Consumer entry point (Hermes proxy) ──────────────────────
+from merchant_routing import RoutingOptimizer
+router = RoutingOptimizer(config="providers.yaml")
+decision = router.route(estimated_tokens=1000, difficulty="medium")
+# → {provider: "ollama_cloud", effective_price: 0.069, reason: "cheapest_viable"}
+
+# ── Merchant entry point (Routster node) ─────────────────────
+from merchant_routing import ProfitOptimizer
+merchant = ProfitOptimizer(config="providers.yaml", margin_strategy="elastic")
+price = merchant.set_price(model="glm-5.2")
+# → {customer_price: 0.12, upstream_cost: 0.069, expected_profit: 0.051}
+```
+
 ---
 
 ## 4. WHY THREE LAYERS (NOT ONE KALMAN)
 
 1. **Different actors**: Seller owns Layers 1+2. Buyer owns Layer 3. A seller can publish Layer 3 as a routing module without revealing their cost structure.
 
-2. **Different time scales**: Base rate evolves over hours (amortization). Peak/health change instantly. Demand curve evolves over days (market behavior). Cramming all into one state vector forces a single process model that's wrong for all dimensions.
+2. **Different roles, not time scales**: Base-rate and consumption estimate fundamentally different quantities (financial amortization vs physical burn rate). Peak, scarcity, and health are NOT estimation problems at all — they are deterministic functions. Cramming them into one state vector forces a single process model that's wrong for all dimensions.
 
-3. **Step changes**: Peak hours, circuit breakers, and rate-limit resets are step functions. Kalman filters smooth step changes. By keeping these as deterministic multipliers OUTSIDE the Kalman, we preserve instant response.
+3. **Step changes must be instant**: Peak hours, circuit breakers, and rate-limit resets are step functions. Kalman filters smooth step changes by design. By keeping these as deterministic multipliers OUTSIDE the Kalman, we preserve instant response. The operator explicitly wants immediate routing response to peak transitions, not gradual shifts.
 
 4. **Separation of concerns**: Cost Kalman doesn't need to know about demand. Pricing optimizer doesn't need to know about burn rate. Routing optimizer doesn't need to know about subscription costs.
 
@@ -182,34 +365,38 @@ Demand Kalman estimates the demand curve. Profit = traffic × margin. Maximizing
 
 ### Phase 1 — Shadow Mode (safe, no production changes)
 
+`price_kalman.py` estimates ONLY `base_rate` (amortized cost), NOT the full `effective_price`. The deterministic multipliers (peak, scarcity, health) are in `pricing_engine.py`, which sits between the Kalman and the optimizer.
+
 1. `config/providers.yaml` — all providers with pricing models
-2. `src/price_kalman.py` — 2-state Kalman per provider (base_rate + velocity)
-3. `src/consumption_kalman.py` — extracted from burn_predictor.py
-4. `src/routing_optimizer.py` — deterministic cost minimizer
-5. `src/shadow_logger.py` — read-only tap into proxy
-6. Tests: price_kalman + routing_optimizer
-7. Wire shadow_logger into zai_proxy.py (read-only)
-8. Run 48h, validate
+2. `src/price_kalman.py` — Base-Rate Kalman: 2-state `[base_rate, rate_velocity]` per provider/key
+3. `src/consumption_kalman.py` — Consumption Kalman: `[burn_rate, burn_acceleration]`, extracted from `burn_predictor.py`
+4. `src/pricing_engine.py` — deterministic multiplier layer: applies peak/scarcity/health multipliers to Kalman `base_rate` to produce `effective_price`
+5. `src/routing_optimizer.py` — deterministic cost minimizer (sorts by `effective_price`)
+6. `src/shadow_logger.py` — read-only tap into proxy
+7. Tests: price_kalman + pricing_engine + routing_optimizer
+8. Wire shadow_logger into zai_proxy.py (read-only)
+9. Run 48h, validate
 
 ### Phase 2 — Advisor Mode (low risk, hot-swappable)
 
-1. Modify do_POST: call routing_optimizer first, best_key() fallback
+1. Modify do_POST: call routing_optimizer first, `best_key()` fallback
 2. Remove hardcoded peak-hour check
 3. Run 72h, compare
 
 ### Phase 3 — Primary Mode (the goal)
 
-1. Remove best_key() entirely
+1. Remove `best_key()` entirely
 2. Routing optimizer is the only router
 3. Remove cascade logic
 
 ### Phase 4 — Standalone Module + Routster
 
-1. `src/margin_layer.py` — profit optimizer with demand Kalman
-2. `src/demand_kalman.py` — estimates demand curve from observations
-3. Pip-installable package
-4. Example configs: Hermes, TollGate, Routster
-5. Full documentation
+1. `src/demand_kalman.py` — Demand Kalman: `[demand_rate, price_elasticity]`, estimates demand curve from `(price, traffic)` observations
+2. `src/profit_tracker.py` — per-request profit logging + aggregation (per-key, per-provider, per-hour)
+3. `src/margin_layer.py` — profit optimizer with demand Kalman
+4. Pip-installable package
+5. Example configs: Hermes, TollGate, Routster
+6. Full documentation
 
 ---
 
@@ -221,20 +408,24 @@ merchant-routing-engine/
 │   ├── providers.yaml
 │   └── strategy.yaml
 ├── src/
-│   ├── price_kalman.py
-│   ├── consumption_kalman.py
-│   ├── routing_optimizer.py
-│   ├── shadow_logger.py
-│   ├── demand_kalman.py        # Phase 4
-│   ├── margin_layer.py          # Phase 4
-│   └── config_loader.py
+│   ├── price_kalman.py             # Base-Rate Kalman (amortized cost)
+│   ├── consumption_kalman.py       # Consumption Kalman (burn rate)
+│   ├── pricing_engine.py           # DETERMINISTIC multipliers (peak/scarcity/health)
+│   ├── routing_optimizer.py        # sort & filter by effective_price
+│   ├── shadow_logger.py            # read-only tap for Phase 1
+│   ├── config_loader.py
+│   ├── demand_kalman.py            # Phase 4: Routster demand estimation
+│   ├── profit_tracker.py           # Phase 4: Routster profit tracking per request
+│   └── margin_layer.py             # Phase 4: profit optimizer
 ├── tests/
 │   ├── test_price_kalman.py
 │   ├── test_consumption_kalman.py
+│   ├── test_pricing_engine.py
 │   ├── test_routing_optimizer.py
 │   └── test_shadow_logger.py
 ├── docs/
 │   ├── price-first-kalman-plan.md  # This document
+│   ├── decisions.md                # ADRs
 │   ├── architecture.md
 │   └── adr/
 │       ├── ADR-001-price-first-routing.md
@@ -250,3 +441,18 @@ merchant-routing-engine/
 ├── README.md
 └── pyproject.toml
 ```
+
+---
+
+## 9. RELATION TO EXISTING CODE
+
+| Existing Code | Fate in Price-First Engine | Phase |
+|---|---|---|
+| `zai_proxy.py route_request()` | Replaced by `routing_optimizer.py` (price-based sort/filter) | Phase 1 (shadow), Phase 3 (primary) |
+| `zai_proxy.py best_key()` | Phase 2: fallback when optimizer unavailable. Phase 3: removed entirely | Phase 2 → Phase 3 |
+| `zai_proxy.py _is_peak_hour()` | Replaced by `peak_multiplier` in `pricing_engine.py` (NOT in price Kalman) | Phase 1 |
+| `zai_proxy.py` hardcoded cascade | Removed. All routing via `effective_price` comparison | Phase 3 |
+| `burn_predictor.py` | Extracted into `consumption_kalman.py` | Phase 1 |
+| `key_health_tracker.py` | Feeds `health_factor` into `pricing_engine.py` | Phase 1 |
+| `provider_funding_tracker.py` | Feeds `scarcity_factor` into `pricing_engine.py` | Phase 1 |
+| Cost matrix in `zai_proxy.py` | Replaced by `base_rate` computation in `price_kalman.py` | Phase 1 |
