@@ -42,6 +42,7 @@ from src.consumption_kalman import ConsumptionKalman
 from src.routing_optimizer import RoutingOptimizer
 from src.provider_names import normalize_provider_name
 from src.pricing_engine import pace_factor, pace_factor_multi
+from src.quota_window_extractor import extract_quota_windows
 
 __all__ = ["PrimaryRouter"]
 
@@ -152,8 +153,9 @@ class PrimaryRouter:
                 tuples ``(quota_used, quota_total, time_elapsed_pct,
                 burn_rate, window_duration_hours)``. When provided, the
                 pace_factor is computed per-provider and passed to the
-                optimizer. When None, pace_mult defaults to 1.0 (no
-                adjustment).
+                optimizer. When None, pace_windows are automatically
+                built from quota_state + ConsumptionKalman burn rates
+                via :meth:`_build_pace_windows` (ADR-008).
         """
         try:
             return self._do_route(model, tokens, quota_state, health_state, difficulty,
@@ -180,6 +182,9 @@ class PrimaryRouter:
             health_state = {}
         if not failure_counts:
             failure_counts = {}
+        if not pace_windows:
+            pace_windows = self._build_pace_windows(quota_state)
+
         if not pace_windows:
             pace_windows = {}
 
@@ -257,6 +262,122 @@ class PrimaryRouter:
         # ollama_cloud / ppq / openrouter / deepinfra / fallback → None
         # Proxy's failover path will reach the correct provider
         return None
+
+    def _build_pace_windows(
+        self,
+        quota_state: dict[str, Any],
+    ) -> dict[str, list[tuple[float, float, float, float, float]]]:
+        """Build pace_windows from quota_state + ConsumptionKalman burn rates.
+
+        When the caller does not supply explicit ``pace_windows``, this method
+        automatically constructs them by:
+
+        1. Extracting burn rates from the router's own ``ConsumptionKalman``
+           instances (``self._consumption_kalmans[name].burn_rate``).
+        2. Converting the proxy's ``quota_state`` format to the
+           ``quota_cache`` format expected by ``extract_quota_windows``.
+        3. Calling ``extract_quota_windows`` per provider to build the
+           pace_factor input tuples.
+
+        Args:
+            quota_state: Dict of provider → {used_pct, remaining, total}.
+                This is the format produced by the proxy's
+                ``_snapshot_quota()`` function.
+
+        Returns:
+            Dict mapping provider name → list of
+            ``(quota_used, quota_total, time_elapsed_pct, burn_rate,
+              window_duration_hours)`` tuples. May be empty if no valid
+            windows could be extracted.
+        """
+        if not quota_state:
+            return {}
+
+        if not isinstance(quota_state, dict):
+            return {}
+
+        result: dict[str, list[tuple[float, float, float, float, float]]] = {}
+
+        for name, ck in self._consumption_kalmans.items():
+            qs = quota_state.get(name, {})
+            if not qs:
+                continue
+            if not isinstance(qs, dict):
+                continue
+
+            # Only providers with finite quota totals have meaningful windows
+            total = qs.get("total", _QUOTA_TOTALS.get(name, float("inf")))
+            if total == float("inf"):
+                continue
+
+            used_pct = qs.get("used_pct")
+            if used_pct is None:
+                continue
+
+            # Safely convert used_pct to int — skip on garbage
+            try:
+                used_pct = int(used_pct)
+            except (TypeError, ValueError):
+                continue
+
+            # Convert quota_state entry to the quota_cache format expected
+            # by extract_quota_windows:
+            #   quota_cache[key] = (windows_list, timestamp)
+            # Each window dict needs: name, used_pct, resets_at, window_hours.
+            #
+            # The proxy's quota_state provides used_pct and total, but not
+            # resets_at or window_hours. We synthesize a 5-hour window using
+            # the current time as the window midpoint, which gives a
+            # reasonable elapsed_pct estimate. The primary signal driving
+            # pace_factor is used_pct + burn_rate, not the exact time
+            # elapsed, so a rough elapsed estimate is acceptable.
+            now = time.time()
+            window_hours = 5
+            # Assume the window started 2.5h ago (midpoint) → elapsed ≈ 0.5
+            # This is a conservative default; the real proxy passes actual
+            # resets_at values. When the proxy provides resets_at directly,
+            # we use it.
+            resets_at = qs.get("resets_at")
+            if resets_at is None:
+                # Synthetic window: assume 50% elapsed
+                resets_at = int(now + window_hours * 3600 * 0.5)
+
+            windows_list = [{
+                "name": "5-hour",
+                "type": "TOKENS_LIMIT",
+                "used_pct": int(used_pct),
+                "resets_at": int(resets_at),
+                "window_hours": window_hours,
+            }]
+
+            # Also add a weekly window if weekly info is present
+            weekly_used_pct = qs.get("weekly_used_pct")
+            if weekly_used_pct is not None:
+                weekly_hours = 168
+                weekly_resets_at = qs.get("weekly_resets_at")
+                if weekly_resets_at is None:
+                    weekly_resets_at = int(now + weekly_hours * 3600 * 0.5)
+                windows_list.append({
+                    "name": "weekly",
+                    "type": "TOKENS_LIMIT",
+                    "used_pct": int(weekly_used_pct),
+                    "resets_at": int(weekly_resets_at),
+                    "window_hours": weekly_hours,
+                })
+
+            quota_cache_entry = (windows_list, now)
+            burn_rate = ck.burn_rate
+
+            tuples = extract_quota_windows(
+                quota_cache={name: quota_cache_entry},
+                burn_rate=burn_rate,
+                quota_total=float(total),
+            )
+
+            if tuples:
+                result[name] = tuples
+
+        return result
 
     @staticmethod
     def _model_to_difficulty(model: str | None) -> str:
