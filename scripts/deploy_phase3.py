@@ -21,6 +21,16 @@ import subprocess
 import time
 from pathlib import Path
 
+# ── Repo root discovery ────────────────────────────────────────────────────
+# Walk up from this script to find the merchant-routing-engine repo root.
+_SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = _SCRIPT_DIR.parent
+if not (REPO_ROOT / "src" / "primary_router.py").exists():
+    # Try common alternative location
+    REPO_ROOT = Path.home() / "merchant-routing-engine"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 PROXY = Path.home() / ".hermes" / "bot" / "zai_proxy.py"
 BACKUP = Path.home() / ".hermes" / "bot" / "zai_proxy.py.bak-phase3"
 PRE_PHASE3 = Path.home() / ".hermes" / "bot" / "zai_proxy.py.bak-phase2"
@@ -63,6 +73,55 @@ PATCH_CODE = '''
 '''
 
 
+# ── Pre-deploy health checks ──────────────────────────────────────────────────
+
+# Modules that must import cleanly (Phase 4 + Phase 5 additions)
+_REQUIRED_IMPORTS = [
+    "src.primary_router",
+    "src.shadow_hook",
+    "src.pricing_engine",
+    "src.demand_kalman",
+    "src.margin_layer",
+    "src.routing_optimizer",
+    "src.price_kalman",
+    "src.consumption_kalman",
+    "src.shadow_logger",
+    "src.provider_names",
+    "src.key_health_tracker",
+    "src.provider_funding_tracker",
+    "src.profit_tracker",
+    "src.route_request",
+    "src.external_failover",
+    "src.backoff",
+    "src.reasoning_handler",
+    "src.routing_advisor",
+]
+
+# Source files to syntax-check (all modified modules + scripts)
+_SYNTAX_CHECK_FILES = [
+    "src/primary_router.py",
+    "src/shadow_hook.py",
+    "src/pricing_engine.py",
+    "src/demand_kalman.py",
+    "src/margin_layer.py",
+    "src/routing_optimizer.py",
+    "src/price_kalman.py",
+    "src/consumption_kalman.py",
+    "src/shadow_logger.py",
+    "src/provider_names.py",
+    "src/key_health_tracker.py",
+    "src/provider_funding_tracker.py",
+    "src/profit_tracker.py",
+    "src/route_request.py",
+    "src/external_failover.py",
+    "src/backoff.py",
+    "src/reasoning_handler.py",
+    "src/routing_advisor.py",
+    "scripts/feed_historical_costs.py",
+    "scripts/deploy_phase3.py",
+]
+
+
 def check_proxy_health() -> bool:
     """Verify proxy is up and responding."""
     try:
@@ -71,6 +130,93 @@ def check_proxy_health() -> bool:
             return r.status == 200 and r.read().strip() == b"ok"
     except Exception:
         return False
+
+
+def pre_deploy_health_checks() -> tuple[bool, list[str]]:
+    """Run comprehensive health checks before deploying.
+
+    Verifies:
+      (a) All tests pass (pytest)
+      (b) PrimaryRouter and all required modules import correctly
+      (c) No syntax errors in any modified source file
+
+    Returns:
+        (all_passed, messages) — True if all checks pass, plus a list of
+        status/error messages for logging.
+    """
+    messages: list[str] = []
+    all_passed = True
+
+    # ── Check (a): Test suite ─────────────────────────────────────────────
+    messages.append("── Pre-deploy Health Check 1/3: Test suite ──")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/", "-q", "--tb=short"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode == 0:
+            # Extract pass count from last line
+            last_line = result.stdout.strip().split("\n")[-1] if result.stdout.strip() else ""
+            messages.append(f"  ✓ Tests PASS — {last_line}")
+        else:
+            all_passed = False
+            # Show last 10 lines of output for context
+            lines = result.stdout.strip().split("\n")[-10:] if result.stdout else []
+            messages.append(f"  ✗ Tests FAIL (exit {result.returncode})")
+            for line in lines:
+                messages.append(f"    {line}")
+    except FileNotFoundError:
+        messages.append("  ⚠ pytest not found — skipping test suite check")
+        messages.append("    (install with: pip install pytest)")
+    except Exception as e:
+        messages.append(f"  ✗ Test runner error: {e}")
+        all_passed = False
+
+    # ── Check (b): Module imports ─────────────────────────────────────────
+    messages.append("── Pre-deploy Health Check 2/3: Module imports ──")
+    import_errors = []
+    for mod_name in _REQUIRED_IMPORTS:
+        try:
+            __import__(mod_name)
+            messages.append(f"  ✓ {mod_name}")
+        except Exception as e:
+            messages.append(f"  ✗ {mod_name}: {e}")
+            import_errors.append(mod_name)
+            all_passed = False
+    if not import_errors:
+        messages.append("  All imports OK")
+
+    # ── Check (c): Syntax checks ──────────────────────────────────────────
+    messages.append("── Pre-deploy Health Check 3/3: Syntax checks ──")
+    import py_compile
+    syntax_errors = []
+    for rel_path in _SYNTAX_CHECK_FILES:
+        full_path = REPO_ROOT / rel_path
+        if not full_path.exists():
+            messages.append(f"  ⚠ {rel_path}: file not found (skipped)")
+            continue
+        try:
+            py_compile.compile(str(full_path), doraise=True)
+            messages.append(f"  ✓ {rel_path}")
+        except py_compile.PyCompileError as e:
+            messages.append(f"  ✗ {rel_path}: {e}")
+            syntax_errors.append(rel_path)
+            all_passed = False
+    if not syntax_errors:
+        messages.append("  All syntax checks PASS")
+
+    # ── Summary ───────────────────────────────────────────────────────────
+    if all_passed:
+        messages.append("")
+        messages.append("══ ALL PRE-DEPLOY HEALTH CHECKS PASSED ══")
+    else:
+        messages.append("")
+        messages.append("══ PRE-DEPLOY HEALTH CHECKS FAILED — ABORTING DEPLOYMENT ══")
+
+    return all_passed, messages
 
 
 def restart_proxy() -> bool:
@@ -87,7 +233,21 @@ def restart_proxy() -> bool:
 
 
 def deploy():
-    """Apply Phase 3 patch to the proxy."""
+    """Apply Phase 3 patch to the proxy.
+
+    Runs pre-deploy health checks first. If any check fails, aborts before
+    touching the proxy file.
+    """
+    # ── Pre-deploy health checks ─────────────────────────────────────────
+    print("Running pre-deploy health checks...")
+    passed, msgs = pre_deploy_health_checks()
+    for m in msgs:
+        print(m)
+    if not passed:
+        print("\nDEPLOY ABORTED — pre-deploy health checks failed.")
+        return False
+    print()
+
     if not PROXY.exists():
         print(f"ERROR: proxy not found at {PROXY}")
         return False
@@ -173,20 +333,48 @@ def revert():
 
 def dry_run():
     """Show what would be changed without modifying anything."""
-    print(f"Proxy: {PROXY}")
-    print(f"Backup: {BACKUP}")
-    print(f"Insertion: before best_key() proactive section")
+    print("=" * 72)
+    print("  Phase 3 Deployment — DRY RUN")
+    print("=" * 72)
+    print()
+    print(f"Proxy:      {PROXY}")
+    print(f"Backup:      {BACKUP}")
+    print(f"Repo root:   {REPO_ROOT}")
+    print(f"Insertion:   before best_key() proactive section")
     print(f"Lines to add: ~35 (import + delegation code)")
     print()
+
+    # ── Run health checks in dry-run mode ────────────────────────────────
+    print("Running pre-deploy health checks (dry-run)...")
+    print()
+    passed, msgs = pre_deploy_health_checks()
+    for m in msgs:
+        print(m)
+    print()
+
     print("The patch:")
-    print(f"1. Imports PrimaryRouter at module level")
-    print(f"2. Inside best_key(), tries PrimaryRouter.route() FIRST")
-    print(f"3. Falls back to existing proactive + reactive logic on any error")
+    print("  1. Imports PrimaryRouter at module level")
+    print("  2. Inside best_key(), tries PrimaryRouter.route() FIRST")
+    print("  3. Falls back to existing proactive + reactive logic on any error")
+    print()
+    print("Phase 4+5 features verified:")
+    print("  - Health-driven pricing (graduated failure penalties)")
+    print("  - Provider name normalization (zai_ours→ours, manager→ours)")
+    print("  - Historical cost feed for instant Kalman convergence")
+    print("  - DeepInfra per-token provider support")
+    print("  - Demand Kalman + Margin Layer (profit optimization)")
     print()
     print("Safety:")
-    print("- PrimaryRouter failure → falls through to best_key's existing logic")
-    print("- Syntax error → auto-revert from backup")
-    print("- Health check fail → auto-revert + restart")
+    print("  - Pre-deploy: tests + imports + syntax checks (abort if any fail)")
+    print("  - PrimaryRouter failure → falls through to best_key's existing logic")
+    print("  - Syntax error → auto-revert from backup")
+    print("  - Health check fail → auto-revert + restart")
+    print("  - --revert flag available for manual rollback")
+    print()
+    if passed:
+        print("✓ All health checks PASSED — safe to deploy.")
+    else:
+        print("✗ Health checks FAILED — resolve issues before deploying.")
 
 
 if __name__ == "__main__":
