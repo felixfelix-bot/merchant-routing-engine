@@ -56,8 +56,30 @@ def health_factor(breaker_tripped: bool) -> float:
 
     Infinity makes the provider UNREACHABLE (infinite cost), not zero-cost.
     ADR-004 invariant 4.
+
+    .. deprecated::
+        Use :func:`health_pricing_factor` for graduated penalties.
     """
     return float("inf") if breaker_tripped else 1.0
+
+
+def health_pricing_factor(failure_count: int = 0, breaker_tripped: bool = False) -> float:
+    """Graduated health multiplier based on failure count.
+
+    Re-exports the implementation from pricing_engine to maintain the
+    single-source-of-truth principle. The routing optimizer imports from
+    this module, so we expose it here.
+
+    Scale:
+        breaker_tripped          → +inf   (circuit breaker: unreachable)
+        failure_count > 10       → +inf   (circuit breaker: unreachable)
+        6 ≤ failure_count ≤ 10   → 10.0   (severe penalty)
+        3 ≤ failure_count ≤ 5    → 3.0    (moderate penalty)
+        1 ≤ failure_count ≤ 2    → 1.5    (soft penalty, transient)
+        failure_count ≤ 0        → 1.0    (no penalty)
+    """
+    from src.pricing_engine import health_pricing_factor as _hpf
+    return _hpf(failure_count, breaker_tripped)
 
 
 # ── PriceKalman: 2-state Kalman filter ──────────────────────────────────────

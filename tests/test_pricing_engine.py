@@ -119,8 +119,12 @@ class TestHealthFactor:
         assert health_factor(True, recent_429=3) == 1.0
 
     def test_429_above_threshold_is_penalised(self):
-        assert health_factor(True, recent_429=4) == 2.0
-        assert health_factor(True, recent_429=50) == 2.0
+        # Under graduated health pricing, 4 recent 429s → failure_count=4
+        # → falls in 3-5 range → 3.0x (was 2.0x under old binary system).
+        # The old flat 2.0x is replaced by the graduated scale, which is
+        # stronger because a 429 burst is a clear signal of trouble.
+        assert health_factor(True, recent_429=4) == 3.0
+        assert health_factor(True, recent_429=50) == math.inf
 
     def test_default_recent_429_is_zero(self):
         assert health_factor(True) == 1.0
@@ -146,9 +150,11 @@ class TestComputeEffectivePrice:
         assert price == pytest.approx(0.306)
 
     def test_429_penalty_applied(self):
-        # 0.068 * 1.0 (off-peak) * 1.0 (50%) * 2.0 (429>3) = 0.136
+        # Under graduated health pricing, 4 recent 429s → failure_count=4
+        # → 3.0x penalty (was 2.0x under old binary system).
+        # 0.068 * 1.0 (off-peak) * 1.0 (50%) * 3.0 (graduated penalty) = 0.204
         price = compute_effective_price(0.068, "zai", 50, True, recent_429=4, hour_utc=12)
-        assert price == pytest.approx(0.136)
+        assert price == pytest.approx(0.204)
 
     def test_unhealthy_preserves_inf(self):
         # ADR-004: inf is the unreachable signal and must NOT be floored
@@ -196,3 +202,36 @@ class TestComputeEffectivePrice:
         # smoke: None hour resolves to current hour without error
         price = compute_effective_price(0.068, "zai", 50, True)
         assert price > 0
+
+    # ── New graduated health pricing interface ─────────────────────────────
+
+    def test_graduated_soft_penalty(self):
+        """failure_count=1 → 1.5x penalty."""
+        price = compute_effective_price(0.068, "zai", 50, hour_utc=12, failure_count=1)
+        assert price == pytest.approx(0.068 * 1.5)
+
+    def test_graduated_moderate_penalty(self):
+        """failure_count=4 → 3.0x penalty."""
+        price = compute_effective_price(0.068, "zai", 50, hour_utc=12, failure_count=4)
+        assert price == pytest.approx(0.068 * 3.0)
+
+    def test_graduated_severe_penalty(self):
+        """failure_count=8 → 10.0x penalty."""
+        price = compute_effective_price(0.068, "zai", 50, hour_utc=12, failure_count=8)
+        assert price == pytest.approx(0.068 * 10.0)
+
+    def test_graduated_circuit_breaker(self):
+        """failure_count=15 → +inf (circuit breaker)."""
+        price = compute_effective_price(0.068, "zai", 50, hour_utc=12, failure_count=15)
+        assert price == math.inf
+
+    def test_breaker_tripped_explicit(self):
+        """breaker_tripped=True → +inf regardless of failure_count."""
+        price = compute_effective_price(0.068, "zai", 50, hour_utc=12,
+                                         failure_count=0, breaker_tripped=True)
+        assert price == math.inf
+
+    def test_new_interface_no_legacy_args(self):
+        """New interface works without is_healthy at all."""
+        price = compute_effective_price(0.068, "zai", 50, hour_utc=12, failure_count=2)
+        assert price == pytest.approx(0.068 * 1.5)

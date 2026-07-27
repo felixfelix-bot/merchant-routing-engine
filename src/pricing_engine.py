@@ -48,12 +48,28 @@ PEAK_MULTIPLIER: float = 3.0
 SCARCITY_ONSET_PCT: float = 50.0   # at/below this → scarcity_factor == 1.0
 SCARCITY_FULL_PCT: float = 100.0   # quota % at which scarcity_factor == 2.0
 
-# ── ADR-003/004: deterministic health/circuit-breaker multiplier ────────────
-# A tripped circuit breaker (is_healthy=False) makes a provider unreachable
-# (price = +inf). A burst of HTTP 429s (>3) applies a soft 2.0x penalty before
-# the breaker fully trips.
-HEALTH_429_THRESHOLD: int = 3      # strictly greater than this → penalty
-HEALTH_429_PENALTY: float = 2.0
+# ── ADR-003/004: graduated health/circuit-breaker multiplier ──────────────
+# Replaces the binary health_factor with a five-tier graduated penalty
+# based on failure_count. The old 429 burst penalty (2.0x for >3 recent
+# 429s) is subsumed: 429s now increment failure_count, so a burst naturally
+# falls into the 3-5 range (3.0x) — a stronger, more precise signal.
+#
+# Graduated scale:
+#   0 failures       → 1.0x  (no penalty)
+#   1-2 failures     → 1.5x  (soft penalty, transient issue)
+#   3-5 failures     → 3.0x  (moderate penalty, clearly problematic)
+#   6-10 failures    → 10.0x (severe penalty, almost unreachable)
+#   >10 failures     → +inf  (circuit breaker, fully unreachable)
+#   breaker_tripped  → +inf  (circuit breaker, fully unreachable)
+#
+# This is price-based regulation: a struggling key sees its effective price
+# rise progressively until the optimizer naturally routes traffic away.
+# Only after extreme failure counts (>10) or an explicit breaker trip does
+# the price go to infinity (full circuit breaker).
+HEALTH_PENALTY_SOFT: float = 1.5      # 1-2 failures
+HEALTH_PENALTY_MODERATE: float = 3.0   # 3-5 failures
+HEALTH_PENALTY_SEVERE: float = 10.0    # 6-10 failures
+HEALTH_BREAKER_THRESHOLD: int = 10     # strictly greater → circuit breaker
 
 
 def peak_multiplier(provider: str, hour_utc: int | None = None) -> float:
@@ -65,9 +81,10 @@ def peak_multiplier(provider: str, hour_utc: int | None = None) -> float:
 
     Args:
         provider: Provider identifier. Any value whose lower-cased form starts
-            with "zai" (e.g. "zai", "zai_ours", "zai_friend") is treated as a
-            z.ai key and subject to peak pricing. All other providers return
-            1.0 (flat-rate cloud and per-token providers have no peak window).
+            with "zai" (e.g. "zai", "zai_ours", "zai_friend") or is a canonical
+            z.ai key name ("ours", "friend") is treated as a z.ai key and
+            subject to peak pricing. All other providers return 1.0 (flat-rate
+            cloud and per-token providers have no peak window).
         hour_utc: UTC hour of day (0-23). If None, the current UTC hour is
             used (datetime.now(timezone.utc).hour, per ADR-003 invariant #1).
 
@@ -76,7 +93,9 @@ def peak_multiplier(provider: str, hour_utc: int | None = None) -> float:
     """
     if hour_utc is None:
         hour_utc = datetime.now(timezone.utc).hour
-    if str(provider).lower().startswith("zai") and hour_utc in PEAK_HOURS_UTC:
+    prov_lower = str(provider).lower()
+    is_zai = prov_lower.startswith("zai") or prov_lower in ("ours", "friend")
+    if is_zai and hour_utc in PEAK_HOURS_UTC:
         return PEAK_MULTIPLIER
     return 1.0
 
@@ -106,29 +125,75 @@ def scarcity_factor(quota_used_pct: float) -> float:
     return 1.0 + max(0.0, (quota_used_pct - SCARCITY_ONSET_PCT) / span)
 
 
-def health_factor(is_healthy: bool, recent_429: int = 0) -> float:
-    """Deterministic health/circuit-breaker multiplier (ADR-003 / ADR-004).
+def health_pricing_factor(failure_count: int = 0, breaker_tripped: bool = False) -> float:
+    """Graduated health multiplier based on failure count (ADR-003 / ADR-004).
 
-    Precedence (first match wins):
-        1. is_healthy is False → +inf   (circuit breaker tripped: unreachable)
-        2. recent_429 > 3       → 2.0    (429 burst: soft penalty)
-        3. otherwise            → 1.0    (healthy)
+    This replaces the binary health_factor with a five-tier graduated
+    penalty. A struggling key sees its effective price rise progressively
+    until the optimizer naturally routes traffic away — price-based
+    regulation, not binary circuit-breaking. Only after extreme failure
+    counts (>10) or an explicit breaker trip does the price go to infinity.
+
+    Scale (first applicable tier wins):
+        breaker_tripped          → +inf   (circuit breaker: unreachable)
+        failure_count > 10       → +inf   (circuit breaker: unreachable)
+        6 ≤ failure_count ≤ 10   → 10.0   (severe penalty)
+        3 ≤ failure_count ≤ 5    → 3.0    (moderate penalty)
+        1 ≤ failure_count ≤ 2    → 1.5    (soft penalty, transient)
+        failure_count ≤ 0        → 1.0    (no penalty)
+
+    The old 429 burst penalty (2.0x for >3 recent 429s) is subsumed:
+    429s now increment failure_count, so a burst of 4+ 429s falls in the
+    3-5 range → 3.0x (stronger than old 2.0x — a 429 burst is a clear
+    signal of trouble, and the graduated scale captures that).
 
     +inf is intentional: it is the ONLY mechanism that makes a provider
     unselectable in the routing optimizer, and compute_effective_price
     preserves it rather than flooring it (ADR-004 invariants #3, #4).
 
     Args:
-        is_healthy: False when the provider's circuit breaker has tripped.
-        recent_429: Count of recent HTTP 429 (rate-limited) responses.
+        failure_count: Number of consecutive recent failures (429s, 5xx,
+            timeouts, auth errors, etc.). Reset to 0 on success.
+        breaker_tripped: True when the circuit breaker has been explicitly
+            tripped (e.g. by key_health_tracker). Overrides failure_count.
 
     Returns:
-        +inf if unhealthy, 2.0 on a 429 burst (>3), else 1.0.
+        Graduated multiplier: 1.0, 1.5, 3.0, 10.0, or +inf.
+    """
+    # Circuit breaker — explicit trip or extreme failure count.
+    if breaker_tripped or failure_count > HEALTH_BREAKER_THRESHOLD:
+        return math.inf
+
+    # Negative failure_count is treated as 0 (no penalty).
+    fc = max(0, failure_count)
+
+    if fc <= 0:
+        return 1.0
+    if fc <= 2:
+        return HEALTH_PENALTY_SOFT       # 1.5x
+    if fc <= 5:
+        return HEALTH_PENALTY_MODERATE   # 3.0x
+    # 6-10
+    return HEALTH_PENALTY_SEVERE          # 10.0x
+
+
+def health_factor(is_healthy: bool, recent_429: int = 0) -> float:
+    """Backward-compatible wrapper around health_pricing_factor.
+
+    .. deprecated::
+        Use :func:`health_pricing_factor` directly. This wrapper translates
+        the old (is_healthy, recent_429) interface into (failure_count,
+        breaker_tripped) and delegates.
+
+    Maps the old binary interface:
+        is_healthy=False → breaker_tripped=True → +inf
+        recent_429 > 3   → failure_count=recent_429 → graduated penalty
+        otherwise        → failure_count=0 → 1.0
     """
     if not is_healthy:
         return math.inf
-    if recent_429 > HEALTH_429_THRESHOLD:
-        return HEALTH_429_PENALTY
+    if recent_429 > 3:
+        return health_pricing_factor(failure_count=recent_429)
     return 1.0
 
 
@@ -136,9 +201,11 @@ def compute_effective_price(
     base_rate: float,
     provider: str,
     quota_pct: float,
-    is_healthy: bool,
+    is_healthy: bool | None = None,
     recent_429: int = 0,
     hour_utc: int | None = None,
+    failure_count: int = 0,
+    breaker_tripped: bool = False,
 ) -> float:
     """Effective price = base_rate * peak * scarcity * health (ADR-009).
 
@@ -147,25 +214,43 @@ def compute_effective_price(
 
     ADR-004 constraint: the result is ALWAYS strictly positive. The global
     floor MIN_EFFECTIVE_PRICE (0.001 $/M) is enforced for finite results. A
-    health_factor of +inf is preserved unchanged so an unhealthy provider
+    health factor of +inf is preserved unchanged so an unhealthy provider
     stays "unreachable" to the optimizer rather than being floored.
+
+    Health is computed via :func:`health_pricing_factor` (graduated penalty
+    based on failure_count). For backward compatibility, if *is_healthy*
+    is provided (not None), the old interface is used: is_healthy=False
+    maps to breaker_tripped=True, and recent_429>3 maps to
+    failure_count=recent_429.
 
     Args:
         base_rate: Base $/M rate (typically from price_kalman.base_rate, or a
             provider's fixed per-token price).
         provider: Provider identifier (see peak_multiplier).
         quota_pct: Quota used percentage (see scarcity_factor).
-        is_healthy: Provider health flag (see health_factor).
-        recent_429: Recent 429 count (see health_factor).
+        is_healthy: (Legacy) Provider health flag. If None, uses the new
+            failure_count/breaker_tripped interface. If False, sets
+            breaker_tripped=True.
+        recent_429: (Legacy) Recent 429 count — mapped to failure_count
+            when >3.
         hour_utc: UTC hour 0-23; None → current UTC hour.
+        failure_count: Consecutive recent failures (new interface).
+        breaker_tripped: Explicit circuit breaker trip (new interface).
 
     Returns:
         Effective price in $/M. Always > 0: finite results are >= 0.001, and
         an unhealthy provider yields +inf (preserved, not floored).
     """
+    # Backward compat: if is_healthy is provided, translate to new interface.
+    if is_healthy is not None:
+        if not is_healthy:
+            breaker_tripped = True
+        if recent_429 > 3:
+            failure_count = max(failure_count, recent_429)
+
     peak = peak_multiplier(provider, hour_utc)
     scarcity = scarcity_factor(quota_pct)
-    health = health_factor(is_healthy, recent_429)
+    health = health_pricing_factor(failure_count, breaker_tripped)
 
     price = base_rate * peak * scarcity * health
 

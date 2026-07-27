@@ -25,7 +25,7 @@ from typing import Any
 from src.price_kalman import (
     MIN_EFFECTIVE_PRICE,
     PriceKalman,
-    health_factor,
+    health_pricing_factor,
     peak_multiplier,
     scarcity_factor,
 )
@@ -94,13 +94,14 @@ class RoutingOptimizer:
         quota_total: float | None = None,
         peak_hours_utc: tuple[int, int] | None = None,
         peak_mult: float = 1.0,
+        failure_count: int = 0,
     ) -> None:
         """Register a provider with its Kalman instances.
 
         Parameters
         ----------
         name:
-            Human-readable provider identifier (e.g. ``"zai_ours"``).
+            Human-readable provider identifier (e.g. ``"ours"``).
         price_kalman:
             A trained :class:`PriceKalman` for this provider's smoothed $/M.
         consumption_kalman:
@@ -126,6 +127,11 @@ class RoutingOptimizer:
         peak_mult:
             Peak-hour price multiplier (default 1.0 = no peak surcharge).
             z.ai providers typically pass 3.0.
+        failure_count:
+            Number of consecutive recent failures for this provider. Used
+            by the graduated health_pricing_factor to progressively increase
+            effective price (1.0x → 1.5x → 3.0x → 10.0x → +inf). Defaults
+            to 0 (no penalty).
         """
         if model_tier not in TIER_RANK:
             raise ValueError(
@@ -138,6 +144,7 @@ class RoutingOptimizer:
             "quota_remaining": float(quota_remaining),
             "quota_total": float(quota_total) if quota_total is not None else None,
             "breaker_tripped": bool(breaker_tripped),
+            "failure_count": int(failure_count),
             "model_tier": model_tier,
             "model": model if model is not None else TIER_MODELS[model_tier],
             "peak_hours_utc": tuple(peak_hours_utc) if peak_hours_utc else None,
@@ -263,14 +270,28 @@ class RoutingOptimizer:
                 f"required tier for this difficulty",
             )
 
-        # 2. Health gate — a tripped circuit breaker makes the provider
-        #    unreachable (infinite cost), NOT zero cost (ADR-004 #4).
-        health = health_factor(provider["breaker_tripped"])
+        # 2. Health gate — graduated health pricing. The effective price
+        #    increases progressively with failure_count (1.5x → 3.0x → 10.0x)
+        #    so the optimizer naturally routes traffic away. Only when
+        #    failure_count > 10 or breaker_tripped does price go to infinity
+        #    (full circuit breaker — ADR-004 #4).
+        health = health_pricing_factor(
+            failure_count=provider["failure_count"],
+            breaker_tripped=provider["breaker_tripped"],
+        )
         if math.isinf(health):
+            fc = provider["failure_count"]
+            if provider["breaker_tripped"]:
+                reason = "circuit breaker tripped — provider unreachable"
+            else:
+                reason = (
+                    f"failure_count={fc} exceeds breaker threshold "
+                    f"— provider unreachable"
+                )
             return (
                 float("inf"),
                 False,
-                "circuit breaker tripped — provider unreachable",
+                reason,
             )
 
         # 3. Exhaustion gate — skip if the ConsumptionKalman predicts the
@@ -318,6 +339,7 @@ class RoutingOptimizer:
             True,
             (
                 f"effective ${effective_price:.6f}/M "
-                f"(peak={peak_mult:.1f}, scarcity={scarcity:.2f})"
+                f"(peak={peak_mult:.1f}, scarcity={scarcity:.2f}, "
+                f"health={health:.1f})"
             ),
         )
