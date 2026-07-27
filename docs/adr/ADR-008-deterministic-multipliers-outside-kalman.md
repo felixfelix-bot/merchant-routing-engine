@@ -151,5 +151,7 @@ The 5-minute window applies to the ConsumptionKalman only, not PriceKalman.
 - `price_kalman.py` / `consumption_kalman.py` contain the Kalman filters
 - `routing_optimizer.py` composes them: effective_price = base × multipliers
 - `primary_router.py` / `shadow_hook.py` wire production data to the optimizers
-- The failure-cost-observation path is NOT YET implemented (production wiring needed)
+- The failure-cost-observation path is implemented in `src/cost_observer.py`
+  (CostObserver class). PrimaryRouter and ShadowHook can use it to feed
+  real cost observations to PriceKalman on success/failure.
 - The 5-minute windowed aggregation is NOT YET implemented (cron or proxy interval needed)
