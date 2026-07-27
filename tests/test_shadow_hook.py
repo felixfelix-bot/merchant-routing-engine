@@ -37,6 +37,7 @@ def sample_quota():
         "ollama_cloud":  {"used_pct": 20.0, "remaining": 800_000,   "total": 1_000_000},
         "ppq":           {"used_pct": 0.0,  "remaining": float("inf")},
         "openrouter":    {"used_pct": 0.0,  "remaining": float("inf")},
+        "deepinfra":     {"used_pct": 0.0,  "remaining": float("inf")},
     }
 
 
@@ -44,7 +45,7 @@ def sample_quota():
 def all_healthy():
     return {
         "ours": True, "friend": True, "ollama_cloud": True,
-        "ppq": True, "openrouter": True,
+        "ppq": True, "openrouter": True, "deepinfra": True,
     }
 
 
@@ -88,14 +89,14 @@ class TestCompare:
         """If ours is unhealthy, optimizer should route to friend or ollama."""
         health = {
             "ours": False, "friend": True, "ollama_cloud": True,
-            "ppq": True, "openrouter": True,
+            "ppq": True, "openrouter": True, "deepinfra": True,
         }
         hook.compare("ours", "glm-5.2", 5000, sample_quota, health, False)
         assert hook.get_stats()["total_decisions"] == 1
 
     def test_all_unhealthy_fallback(self, hook, sample_quota):
         """All providers unhealthy → optimizer returns fallback."""
-        health = {k: False for k in ["ours", "friend", "ollama_cloud", "ppq", "openrouter"]}
+        health = {k: False for k in ["ours", "friend", "ollama_cloud", "ppq", "openrouter", "deepinfra"]}
         hook.compare("none", "glm-5.2", 5000, sample_quota, health, False)
         assert hook.get_stats()["total_decisions"] == 1
 

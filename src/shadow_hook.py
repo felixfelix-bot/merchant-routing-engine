@@ -53,6 +53,7 @@ _SEED_COSTS = {
     "ollama_cloud":  0.50,   # $100/mo, ~200M tokens/mo
     "ppq":           0.14,   # avg of $0.09 input + $0.19 output
     "openrouter":    0.135,  # avg of $0.09 input + $0.18 output
+    "deepinfra":     1.30,   # historical effective rate from daily_spend DB
 }
 
 # Quota totals (approximate, for scarcity factor)
@@ -62,9 +63,10 @@ _QUOTA_TOTALS = {
     "ollama_cloud": 1_000_000,    # rate-limited daily
     "ppq":          float("inf"),  # pay-per-token, no hard quota
     "openrouter":   float("inf"),
+    "deepinfra":    float("inf"),  # pay-per-token, no hard quota
 }
 
-# z.ai peak hours (UTC) — Ollama/PPQ/OpenRouter have no peak
+# z.ai peak hours (UTC) — Ollama/PPQ/OpenRouter/DeepInfra have no peak
 _ZAI_PEAK = (6, 10)
 
 

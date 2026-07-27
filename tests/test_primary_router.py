@@ -29,7 +29,7 @@ def router(monkeypatch):
 def healthy_state():
     return {
         "ours": True, "friend": True, "ollama_cloud": True,
-        "ppq": True, "openrouter": True,
+        "ppq": True, "openrouter": True, "deepinfra": True,
     }
 
 
@@ -41,6 +41,7 @@ def normal_quota():
         "ollama_cloud":  {"used_pct": 20.0, "remaining": 800_000,   "total": 1_000_000},
         "ppq":           {"used_pct": 0.0,  "remaining": float("inf")},
         "openrouter":    {"used_pct": 0.0,  "remaining": float("inf")},
+        "deepinfra":     {"used_pct": 0.0,  "remaining": float("inf")},
     }
 
 
@@ -115,7 +116,7 @@ class TestUnhealthyProviders:
     def test_ours_unhealthy_picks_friend(self, router, normal_quota, monkeypatch):
         health = {
             "ours": False, "friend": True, "ollama_cloud": True,
-            "ppq": True, "openrouter": True,
+            "ppq": True, "openrouter": True, "deepinfra": True,
         }
         # Off-peak so ollama isn't cheaper
         import src.primary_router as pr_mod
@@ -135,7 +136,7 @@ class TestUnhealthyProviders:
         """Both z.ai keys dead → optimizer picks ollama → None."""
         health = {
             "ours": False, "friend": False, "ollama_cloud": True,
-            "ppq": True, "openrouter": True,
+            "ppq": True, "openrouter": True, "deepinfra": True,
         }
         result = router.route(model="glm-5.2", tokens=5000,
                              quota_state=normal_quota, health_state=health)
@@ -153,6 +154,7 @@ class TestQuotaExhaustion:
             "ollama_cloud":  {"used_pct": 50.0, "remaining": 500_000, "total": 1_000_000},
             "ppq":           {"used_pct": 0.0,  "remaining": float("inf")},
             "openrouter":    {"used_pct": 0.0,  "remaining": float("inf")},
+            "deepinfra":     {"used_pct": 0.0,  "remaining": float("inf")},
         }
         health = {k: True for k in quota}
 

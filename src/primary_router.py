@@ -52,6 +52,7 @@ _SEED_COSTS = {
     "ollama_cloud":  0.50,
     "ppq":           0.14,
     "openrouter":    0.135,
+    "deepinfra":     1.30,   # historical effective rate from daily_spend DB
 }
 
 _QUOTA_TOTALS = {
@@ -60,6 +61,7 @@ _QUOTA_TOTALS = {
     "ollama_cloud": 1_000_000,
     "ppq":          float("inf"),
     "openrouter":   float("inf"),
+    "deepinfra":    float("inf"),
 }
 
 _ZAI_PEAK = (6, 10)
@@ -230,7 +232,7 @@ class PrimaryRouter:
         # Map optimizer's choice to proxy's key namespace
         if chosen in _ZAI_KEYS:
             return chosen
-        # ollama_cloud / ppq / openrouter / fallback → None
+        # ollama_cloud / ppq / openrouter / deepinfra / fallback → None
         # Proxy's failover path will reach the correct provider
         return None
 

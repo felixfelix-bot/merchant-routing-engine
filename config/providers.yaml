@@ -57,6 +57,15 @@ external:
         cost_per_1m_input: 0.09
         cost_per_1m_output: 0.18
 
+  deepinfra:
+    base_url: "https://api.deepinfra.com/v1/openai"
+    key_env: "DEEPINFRA_API_KEY"
+    pricing_model: per_token
+    models:
+      deepseek-v4-flash:
+        cost_per_1m_input: 0.09
+        cost_per_1m_output: 0.19
+
 # ── Strategy configuration ─────────────────────────────────────────────────
 strategy:
   # Minimum effective price — never zero, even for free providers (ADR-004)
