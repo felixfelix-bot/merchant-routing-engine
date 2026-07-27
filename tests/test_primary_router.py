@@ -9,9 +9,19 @@ from src.primary_router import PrimaryRouter
 
 
 @pytest.fixture
-def router():
-    """Fresh PrimaryRouter for each test."""
+def router(monkeypatch):
+    """Fresh PrimaryRouter for each test.
+
+    Mocks _load_converged_rates to return empty dict so tests use
+    static seed costs (the historical DB may exist on the dev machine
+    and would change routing decisions).
+    """
     PrimaryRouter._instance = None
+    # Prevent loading historical rates from the real DB
+    monkeypatch.setattr(
+        PrimaryRouter, "_load_converged_rates",
+        staticmethod(lambda: {}),
+    )
     return PrimaryRouter()
 
 

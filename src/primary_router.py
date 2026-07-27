@@ -89,9 +89,15 @@ class PrimaryRouter:
         self._call_count = 0
         self._last_decision = "init"
 
+        # ── Load converged rates from historical daily_spend data ───────
+        # Falls back to static _SEED_COSTS if DB is unavailable or empty.
+        converged_rates = self._load_converged_rates()
+
         for name in _SEED_COSTS:
+            # Use converged rate if available, otherwise fall back to seed
+            initial = converged_rates.get(name, _SEED_COSTS[name])
             self._price_kalmans[name] = PriceKalman(
-                initial_rate=_SEED_COSTS[name],
+                initial_rate=initial,
                 process_noise=1e-6,
                 measurement_noise=1e-4,
             )
@@ -100,6 +106,22 @@ class PrimaryRouter:
                 measurement_noise=1e6,
             )
 
+    @staticmethod
+    def _load_converged_rates() -> dict[str, float]:
+        """Load converged base rates from historical daily_spend data.
+
+        Calls the feed_historical_costs loader to read zai_usage.db,
+        compute effective $/M per provider per day, and feed the
+        observations to PriceKalman instances. Returns converged rates.
+
+        Falls back to empty dict (→ static seeds) on any error.
+        """
+        try:
+            from scripts.feed_historical_costs import load_historical_rates
+            return load_historical_rates(seed_costs=_SEED_COSTS)
+        except Exception:
+            return {}
+
     def route(
         self,
         model: str | None = None,
@@ -107,6 +129,7 @@ class PrimaryRouter:
         quota_state: dict[str, Any] | None = None,
         health_state: dict[str, bool] | None = None,
         difficulty: str | None = None,
+        failure_counts: dict[str, int] | None = None,
     ) -> str | None:
         """Select the best provider. Drop-in for best_key().
 
@@ -115,9 +138,15 @@ class PrimaryRouter:
             None to skip z.ai (ollama/external failover handles it).
 
         NEVER raises. Falls back to None on any error.
+
+        Args:
+            failure_counts: Optional dict of provider → failure_count.
+                When provided, enables graduated health pricing. When None,
+                falls back to the old boolean health_state (backward compat).
         """
         try:
-            return self._do_route(model, tokens, quota_state, health_state, difficulty)
+            return self._do_route(model, tokens, quota_state, health_state, difficulty,
+                                  failure_counts)
         except Exception:
             self._last_decision = "error_fallback_none"
             return None
@@ -129,6 +158,7 @@ class PrimaryRouter:
         quota_state: dict[str, Any] | None,
         health_state: dict[str, bool] | None,
         difficulty: str | None,
+        failure_counts: dict[str, int] | None = None,
     ) -> str | None:
         self._call_count += 1
 
@@ -136,6 +166,8 @@ class PrimaryRouter:
             quota_state = {}
         if not health_state:
             health_state = {}
+        if not failure_counts:
+            failure_counts = {}
 
         optimizer = RoutingOptimizer(
             peak_hours_utc=_ZAI_PEAK,
@@ -150,6 +182,10 @@ class PrimaryRouter:
             remaining = float(qs.get("remaining", _QUOTA_TOTALS.get(name, 1e9)))
             total = float(qs.get("total", _QUOTA_TOTALS.get(name, 1e9)))
             healthy = health_state.get(name, True)
+            fc = failure_counts.get(name, 0)
+
+            # breaker_tripped when explicitly unhealthy OR failure_count > 10
+            breaker = (not healthy) or (fc > 10)
 
             if name in _ZAI_KEYS:
                 tier = "high"
@@ -172,12 +208,13 @@ class PrimaryRouter:
                 price_kalman=self._price_kalmans[name],
                 consumption_kalman=self._consumption_kalmans[name],
                 quota_remaining=remaining,
-                breaker_tripped=not healthy,
+                breaker_tripped=breaker,
                 model_tier=tier,
                 model=mdl,
                 quota_total=total if total != float("inf") else None,
                 peak_hours_utc=prov_peak,
                 peak_mult=prov_peak_mult,
+                failure_count=fc,
             )
 
         result = optimizer.route(
