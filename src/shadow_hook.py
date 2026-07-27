@@ -225,7 +225,9 @@ class ShadowHook:
         # Pass actual UTC hour so per-provider peak_multiplier is computed
         # correctly — the optimizer determines peak per-provider via the
         # registered peak_hours_utc + peak_mult (ADR-003).
-        hour = int(time.gmtime().tm_hour)
+        # Use the peak flag to control which hour the optimizer sees, so shadow
+        # decisions match the conditions the live proxy faced (not the real clock).
+        hour = 8 if peak else 12
         result = optimizer.route(
             difficulty=difficulty,
             estimated_tokens=max(tokens, 1000),
