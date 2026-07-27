@@ -42,6 +42,7 @@ from src.consumption_kalman import ConsumptionKalman
 from src.routing_optimizer import RoutingOptimizer
 from src.shadow_logger import ShadowLogger
 from src.provider_names import normalize_provider_name
+from src.pricing_engine import pace_factor_multi
 
 __all__ = ["ShadowHook"]
 
@@ -127,6 +128,7 @@ class ShadowHook:
         health_state: dict[str, bool],
         peak: bool,
         failure_counts: dict[str, int] | None = None,
+        pace_windows: dict[str, list[tuple[float, float, float, float, float]]] | None = None,
     ) -> None:
         """Run shadow comparison. NEVER raises.
 
@@ -144,11 +146,17 @@ class ShadowHook:
             failure_counts: Optional dict of provider → failure_count for
                 graduated health pricing. When None, falls back to the old
                 boolean health_state (backward compat).
+            pace_windows: Optional dict of provider → list of pace window
+                tuples ``(quota_used, quota_total, time_elapsed_pct,
+                burn_rate, window_duration_hours)``. When provided, the
+                pace_factor is computed per-provider and passed to the
+                optimizer. When None, pace_mult defaults to 1.0 (no
+                adjustment).
         """
         try:
             self._do_compare(
                 live_provider, live_model, tokens,
-                quota_state, health_state, peak, failure_counts,
+                quota_state, health_state, peak, failure_counts, pace_windows,
             )
         except Exception:
             pass  # shadow must never break production
@@ -162,6 +170,7 @@ class ShadowHook:
         health_state: dict[str, bool],
         peak: bool,
         failure_counts: dict[str, int] | None = None,
+        pace_windows: dict[str, list[tuple[float, float, float, float, float]]] | None = None,
     ) -> None:
         """Internal compare — may raise (wrapped by compare())."""
         now = time.time()
@@ -248,10 +257,22 @@ class ShadowHook:
         # Use the peak flag to control which hour the optimizer sees, so shadow
         # decisions match the conditions the live proxy faced (not the real clock).
         hour = 8 if peak else 12
+
+        # ── Compute per-provider pace multipliers ───────────────────────
+        # Each provider may have multiple quota windows (5h + weekly for z.ai).
+        # pace_factor_multi takes the worst-case (max) across windows.
+        pace_mults: dict[str, float] = {}
+        if pace_windows:
+            for name in _SEED_COSTS:
+                windows = pace_windows.get(name)
+                if windows:
+                    pace_mults[name] = pace_factor_multi(windows)
+
         result = optimizer.route(
             difficulty=difficulty,
             estimated_tokens=max(tokens, 1000),
             hour=hour,
+            pace_mults=pace_mults,
         )
 
         shadow_provider = result.get("chosen_provider", "unknown")

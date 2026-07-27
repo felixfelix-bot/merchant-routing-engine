@@ -158,6 +158,7 @@ class RoutingOptimizer:
         difficulty: str = "medium",
         estimated_tokens: int = 10000,
         hour: int | None = None,
+        pace_mults: dict[str, float] | None = None,
     ) -> dict:
         """Return the cheapest viable provider for the requested difficulty.
 
@@ -191,6 +192,7 @@ class RoutingOptimizer:
         # Peak multiplier is per-provider (ADR-003): z.ai has peak hours,
         # Ollama/PPQ/OpenRouter do not. Each provider carries its own
         # peak_hours_utc + peak_mult registered via add_provider().
+        pace_mults = pace_mults or {}
         candidates: list[dict] = []
         for name, provider in self._providers.items():
             # Compute this provider's peak multiplier (1.0 if no peak window)
@@ -203,8 +205,10 @@ class RoutingOptimizer:
                 )
             else:
                 prov_peak = 1.0
+            # Per-provider pace multiplier (defaults to 1.0 if not supplied)
+            prov_pace = pace_mults.get(name, 1.0)
             price, viable, reason = self._evaluate_provider(
-                provider, prov_peak, required_rank, estimated_tokens
+                provider, prov_peak, required_rank, estimated_tokens, prov_pace
             )
             candidates.append(
                 {
@@ -255,6 +259,7 @@ class RoutingOptimizer:
         peak_mult: float,
         required_rank: int,
         estimated_tokens: int,
+        pace_mult: float = 1.0,
     ) -> tuple[float, bool, str]:
         """Run a single provider through the filter pipeline.
 
@@ -323,11 +328,12 @@ class RoutingOptimizer:
             quota_used_pct = 0.0
         scarcity = scarcity_factor(quota_used_pct)
 
-        # 5. Effective price — base × peak × scarcity × health (ADR-003).
+        # 5. Effective price — base × peak × scarcity × health × pace (ADR-003).
         effective_price = provider["price_kalman"].effective_price(
             peak_mult=peak_mult,
             scarcity=scarcity,
             health=health,
+            pace_mult=pace_mult,
         )
 
         # ADR-004: effective_price() already floors at MIN_EFFECTIVE_PRICE,
@@ -340,6 +346,6 @@ class RoutingOptimizer:
             (
                 f"effective ${effective_price:.6f}/M "
                 f"(peak={peak_mult:.1f}, scarcity={scarcity:.2f}, "
-                f"health={health:.1f})"
+                f"health={health:.1f}, pace={pace_mult:.2f})"
             ),
         )

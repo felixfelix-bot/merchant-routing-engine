@@ -71,6 +71,25 @@ HEALTH_PENALTY_MODERATE: float = 3.0   # 3-5 failures
 HEALTH_PENALTY_SEVERE: float = 10.0    # 6-10 failures
 HEALTH_BREAKER_THRESHOLD: int = 10     # strictly greater → circuit breaker
 
+# ── Predictive quota-pacing multiplier ──────────────────────────────────────
+# Adjusts price based on burn rate vs time remaining in quota windows.
+# If burning too fast (will exhaust before reset) → increase price to slow down.
+# If underutilizing → decrease price to use more.
+# Priority: never run out > use everything.
+#
+# pace_ratio = predicted_total / quota_total
+#   predicted_total = current_used + burn_rate * time_remaining
+# pace_factor = max(PACE_FLOOR, min(PACE_CAP, pace_ratio ** 2))
+#
+# Examples:
+#   ratio 0.5 (way under) → 0.25 (price drops to 25% — attract traffic)
+#   ratio 0.9 (slightly under) → 0.81 (slight decrease)
+#   ratio 1.0 (perfect) → 1.0
+#   ratio 1.2 (will exhaust early) → 1.44 (price increases 44%)
+#   ratio 2.0 (will exhaust way early) → 4.0 → capped at 3.0
+PACE_FLOOR: float = 0.5    # minimum pace_factor (attract traffic aggressively)
+PACE_CAP: float = 3.0      # maximum pace_factor (strong slowdown, but finite)
+
 
 def peak_multiplier(provider: str, hour_utc: int | None = None) -> float:
     """Deterministic peak-hour step function (ADR-003).
@@ -177,6 +196,96 @@ def health_pricing_factor(failure_count: int = 0, breaker_tripped: bool = False)
     return HEALTH_PENALTY_SEVERE          # 10.0x
 
 
+def pace_factor(
+    quota_used: float,
+    quota_total: float,
+    time_elapsed_pct: float,  # 0.0 to 1.0 — how much of the window has elapsed
+    burn_rate: float,         # tokens/hour
+    window_duration_hours: float = 5.0,  # window duration (5h z.ai, 168h weekly)
+) -> float:
+    """Predictive quota-pacing multiplier.
+
+    Adjusts price so we use quota without running out.
+    Returns multiplier: >1.0 = slow down (will exhaust), <1.0 = speed up (underusing).
+
+    Computation::
+
+        time_remaining_hours = (1 - time_elapsed_pct) * window_duration_hours
+        predicted_usage      = burn_rate * time_remaining_hours
+        predicted_total      = quota_used + predicted_usage
+        pace_ratio           = predicted_total / quota_total
+        pace_factor          = max(PACE_FLOOR, min(PACE_CAP, pace_ratio ** 2))
+
+    Priority: **never run out > use everything**.  When ``pace_ratio > 1.0``
+    we are on track to exhaust before the window resets, so the factor
+    increases (squaring amplifies the penalty).  When ``pace_ratio < 0.9``
+    we are underutilizing, so the factor decreases to attract traffic.
+
+    The result is clamped to ``[PACE_FLOOR, PACE_CAP]`` = ``[0.5, 3.0]``.
+
+    Args:
+        quota_used: Tokens already consumed in this window.
+        quota_total: Total tokens allocated for this window.
+        time_elapsed_pct: Fraction of the window that has elapsed (0.0–1.0).
+        burn_rate: Current burn rate from ConsumptionKalman (tokens/hour).
+        window_duration_hours: Duration of the quota window in hours.
+            Default 5.0 (z.ai 5-hour window). Use 168.0 for the weekly window.
+
+    Returns:
+        Pace multiplier in ``[0.5, 3.0]``. Returns 1.0 when there is
+        insufficient data to make a prediction (zero burn rate, zero
+        elapsed time, or zero quota total).
+    """
+    # ── Guard: insufficient data → no adjustment ──────────────────────
+    if burn_rate <= 0:
+        return 1.0
+    if quota_total <= 0:
+        return 1.0
+    if time_elapsed_pct <= 0:
+        # Window just reset — no pace data yet.
+        return 1.0
+
+    # Clamp time_elapsed_pct to [0, 1] (defensive against bad input).
+    e = min(time_elapsed_pct, 1.0)
+
+    # ── Compute pace ratio ────────────────────────────────────────────
+    time_remaining_hours = (1.0 - e) * window_duration_hours
+    predicted_usage = burn_rate * time_remaining_hours
+    predicted_total = quota_used + predicted_usage
+    pace_ratio = predicted_total / quota_total
+
+    # ── Map ratio → factor (square amplifies deviation from 1.0) ───────
+    factor = pace_ratio ** 2
+    return max(PACE_FLOOR, min(PACE_CAP, factor))
+
+
+def pace_factor_multi(
+    windows: list[tuple[float, float, float, float, float]],
+) -> float:
+    """Multi-window pace factor — worst case (MAX) governs.
+
+    Computes :func:`pace_factor` for each quota window and returns the
+    maximum. This ensures the most restrictive window drives pricing
+    (priority: never run out).
+
+    Args:
+        windows: List of tuples, each containing:
+            ``(quota_used, quota_total, time_elapsed_pct, burn_rate,
+              window_duration_hours)``.
+
+    Returns:
+        Maximum pace_factor across all windows, or 1.0 if the list
+        is empty (no data, no adjustment).
+    """
+    if not windows:
+        return 1.0
+    factors = [
+        pace_factor(used, total, elapsed, rate, duration)
+        for used, total, elapsed, rate, duration in windows
+    ]
+    return max(factors)
+
+
 def health_factor(is_healthy: bool, recent_429: int = 0) -> float:
     """Backward-compatible wrapper around health_pricing_factor.
 
@@ -206,10 +315,11 @@ def compute_effective_price(
     hour_utc: int | None = None,
     failure_count: int = 0,
     breaker_tripped: bool = False,
+    pace_mult: float = 1.0,
 ) -> float:
-    """Effective price = base_rate * peak * scarcity * health (ADR-009).
+    """Effective price = base_rate * peak * scarcity * health * pace (ADR-009).
 
-    Pure deterministic composition of the three multipliers above applied to
+    Pure deterministic composition of the multipliers above applied to
     the (Kalman-smoothed) base rate. No state, no side effects.
 
     ADR-004 constraint: the result is ALWAYS strictly positive. The global
@@ -222,6 +332,10 @@ def compute_effective_price(
     is provided (not None), the old interface is used: is_healthy=False
     maps to breaker_tripped=True, and recent_429>3 maps to
     failure_count=recent_429.
+
+    The pace multiplier (:func:`pace_factor`) is a predictive quota-pacing
+    factor that adjusts price based on burn rate vs time remaining in
+    quota windows. It defaults to 1.0 (no adjustment) when not provided.
 
     Args:
         base_rate: Base $/M rate (typically from price_kalman.base_rate, or a
@@ -236,6 +350,9 @@ def compute_effective_price(
         hour_utc: UTC hour 0-23; None → current UTC hour.
         failure_count: Consecutive recent failures (new interface).
         breaker_tripped: Explicit circuit breaker trip (new interface).
+        pace_mult: Predictive quota-pacing multiplier from
+            :func:`pace_factor` or :func:`pace_factor_multi`. Default
+            1.0 (no pace adjustment).
 
     Returns:
         Effective price in $/M. Always > 0: finite results are >= 0.001, and
@@ -252,7 +369,7 @@ def compute_effective_price(
     scarcity = scarcity_factor(quota_pct)
     health = health_pricing_factor(failure_count, breaker_tripped)
 
-    price = base_rate * peak * scarcity * health
+    price = base_rate * peak * scarcity * health * pace_mult
 
     # ADR-004 invariant #1: effective_price > 0 always.
     # - NaN arises only from the forbidden 0 * inf combination (invariant #4,

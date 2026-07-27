@@ -166,12 +166,18 @@ class PriceKalman:
         peak_mult: float = 1.0,
         scarcity: float = 1.0,
         health: float = 1.0,
+        pace_mult: float = 1.0,
     ) -> float:
-        """Compute effective price: base × peak × scarcity × health.
+        """Compute effective price: base × peak × scarcity × health × pace.
 
         Always returns >= MIN_EFFECTIVE_PRICE (ADR-004).
+
+        Args:
+            pace_mult: Predictive quota-pacing multiplier from
+                :func:`~src.pricing_engine.pace_factor`. Default 1.0
+                (no pace adjustment).
         """
-        raw = self.predict() * peak_mult * scarcity * health
+        raw = self.predict() * peak_mult * scarcity * health * pace_mult
         if math.isinf(raw) or math.isnan(raw):
             return float("inf")
         return max(raw, MIN_EFFECTIVE_PRICE)

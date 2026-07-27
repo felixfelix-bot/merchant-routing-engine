@@ -41,6 +41,7 @@ from src.price_kalman import PriceKalman, peak_multiplier
 from src.consumption_kalman import ConsumptionKalman
 from src.routing_optimizer import RoutingOptimizer
 from src.provider_names import normalize_provider_name
+from src.pricing_engine import pace_factor, pace_factor_multi
 
 __all__ = ["PrimaryRouter"]
 
@@ -133,6 +134,7 @@ class PrimaryRouter:
         health_state: dict[str, bool] | None = None,
         difficulty: str | None = None,
         failure_counts: dict[str, int] | None = None,
+        pace_windows: dict[str, list[tuple[float, float, float, float, float]]] | None = None,
     ) -> str | None:
         """Select the best provider. Drop-in for best_key().
 
@@ -146,10 +148,16 @@ class PrimaryRouter:
             failure_counts: Optional dict of provider → failure_count.
                 When provided, enables graduated health pricing. When None,
                 falls back to the old boolean health_state (backward compat).
+            pace_windows: Optional dict of provider → list of pace window
+                tuples ``(quota_used, quota_total, time_elapsed_pct,
+                burn_rate, window_duration_hours)``. When provided, the
+                pace_factor is computed per-provider and passed to the
+                optimizer. When None, pace_mult defaults to 1.0 (no
+                adjustment).
         """
         try:
             return self._do_route(model, tokens, quota_state, health_state, difficulty,
-                                  failure_counts)
+                                  failure_counts, pace_windows)
         except Exception:
             self._last_decision = "error_fallback_none"
             return None
@@ -162,6 +170,7 @@ class PrimaryRouter:
         health_state: dict[str, bool] | None,
         difficulty: str | None,
         failure_counts: dict[str, int] | None = None,
+        pace_windows: dict[str, list[tuple[float, float, float, float, float]]] | None = None,
     ) -> str | None:
         self._call_count += 1
 
@@ -171,6 +180,8 @@ class PrimaryRouter:
             health_state = {}
         if not failure_counts:
             failure_counts = {}
+        if not pace_windows:
+            pace_windows = {}
 
         optimizer = RoutingOptimizer(
             peak_hours_utc=_ZAI_PEAK,
@@ -220,10 +231,21 @@ class PrimaryRouter:
                 failure_count=fc,
             )
 
+        # ── Compute per-provider pace multipliers ───────────────────────
+        # Each provider may have multiple quota windows (5h + weekly for z.ai).
+        # pace_factor_multi takes the worst-case (max) across windows.
+        # When no windows are supplied, pace_mult defaults to 1.0 (no change).
+        pace_mults: dict[str, float] = {}
+        for name in _SEED_COSTS:
+            windows = pace_windows.get(name)
+            if windows:
+                pace_mults[name] = pace_factor_multi(windows)
+
         result = optimizer.route(
             difficulty=diff,
             estimated_tokens=max(tokens, 1000),
             hour=int(time.gmtime().tm_hour),
+            pace_mults=pace_mults,
         )
 
         chosen = result.get("chosen_provider", "fallback")
