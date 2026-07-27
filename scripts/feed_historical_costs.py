@@ -30,6 +30,7 @@ if _PARENT not in sys.path:
     sys.path.insert(0, _PARENT)
 
 from src.price_kalman import PriceKalman
+from src.provider_names import normalize_provider_name
 
 __all__ = [
     "TIER_MAP",
@@ -43,6 +44,23 @@ __all__ = [
 # ── Tier → provider name mapping ────────────────────────────────────────────
 # 'manager' and 'worker' both use the 'ours' z.ai key (same subscription).
 # 'unknown' is skipped — we can't attribute cost to a specific provider.
+# 'zai_ours' and 'zai_friend' are legacy aliases that also need mapping.
+# Uses normalize_provider_name for canonical mapping, with an explicit
+# skip list for tiers that should not be attributed to any provider.
+_SKIP_TIERS: frozenset[str] = frozenset({"unknown", ""})
+
+
+def _tier_to_provider(tier: str | None) -> str | None:
+    """Map a daily_spend tier to a canonical provider name.
+
+    Returns None for tiers that should be skipped (unknown, empty).
+    """
+    if tier is None or tier in _SKIP_TIERS:
+        return None
+    return normalize_provider_name(tier)
+
+
+# Kept for backward compatibility — tests import TIER_MAP directly.
 TIER_MAP: dict[str, str | None] = {
     "ours":         "ours",
     "friend":       "friend",
@@ -50,7 +68,9 @@ TIER_MAP: dict[str, str | None] = {
     "deepinfra":     "deepinfra",
     "manager":      "ours",
     "worker":       "ours",
-    "unknown":      None,   # skip
+    "zai_ours":     "ours",
+    "zai_friend":   "friend",
+    "unknown":      None,
 }
 
 
@@ -103,7 +123,7 @@ def compute_effective_rates(
     by_provider: dict[str, list[DailyObservation]] = {}
 
     for date, tier, spend_usd, call_count, token_count in rows:
-        provider = TIER_MAP.get(tier)
+        provider = _tier_to_provider(tier)
         if provider is None:
             continue
 

@@ -29,16 +29,26 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol
+
+# Add parent dir so `from src.xxx import` works when imported from outside
+_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
+from src.provider_names import normalize_provider_name
 
 __all__ = ["RoutingAdvisor", "AdvisorDecision", "KNOWN_PROVIDERS"]
 
 #: Providers the advisor will honour from the optimizer. Anything else
 #: (including the optimizer's own ``"fallback"`` sentinel, which signals
 #: "no viable provider") is treated as invalid and falls back to best_key().
+#: Uses canonical names — the optimizer may return legacy aliases like
+#: "zai_ours" but they are normalized before this check.
 KNOWN_PROVIDERS = frozenset(
-    {"zai_ours", "zai_friend", "ollama_cloud", "ppq", "openrouter"}
+    {"ours", "friend", "ollama_cloud", "ppq", "openrouter"}
 )
 
 _OLLAMA_CLOUD = "ollama_cloud"
@@ -143,6 +153,9 @@ class RoutingAdvisor:
             return self._fallback(f"optimizer raised {type(exc).__name__}: {exc}")
 
         provider = (result or {}).get("chosen_provider")
+        # Normalize legacy aliases (e.g. "zai_ours" → "ours") to canonical form
+        if provider is not None:
+            provider = normalize_provider_name(provider)
         if provider not in self._providers:
             return self._fallback(
                 f"optimizer returned invalid provider {provider!r}"
@@ -163,8 +176,9 @@ class RoutingAdvisor:
             )
 
         # Map z.ai provider names back to their key handle.
-        key = "ours" if provider == "zai_ours" else (
-            "friend" if provider == "zai_friend" else None
+        # After normalization, canonical names are "ours" and "friend".
+        key = "ours" if provider == "ours" else (
+            "friend" if provider == "friend" else None
         )
         return AdvisorDecision(
             provider=provider,

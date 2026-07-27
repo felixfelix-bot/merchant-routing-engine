@@ -40,6 +40,7 @@ if _PARENT not in sys.path:
 from src.price_kalman import PriceKalman, peak_multiplier
 from src.consumption_kalman import ConsumptionKalman
 from src.routing_optimizer import RoutingOptimizer
+from src.provider_names import normalize_provider_name
 
 __all__ = ["PrimaryRouter"]
 
@@ -251,8 +252,10 @@ class PrimaryRouter:
         """Feed actual token usage to the consumption Kalman.
 
         Called after a request completes to keep burn-rate predictions current.
+        The provider name is normalized to canonical form before lookup.
         """
         try:
+            provider = normalize_provider_name(provider)
             if provider in self._consumption_kalmans and tokens > 0:
                 self._consumption_kalmans[provider].update(float(tokens))
         except Exception:

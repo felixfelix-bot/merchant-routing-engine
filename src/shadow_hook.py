@@ -41,6 +41,7 @@ from src.price_kalman import PriceKalman
 from src.consumption_kalman import ConsumptionKalman
 from src.routing_optimizer import RoutingOptimizer
 from src.shadow_logger import ShadowLogger
+from src.provider_names import normalize_provider_name
 
 __all__ = ["ShadowHook"]
 
@@ -123,6 +124,7 @@ class ShadowHook:
         quota_state: dict[str, Any],
         health_state: dict[str, bool],
         peak: bool,
+        failure_counts: dict[str, int] | None = None,
     ) -> None:
         """Run shadow comparison. NEVER raises.
 
@@ -137,11 +139,14 @@ class ShadowHook:
             }
             health_state: Dict of provider → bool (True=healthy).
             peak: Whether current hour is z.ai peak.
+            failure_counts: Optional dict of provider → failure_count for
+                graduated health pricing. When None, falls back to the old
+                boolean health_state (backward compat).
         """
         try:
             self._do_compare(
                 live_provider, live_model, tokens,
-                quota_state, health_state, peak,
+                quota_state, health_state, peak, failure_counts,
             )
         except Exception:
             pass  # shadow must never break production
@@ -154,9 +159,14 @@ class ShadowHook:
         quota_state: dict[str, Any],
         health_state: dict[str, bool],
         peak: bool,
+        failure_counts: dict[str, int] | None = None,
     ) -> None:
         """Internal compare — may raise (wrapped by compare())."""
         now = time.time()
+
+        # Normalize the live provider name to canonical form.
+        # The proxy may send legacy aliases like "zai_ours" or "manager".
+        live_provider = normalize_provider_name(live_provider)
 
         # ── Update burn-rate Kalman with this request's tokens ───────────
         # Attribute tokens to the provider that actually served the request.
@@ -206,6 +216,13 @@ class ShadowHook:
                 prov_peak = None
                 prov_peak_mult = 1.0
 
+            # Graduated health pricing: use failure_count when available,
+            # otherwise infer a count from the boolean health_state.
+            if failure_counts is not None:
+                fc = int(failure_counts.get(name, 0))
+            else:
+                fc = 0 if healthy else 999  # large → breaker_tripped level
+
             optimizer.add_provider(
                 name=name,
                 price_kalman=self._price_kalmans[name],
@@ -217,6 +234,7 @@ class ShadowHook:
                 quota_total=total if total != float("inf") else None,
                 peak_hours_utc=prov_peak,
                 peak_mult=prov_peak_mult,
+                failure_count=fc,
             )
 
         # ── Get shadow decision ──────────────────────────────────────────

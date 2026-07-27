@@ -288,9 +288,9 @@ class ProfitTracker:
               "total_savings_usd": float,
               "avg_savings_per_1m": float,
               "by_provider": {
-                  "zai_ours": {"requests": int,
-                               "savings_usd": float,
-                               "avg_savings_per_1m": float},
+                  "ours": {"requests": int,
+                           "savings_usd": float,
+                           "avg_savings_per_1m": float},
                   ...
               }
             }

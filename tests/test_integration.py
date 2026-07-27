@@ -144,17 +144,17 @@ def test_shadow_logger_logs_live_and_shadow_decisions(tmp_path):
     db = tmp_path / "shadow.db"
     log = ShadowLogger(db_path=str(db))
 
-    # Mock call 1: live picks zai_ours, optimizer picks zai_ours (agree).
+    # Mock call 1: live picks ours, optimizer picks ours (agree).
     log.log_decision(
         ts=1000.0,
-        live_provider="zai_ours", live_model="glm-4.5-air",
-        shadow_provider="zai_ours", shadow_model="glm-4.5-air",
+        live_provider="ours", live_model="glm-4.5-air",
+        shadow_provider="ours", shadow_model="glm-4.5-air",
         shadow_cost=0.068, tokens=1500, live_cost=0.068,
     )
-    # Mock call 2: live picks zai_friend (best_key fallback), optimizer picks ppq.
+    # Mock call 2: live picks friend (best_key fallback), optimizer picks ppq.
     log.log_decision(
         ts=1001.0,
-        live_provider="zai_friend", live_model="glm-4.5-air",
+        live_provider="friend", live_model="glm-4.5-air",
         shadow_provider="ppq_external", shadow_model="deepseek-v4-flash",
         shadow_cost=0.80, tokens=9000, live_cost=0.21,
     )
@@ -165,8 +165,8 @@ def test_shadow_logger_logs_live_and_shadow_decisions(tmp_path):
         "routing_shadow_decisions ORDER BY ts;"
     ).fetchall()
     assert len(rows) == 2
-    assert rows[0] == ("zai_ours", "zai_ours", 1)
-    assert rows[1] == ("zai_friend", "ppq_external", 0)
+    assert rows[0] == ("ours", "ours", 1)
+    assert rows[1] == ("friend", "ppq_external", 0)
     log.close()
 
 

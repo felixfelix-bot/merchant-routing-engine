@@ -45,7 +45,7 @@ class FakeOptimizer:
         return self.result
 
 
-def make_best_key(provider="zai_ours", model="glm-5.2", key="ours"):
+def make_best_key(provider="ours", model="glm-5.2", key="ours"):
     """Return (best_key_fn, calls_dict). fn() returns a legacy decision."""
     calls = {"n": 0}
 
@@ -77,7 +77,7 @@ def _opt_result(provider, model="glm-5.2", cost=0.31):
 
 class TestFlagOff:
     def test_uses_best_key_optimizer_not_called(self):
-        opt = FakeOptimizer(result=_opt_result("zai_ours"))
+        opt = FakeOptimizer(result=_opt_result("ours"))
         best_key, bk_calls = make_best_key()
         advisor = RoutingAdvisor(opt, best_key, enabled=False)
 
@@ -86,7 +86,7 @@ class TestFlagOff:
         assert opt.calls == 0  # optimizer never consulted
         assert bk_calls["n"] == 1
         assert dec.source == "best_key"
-        assert dec.provider == "zai_ours"
+        assert dec.provider == "ours"
 
     def test_flag_off_does_not_read_env_by_default(self, monkeypatch):
         # Even if the env var says "on", an explicit enabled=False wins.
@@ -105,7 +105,7 @@ class TestFlagOff:
 
 class TestFlagOn:
     def test_optimizer_called_first_and_used(self):
-        opt = FakeOptimizer(result=_opt_result("zai_ours", cost=0.31))
+        opt = FakeOptimizer(result=_opt_result("ours", cost=0.31))
         best_key, bk_calls = make_best_key()
         advisor = RoutingAdvisor(opt, best_key, enabled=True)
 
@@ -119,14 +119,14 @@ class TestFlagOn:
         }
         assert bk_calls["n"] == 0  # no fallback — best_key untouched
         assert dec.source == "optimizer"
-        assert dec.provider == "zai_ours"
+        assert dec.provider == "ours"
         assert dec.key == "ours"
         assert dec.effective_cost_per_1m == pytest.approx(0.31)
         assert dec.routed_directly_to_ollama is False
 
     def test_env_var_enables_flag(self, monkeypatch):
         monkeypatch.setenv("ROUTING_ADVISOR_ENABLED", "1")
-        opt = FakeOptimizer(result=_opt_result("zai_friend"))
+        opt = FakeOptimizer(result=_opt_result("friend"))
         best_key, _ = make_best_key()
         advisor = RoutingAdvisor(opt, best_key)  # enabled=None → reads env
 
@@ -134,20 +134,20 @@ class TestFlagOn:
         assert advisor.enabled() is True
         assert opt.calls == 1
         assert dec.source == "optimizer"
-        assert dec.provider == "zai_friend"
+        assert dec.provider == "friend"
         assert dec.key == "friend"
 
     @pytest.mark.parametrize("val", ["TRUE", "Yes", "on", "1"])
     def test_truthy_env_values_enable(self, monkeypatch, val):
         monkeypatch.setenv("ROUTING_ADVISOR_ENABLED", val)
-        opt = FakeOptimizer(result=_opt_result("zai_ours"))
+        opt = FakeOptimizer(result=_opt_result("ours"))
         advisor = RoutingAdvisor(opt, make_best_key()[0])
         assert advisor.enabled() is True
 
     @pytest.mark.parametrize("val", ["", "0", "false", "no", "off", "  "])
     def test_falsy_env_values_disable(self, monkeypatch, val):
         monkeypatch.setenv("ROUTING_ADVISOR_ENABLED", val)
-        opt = FakeOptimizer(result=_opt_result("zai_ours"))
+        opt = FakeOptimizer(result=_opt_result("ours"))
         advisor = RoutingAdvisor(opt, make_best_key()[0])
         assert advisor.enabled() is False
 
@@ -215,7 +215,7 @@ class TestOptimizerFallback:
         # A viable provider but infinite cost (shouldn't happen, but be safe)
         # is normalised rather than propagated as inf.
         opt = FakeOptimizer(
-            result=_opt_result("zai_ours", cost=float("inf"))
+            result=_opt_result("ours", cost=float("inf"))
         )
         best_key, _ = make_best_key()
         advisor = RoutingAdvisor(opt, best_key, enabled=True)
@@ -264,11 +264,11 @@ class TestProviderWhitelist:
             assert dec.provider == prov
 
     def test_custom_whitelist_restricts(self):
-        # Advisor told to only trust zai_ours: ollama_cloud now falls back.
+        # Advisor told to only trust ours: ollama_cloud now falls back.
         opt = FakeOptimizer(result=_opt_result("ollama_cloud"))
         best_key, bk_calls = make_best_key()
         advisor = RoutingAdvisor(
-            opt, best_key, providers=frozenset({"zai_ours"}), enabled=True
+            opt, best_key, providers=frozenset({"ours"}), enabled=True
         )
         dec = advisor.decide()
         assert dec.source == "best_key"

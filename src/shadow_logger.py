@@ -28,9 +28,17 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import sys
 import threading
 import time
 from typing import Optional
+
+# Add parent dir so `from src.xxx import` works when imported from outside
+_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
+from src.provider_names import normalize_provider_name
 
 __all__ = ["ShadowLogger"]
 
@@ -123,6 +131,13 @@ class ShadowLogger:
         """
         if ts is None:
             ts = time.time()
+
+        # Normalize provider names to canonical form before storing.
+        # This ensures the DB always has consistent names regardless of
+        # what the live proxy or shadow optimizer sends.
+        live_provider = normalize_provider_name(live_provider)
+        shadow_provider = normalize_provider_name(shadow_provider)
+
         agree = 1 if live_provider == shadow_provider else 0
         with self._lock:
             self._conn.execute(
