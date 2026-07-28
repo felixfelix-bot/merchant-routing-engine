@@ -290,6 +290,7 @@ Tests: `tests/test_provider_telemetry.py` — 12 tests, 85% coverage on new
 functions. Cold review: APPROVED (telemetry never blocks request handling).
 
 ### 2.5.2 — CPVO calculator
+**Status:** ✅ DONE (2026-07-28)
 
 CPVO = SUM(cost) / SUM(success) per provider per time window.
 
@@ -301,11 +302,26 @@ with 99.9% success:
 A is still cheaper. But if A drops to 80% success → $0.00125/M.
 The math works until it doesn't — we won't know when it stops without measuring.
 
-Build as `src/cpvo_calculator.py`:
-- Query provider_telemetry table for given time window
-- Compute CPVO per provider
-- Feed CPVO-adjusted rate back to PriceKalman as effective rate
-- This makes the optimizer quality-aware, not just price-aware
+Built as `src/cpvo_calculator.py` (`CPVOCalculator` class):
+- Queries provider_telemetry table for a configurable time window (default 24h)
+- `compute_cpvo(provider, window_hours, base_rate)` — returns cost-per-valid-output
+  ($/success when base_rate given, tokens/success when not)
+- `get_effective_rates(base_rates)` — adjusts base $/M rates: `base / success_rate`
+  when success < 0.95, unchanged otherwise; insufficient data (<100 samples) = no
+  penalty; 0% success = massive penalty (avoids the provider)
+- `get_quality_score(provider)` — returns success_rate, avg_latency_ms,
+  token_mismatch_rate, sample_count, cpvo, effective_rate
+- EVERY public method wraps in try/except — never raises, returns base on error
+- Critical invariant (cold-reviewed): denominator is **success_count**, not
+  **total_count** — verified by independent reviewer + 22 tests
+
+Tests: `tests/test_cpvo_calculator.py` — 22 tests, 88% coverage. Cold review:
+APPROVED (CPVO math correct, success_rate penalty verified).
+
+Consumers (not yet wired — Phase 3.x):
+- `LiveRouter.select_failover()` — will call `get_effective_rates()` to adjust
+  base rates before optimization
+- Calibration cron — will feed quality-adjusted rates to PriceKalman
 
 ### 2.5.3 — Quality probes (canary prompts)
 
