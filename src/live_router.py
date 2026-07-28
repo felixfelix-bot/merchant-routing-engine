@@ -382,22 +382,39 @@ class LiveRouter:
                 failure_count=fc,
             )
 
-        # Compute per-provider pace multipliers
+        # Compute per-provider pace multipliers.
+        # NOTE: pace_factor_multi can raise on a malformed window tuple. Wrap
+        # each call so one bad provider's window can never abort the whole
+        # failover (which would surface as a swallowed (None, None) upstream).
         pace_mults: dict[str, float] = {}
         if pace_windows:
             for name in self._provider_names:
                 windows = pace_windows.get(name)
                 if windows:
-                    pace_mults[name] = pace_factor_multi(windows)
+                    try:
+                        pace_mults[name] = pace_factor_multi(windows)
+                    except Exception:
+                        pass  # skip this provider's pace, never break routing
 
-        # Route a high-difficulty request (failover is for high-tier workloads)
+        # Route the request. We prefer the HIGHEST quality tier that has a
+        # viable provider, then relax downward (high → medium → low). This
+        # guarantees we never return None when a healthy external provider
+        # exists: when both z.ai keys AND ollama_cloud are dead (the 48h soak
+        # scenario — ollama is rate-limited daily), the pay-per-token externals
+        # (ppq/openrouter/deepinfra, registered as low tier) still take over at
+        # the "low" step. Without this relaxation, the "high" tier gate filters
+        # them out and select_failover wrongly returns (None, None).
         hour = 8 if peak else 12  # match shadow_hook convention
-        result = optimizer.route(
-            difficulty="high",
-            estimated_tokens=10000,
-            hour=hour,
-            pace_mults=pace_mults,
-        )
+        result: dict = {}
+        for _difficulty in ("high", "medium", "low"):
+            result = optimizer.route(
+                difficulty=_difficulty,
+                estimated_tokens=10000,
+                hour=hour,
+                pace_mults=pace_mults,
+            )
+            if result.get("chosen_provider") not in (None, "fallback"):
+                break  # found a viable provider at this tier
 
         chosen = result.get("chosen_provider")
         if chosen == "fallback":

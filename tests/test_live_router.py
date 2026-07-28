@@ -175,6 +175,109 @@ class TestSelectFailover:
         )
         assert chosen == "ollama_cloud"
 
+    def test_returns_external_when_all_high_tier_dead(self, router):
+        """REGRESSION (t_2532b185): when BOTH z.ai keys AND ollama_cloud are
+        unavailable (the 48h-soak failover scenario where ollama is
+        rate-limited daily), select_failover must still return a viable
+        pay-per-token external (ppq/openrouter/deepinfra) instead of
+        (None, None).
+
+        Root cause: the optimizer was queried at difficulty='high' only,
+        which gates out the low-tier pay-per-token externals (rank 0 < 2).
+        With no high-tier provider viable, route() returns 'fallback' and
+        select_failover returned (None, None), so the production proxy
+        silently fell back to the hardcoded chain instead of using
+        Kalman-optimized selection. Fix: relax difficulty high → medium →
+        low so the low-tier externals are reached when nothing higher is
+        viable.
+        """
+        quota_all_high_tier_dead = {
+            "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 1_000_000},
+            "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
+            "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
+            "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
+        }
+        # All high-tier providers dead (breaker tripped); only the low-tier
+        # pay-per-token externals remain alive.
+        only_externals_healthy = {
+            "ours": False, "friend": False, "ollama_cloud": False,
+            "ppq": True, "openrouter": True, "deepinfra": True,
+        }
+        chosen, fallback = router.select_failover(
+            quota_state=quota_all_high_tier_dead,
+            health_state=only_externals_healthy,
+            peak=False,
+        )
+        # MUST NOT be None — a healthy external provider exists.
+        assert chosen is not None, (
+            "select_failover returned None when healthy pay-per-token externals "
+            "exist — the tier-gating regression (t_2532b185) has resurfaced"
+        )
+        assert chosen in ("ppq", "openrouter", "deepinfra")
+        # Cheapest converged low-tier external off-peak is openrouter (0.135)
+        # < ppq (0.14) < deepinfra (1.30), so it should win.
+        assert chosen == "openrouter"
+        # Fallback is the next cheapest viable external.
+        assert fallback == "ppq"
+
+    def test_returns_external_when_all_high_tier_dead_peak(self, router):
+        """REGRESSION (t_2532b185): tier relaxation must also work during a
+        z.ai peak hour — peak multipliers only apply to z.ai providers, so the
+        low-tier externals (no peak window) are unaffected and still selected
+        when all high-tier providers are dead."""
+        quota_all_high_tier_dead = {
+            "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 1_000_000},
+            "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
+            "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
+            "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
+        }
+        only_externals_healthy = {
+            "ours": False, "friend": False, "ollama_cloud": False,
+            "ppq": True, "openrouter": True, "deepinfra": True,
+        }
+        chosen, _ = router.select_failover(
+            quota_state=quota_all_high_tier_dead,
+            health_state=only_externals_healthy,
+            peak=True,
+        )
+        assert chosen is not None
+        assert chosen in ("ppq", "openrouter", "deepinfra")
+
+    def test_malformed_pace_window_does_not_break_failover(self, router):
+        """REGRESSION (t_2532b185): a malformed pace-window tuple for one
+        provider must not abort the whole failover. Previously
+        pace_factor_multi was called unwrapped; a bad tuple raised, the
+        exception propagated out of _do_select_failover and was swallowed by
+        select_failover's outer try/except, silently yielding (None, None).
+        Now each provider's pace call is wrapped per-provider."""
+        quota = {
+            "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "ollama_cloud": {"used_pct": 20.0, "remaining": 800_000, "total": 1_000_000},
+            "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
+            "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
+            "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
+        }
+        health = {
+            "ours": False, "friend": False, "ollama_cloud": True,
+            "ppq": True, "openrouter": True, "deepinfra": True,
+        }
+        # Malformed 3-tuple for a real provider (valid input is a 5-tuple).
+        bad_pace = {"ollama_cloud": [(1, 2, 3)]}
+        chosen, _ = router.select_failover(
+            quota_state=quota,
+            health_state=health,
+            peak=False,
+            pace_windows=bad_pace,
+        )
+        # ollama is healthy + high-tier; it must still be chosen despite the
+        # bad pace window for it.
+        assert chosen == "ollama_cloud"
+
     def test_returns_ollama_when_ours_exhausted_friend_ok(
         self, router, quota_ours_exhausted_friend_ok, all_healthy
     ):
