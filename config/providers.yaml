@@ -86,6 +86,39 @@ strategy:
   # Fallback model when all z.ai keys exhausted
   fallback_model: "deepseek/deepseek-v4-flash"
 
+  # ── Model mapping: (provider, task_type) → model_name ────────────────────
+  # provider is the *service* name: zai (covers ours/friend/manager/worker),
+  # ollama_cloud, ppq, openrouter, deepinfra.
+  # task_type ∈ {coding, reasoning, chat, simple}.
+  # src/model_mapping.py reads this; falls back to hardcoded MODEL_MAP when
+  # a cell is missing.
+  model_map:
+    zai:
+      coding: "glm-5.2"
+      reasoning: "glm-4.5"
+      chat: "glm-4.5-air"
+      simple: "glm-4.5-flash"
+    deepinfra:
+      coding: "deepseek-v4-pro"
+      reasoning: "deepseek-v4-pro"
+      chat: "deepseek-v4-flash"
+      simple: "deepseek-v4-flash"
+    ppq:
+      coding: "kimi-k3"
+      reasoning: "kimi-k3"
+      chat: "deepseek-v4-flash"
+      simple: "deepseek-v4-flash"
+    openrouter:
+      coding: "deepseek-v4-pro"
+      reasoning: "deepseek-v4-pro"
+      chat: "deepseek-v4-flash"
+      simple: "deepseek-v4-flash"
+    ollama_cloud:
+      coding: "llama3.3-70b"
+      reasoning: "llama3.3-70b"
+      chat: "llama3.3-8b"
+      simple: "llama3.3-8b"
+
   # Circuit breaker: trip after N consecutive failures
   circuit_breaker_threshold: 5
   circuit_breaker_cooldown_seconds: 300
