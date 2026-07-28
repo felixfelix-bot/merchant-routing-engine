@@ -239,8 +239,9 @@ This phase builds the measurement layer BEFORE the soak test so we can
 validate provider quality during real traffic, not just provider cost.
 
 ### 2.5.1 — Telemetry table (success/fail/latency per request)
+**Status:** ✅ DONE (2026-07-28)
 
-Add columns to shadow_decisions table (or new provider_telemetry table):
+New `provider_telemetry` table added to `~/.hermes/bot/zai_usage.db`:
 - `response_received` (bool) — did the API return anything?
 - `response_valid` (bool) — did the response parse as valid LLM output?
 - `latency_ms` (int) — time from request to first token
@@ -249,8 +250,12 @@ Add columns to shadow_decisions table (or new provider_telemetry table):
 - `actual_tokens` (int) — what we measured from response length
 - `token_mismatch` (bool) — billed != actual (fraud signal)
 
-One INSERT per request. Costs nothing. Gives us the data foundation
-for CPVO and quality probes.
+One INSERT per request in `_proxy()` finally block. Schema migration via
+`CREATE TABLE IF NOT EXISTS` at startup. Telemetry NEVER raises — all paths
+wrapped in try/except so telemetry failure is silent.
+
+Tests: `tests/test_provider_telemetry.py` — 12 tests, 85% coverage on new
+functions. Cold review: APPROVED (telemetry never blocks request handling).
 
 ### 2.5.2 — CPVO calculator
 
