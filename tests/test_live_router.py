@@ -150,7 +150,7 @@ class TestSelectFailover:
     ):
         """When both z.ai keys are exhausted, failover should pick
         ollama_cloud (cheapest high-tier external with converged rates)."""
-        chosen, fallback = router.select_failover(
+        (chosen, chosen_model), (fallback, fallback_model) = router.select_failover(
             quota_state=quota_both_exhausted,
             health_state=all_healthy,
             peak=False,
@@ -168,7 +168,7 @@ class TestSelectFailover:
     ):
         """When both z.ai keys have breaker tripped (unhealthy),
         ollama_cloud should be chosen."""
-        chosen, fallback = router.select_failover(
+        (chosen, chosen_model), (fallback, fallback_model) = router.select_failover(
             quota_state=quota_both_exhausted,
             health_state=both_unhealthy,
             peak=False,
@@ -205,7 +205,7 @@ class TestSelectFailover:
             "ours": False, "friend": False, "ollama_cloud": False,
             "ppq": True, "openrouter": True, "deepinfra": True,
         }
-        chosen, fallback = router.select_failover(
+        (chosen, chosen_model), (fallback, fallback_model) = router.select_failover(
             quota_state=quota_all_high_tier_dead,
             health_state=only_externals_healthy,
             peak=False,
@@ -239,7 +239,7 @@ class TestSelectFailover:
             "ours": False, "friend": False, "ollama_cloud": False,
             "ppq": True, "openrouter": True, "deepinfra": True,
         }
-        chosen, _ = router.select_failover(
+        (chosen, chosen_model), _ = router.select_failover(
             quota_state=quota_all_high_tier_dead,
             health_state=only_externals_healthy,
             peak=True,
@@ -268,7 +268,7 @@ class TestSelectFailover:
         }
         # Malformed 3-tuple for a real provider (valid input is a 5-tuple).
         bad_pace = {"ollama_cloud": [(1, 2, 3)]}
-        chosen, _ = router.select_failover(
+        (chosen, chosen_model), _ = router.select_failover(
             quota_state=quota,
             health_state=health,
             peak=False,
@@ -284,7 +284,7 @@ class TestSelectFailover:
         """When ours is exhausted but friend has quota, ollama_cloud should
         still be chosen because converged rate ollama (0.024) < friend (0.029).
         """
-        chosen, fallback = router.select_failover(
+        (chosen, chosen_model), (fallback, fallback_model) = router.select_failover(
             quota_state=quota_ours_exhausted_friend_ok,
             health_state=all_healthy,
             peak=False,
@@ -315,7 +315,7 @@ class TestSelectFailover:
             failure_counts=None,
             pace_windows=None,
         )
-        assert result == (None, None)
+        assert result == ((None, None), (None, None))
 
     def test_returns_none_none_on_garbage(self, router):
         """Even with completely garbage inputs, never raises."""
@@ -341,14 +341,14 @@ class TestSelectFailover:
         )
         assert isinstance(result, tuple)
         # No viable providers → chosen should be None
-        assert result[0] is None
+        assert result[0] == (None, None)
 
     def test_fallback_is_second_viable(
         self, router, quota_both_exhausted, all_healthy
     ):
         """When there are multiple viable providers, fallback should be
         the second cheapest."""
-        chosen, fallback = router.select_failover(
+        (chosen, chosen_model), (fallback, fallback_model) = router.select_failover(
             quota_state=quota_both_exhausted,
             health_state=all_healthy,
             peak=False,
@@ -362,12 +362,12 @@ class TestSelectFailover:
 
     def test_peak_affects_selection(self, router, quota_ours_exhausted_friend_ok, all_healthy):
         """During peak, friend gets 3x multiplier — may change selection."""
-        chosen_offpeak, _ = router.select_failover(
+        (chosen_offpeak, _), _ = router.select_failover(
             quota_state=quota_ours_exhausted_friend_ok,
             health_state=all_healthy,
             peak=False,
         )
-        chosen_peak, _ = router.select_failover(
+        (chosen_peak, _), _ = router.select_failover(
             quota_state=quota_ours_exhausted_friend_ok,
             health_state=all_healthy,
             peak=True,

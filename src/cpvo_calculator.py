@@ -36,6 +36,22 @@ Example (from docs/PLAN-live-kalman-routing.md §2.5.2):
 If A drops to 80% success → $0.00125/M.  The optimizer now sees A as more
 expensive and routes accordingly.
 
+Model-Aware Extension (Phase 4.5b)
+-----------------------------------
+Different models from the same provider can have very different quality
+(e.g. ``glm-5.2`` vs ``glm-4.5-flash`` from zai).  When the
+``provider_telemetry`` table has a ``model`` column, the calculator can
+track quality per ``(provider, model)`` pair instead of just per-provider.
+
+All public methods accept an optional ``model`` parameter.  When ``model``
+is ``None`` (the default), behaviour is identical to the original
+per-provider tracking.  When ``model`` is provided **and** the table has a
+``model`` column, the query is narrowed to that specific model.
+
+``get_effective_rates_model_aware()`` is a convenience method that accepts
+``{(provider, model): base_rate}`` and returns ``{(provider, model):
+effective_rate}``.
+
 Consumers
 ---------
   - ``LiveRouter.select_failover()`` — calls ``get_effective_rates()`` to
@@ -97,9 +113,16 @@ class CPVOCalculator:
     # ── Internal: telemetry query ──────────────────────────────────────
 
     def _query_aggregates(
-        self, provider: str, window_hours: float = 24.0
+        self,
+        provider: str,
+        window_hours: float = 24.0,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Query aggregated telemetry for a provider in the time window.
+
+        When *model* is given **and** the table has a ``model`` column, the
+        query is narrowed to that specific model — enabling per-model quality
+        tracking (Phase 4.5b).
 
         Returns a dict with::
 
@@ -129,7 +152,16 @@ class CPVOCalculator:
                 self.db_path, timeout=5, isolation_level=None
             )
             try:
-                row = conn.execute(
+                # Check whether the table has a 'model' column.  This lets us
+                # work with both old schemas (no model column → provider-level
+                # only) and new schemas (model column → per-model filtering).
+                use_model = False
+                if model is not None:
+                    cols = conn.execute("PRAGMA table_info(provider_telemetry)")
+                    col_names = {r[1] for r in cols.fetchall()}
+                    use_model = "model" in col_names
+
+                sql = (
                     "SELECT"
                     "  COUNT(*) AS total_count,"
                     "  SUM(CASE WHEN response_valid = 1 THEN 1 ELSE 0 END)"
@@ -139,9 +171,14 @@ class CPVOCalculator:
                     "  SUM(CASE WHEN token_mismatch = 1 THEN 1 ELSE 0 END)"
                     "    AS mismatch_count "
                     "FROM provider_telemetry "
-                    "WHERE provider = ? AND ts >= ?",
-                    (provider, cutoff),
-                ).fetchone()
+                    "WHERE provider = ? AND ts >= ?"
+                )
+                params: list[Any] = [provider, cutoff]
+                if use_model:
+                    sql += " AND model = ?"
+                    params.append(model)
+
+                row = conn.execute(sql, tuple(params)).fetchone()
             finally:
                 conn.close()
 
@@ -164,6 +201,7 @@ class CPVOCalculator:
         provider: str,
         window_hours: float = 24.0,
         base_rate: float | None = None,
+        model: str | None = None,
     ) -> float | None:
         """Compute Cost-Per-Valid-Output for a provider.
 
@@ -174,6 +212,11 @@ class CPVOCalculator:
           / success_count``.
         - If ``base_rate`` is ``None``, the result is billed-tokens-per-success
           (a rate-free quality proxy): ``total_billed_tokens / success_count``.
+
+        When *model* is given, the query is narrowed to that specific model
+        (only if the ``model`` column exists in the table).  When ``None``
+        (the default), all models for the provider are aggregated — identical
+        to the original per-provider behaviour.
 
         Edge cases:
           - **Insufficient data** (< ``MIN_SAMPLES`` total requests): returns
@@ -186,13 +229,15 @@ class CPVOCalculator:
                 ``provider_telemetry``).
             window_hours: Look-back window in hours (default 24).
             base_rate: Optional base $/M rate for dollar-denominated CPVO.
+            model: Optional model name to narrow the query to a specific
+                model within the provider (Phase 4.5b).
 
         Returns:
             CPVO value, ``base_rate`` (insufficient data), ``None`` (no base_rate
             + insufficient data), or ``float('inf')`` (zero successes).
         """
         try:
-            agg = self._query_aggregates(provider, window_hours)
+            agg = self._query_aggregates(provider, window_hours, model=model)
             total_count = agg["total_count"]
 
             # Insufficient data — can't judge quality
@@ -269,13 +314,83 @@ class CPVOCalculator:
                 result[provider] = base_rate
         return result
 
+    def get_effective_rates_model_aware(
+        self,
+        base_rates: dict[tuple[str, str | None], float],
+    ) -> dict[tuple[str, str | None], float]:
+        """Model-aware variant of :meth:`get_effective_rates`.
+
+        Adjusts base rates with quality penalty **per (provider, model) pair**.
+
+        For each ``(provider, model)`` key in *base_rates*:
+
+        - Query CPVO for the last 24 hours, narrowed to *model* when the
+          ``model`` column exists.
+        - If the per-model sample count is insufficient (< 100): **fall back
+          to the provider-level aggregate** (all models combined).  This
+          ensures cold models benefit from the provider's overall quality
+          data rather than getting an unadjusted rate.
+        - If still insufficient: ``effective = base_rate`` (no penalty).
+        - If success_rate < ``SUCCESS_THRESHOLD`` (0.95):
+          ``effective = base_rate / success_rate``.
+        - If success_rate >= 0.95: ``effective = base_rate``.
+
+        This lets the optimizer distinguish between, say, ``glm-5.2``
+        (reliable) and ``glm-4.5-flash`` (less reliable) on the same zai
+        provider.
+
+        Args:
+            base_rates: ``{(provider, model): base_$/M_rate}``.  ``model``
+                may be ``None`` to request provider-level aggregation for
+                that key.
+
+        Returns:
+            Same keys as input, with low-success pairs penalised.  NEVER
+            raises; on error returns the input ``base_rates`` unchanged.
+        """
+        result: dict[tuple[str, str | None], float] = {}
+        for key, base_rate in base_rates.items():
+            provider, model = key
+            try:
+                agg = self._query_aggregates(provider, 24.0, model=model)
+                total_count = agg["total_count"]
+
+                # Fallback: if per-model samples are insufficient, try
+                # provider-level (all models combined) before giving up.
+                if total_count < MIN_SAMPLES and model is not None:
+                    agg = self._query_aggregates(provider, 24.0, model=None)
+                    total_count = agg["total_count"]
+
+                if total_count < MIN_SAMPLES:
+                    result[key] = base_rate
+                    continue
+
+                success_count = agg["success_count"]
+                if success_count == 0:
+                    result[key] = float(base_rate) / _SUCCESS_EPSILON
+                    continue
+
+                success_rate = success_count / total_count
+                if success_rate < SUCCESS_THRESHOLD:
+                    result[key] = float(base_rate) / success_rate
+                else:
+                    result[key] = base_rate
+            except Exception:
+                result[key] = base_rate
+        return result
+
     def get_quality_score(
         self,
         provider: str,
         window_hours: float = 24.0,
         base_rate: float | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Return quality metrics for a provider.
+
+        When *model* is given, metrics are computed for that specific model
+        only (Phase 4.5b).  When ``None`` (default), all models for the
+        provider are aggregated — same as the original per-provider behaviour.
 
         Args:
             provider: Provider name.
@@ -284,6 +399,8 @@ class CPVOCalculator:
                 ``effective_rate`` is the quality-adjusted $/M.  When
                 ``None``, ``effective_rate`` is a penalty multiplier
                 (1.0 = no change, 1.25 = +25%).
+            model: Optional model name to narrow quality metrics to a
+                specific model within the provider.
 
         Returns:
             Dict with::
@@ -304,7 +421,7 @@ class CPVOCalculator:
             "effective_rate": base_rate if base_rate is not None else 1.0,
         }
         try:
-            agg = self._query_aggregates(provider, window_hours)
+            agg = self._query_aggregates(provider, window_hours, model=model)
             total_count = agg["total_count"]
 
             if total_count == 0:
@@ -314,7 +431,7 @@ class CPVOCalculator:
             success_rate = success_count / total_count
             avg_latency = agg["total_latency_ms"] / total_count
             mismatch_rate = agg["mismatch_count"] / total_count
-            cpvo = self.compute_cpvo(provider, window_hours, base_rate)
+            cpvo = self.compute_cpvo(provider, window_hours, base_rate, model=model)
 
             # Effective rate
             if total_count < MIN_SAMPLES:

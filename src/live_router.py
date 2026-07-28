@@ -16,12 +16,13 @@ Design:
 Usage (from the production proxy's failover path)::
 
     router = LiveRouter.get_instance()
-    chosen, fallback = router.select_failover(
+    (chosen, chosen_model), (fallback, fallback_model) = router.select_failover(
         quota_state=_snapshot_quota(),
         health_state=_snapshot_health(),
         peak=peak,
         failure_counts=_snapshot_failures(),
         pace_windows=_snapshot_pace(),
+        task_type="coding",           # P4.5d: worker profile task type
     )
     if chosen is None:
         # All routing failed — return 503 or use hard-coded fallback
@@ -47,6 +48,7 @@ from src.provider_names import normalize_provider_name
 from src.pricing_engine import pace_factor_multi
 from src.quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
 from src.cpvo_calculator import CPVOCalculator
+from src.model_mapping import get_model
 
 __all__ = ["LiveRouter"]
 
@@ -177,7 +179,8 @@ class LiveRouter:
         peak: bool,
         failure_counts: dict[str, int] | None = None,
         pace_windows: dict[str, list[tuple[float, float, float, float, float]]] | None = None,
-    ) -> tuple[str | None, str | None]:
+        task_type: str = "coding",
+    ) -> tuple[tuple[str | None, str | None], tuple[str | None, str | None]]:
         """Choose a failover provider when BOTH z.ai keys are exhausted.
 
         Builds a RoutingOptimizer with all external providers + the friend
@@ -195,20 +198,25 @@ class LiveRouter:
             failure_counts: Optional dict of provider -> failure_count.
             pace_windows: Optional dict of provider -> list of pace
                 window tuples.
+            task_type: Task type for model selection (P4.5d). One of
+                ``"coding"``, ``"reasoning"``, ``"chat"``, ``"simple"``.
+                Defaults to ``"coding"``.
 
         Returns:
-            (chosen_provider, fallback_provider) — both are canonical
-            provider name strings or None on error. The fallback is the
-            second-cheapest viable provider (or None if no second viable).
+            ((chosen_provider, chosen_model), (fallback_provider, fallback_model))
+            — each element is a ``(name, model)`` tuple, or ``(None, None)``
+            on error. The fallback is the second-cheapest viable provider
+            (or ``(None, None)`` if no second viable). Model names are
+            resolved via :func:`src.model_mapping.get_model`.
         """
         try:
             with self._lock:
                 return self._do_select_failover(
                     quota_state, health_state, peak,
-                    failure_counts, pace_windows,
+                    failure_counts, pace_windows, task_type,
                 )
         except Exception:
-            return (None, None)
+            return ((None, None), (None, None))
 
     def select_primary(
         self,
@@ -306,7 +314,8 @@ class LiveRouter:
         peak: bool,
         failure_counts: dict[str, int] | None,
         pace_windows: dict[str, list[tuple[float, float, float, float, float]]] | None,
-    ) -> tuple[str | None, str | None]:
+        task_type: str = "coding",
+    ) -> tuple[tuple[str | None, str | None], tuple[str | None, str | None]]:
         """Internal failover selection — may raise (wrapped by caller)."""
 
         optimizer = RoutingOptimizer(
@@ -427,7 +436,13 @@ class LiveRouter:
         if len(viable) >= 2:
             fallback = viable[1].get("provider")
 
-        return (chosen, fallback)
+        # ── Model-aware return (P4.5c) ───────────────────────────────────
+        # Resolve the model for each chosen provider via model_mapping.
+        # When the provider is None (no viable route), the model is None too.
+        chosen_model = get_model(chosen, task_type) if chosen is not None else None
+        fallback_model = get_model(fallback, task_type) if fallback is not None else None
+
+        return ((chosen, chosen_model), (fallback, fallback_model))
 
     # ── Introspection (for monitoring / tests) ────────────────────────────
 
