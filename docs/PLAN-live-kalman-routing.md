@@ -375,7 +375,9 @@ Consumers (Phase 3.x): the `CPVOCalculator` (2.5.2) will query
 quality scores, so a silently-downgraded provider is penalized within the
 4h probe cadence.
 
-### 2.5.4 — Token count audit
+### 2.5.4 — Token count audit + quality-aware optimizer wiring
+
+**Status:** ✅ DONE (2026-07-28) — CPVO wired into LiveRouter, token audit extracted; cold-reviewed, in merge-review
 
 Compare billed tokens vs actual response length. Mismatch = billing fraud.
 - `billed_tokens` from API response usage field
@@ -383,9 +385,27 @@ Compare billed tokens vs actual response length. Mismatch = billing fraud.
 - If mismatch > 20% → flag provider for investigation
 - Feed mismatch rate into CPVO calculator as quality penalty
 
+**Implemented:**
+- `src/live_router.py` — `_do_select_failover()` now calls a new
+  `_get_effective_rates()` which queries `CPVOCalculator.get_effective_rates()`
+  (cached 5 min, falls back to base rates on any error) and seeds a throwaway
+  `PriceKalman` per provider with the quality-adjusted rate. The optimizer's
+  peak/scarcity/health/pace multipliers still apply on top of the adjusted base.
+  `get_kalman_state()` now exposes a per-provider `quality_score`
+  (success_rate, avg_latency_ms, token_mismatch_rate).
+- `src/token_audit.py` — extracted `audit_token_count(billed, buffer)`
+  (never raises, returns `(actual, mismatch, rate)`). Unit-tested.
+- `~/.hermes/bot/zai_proxy.py` — the inline audit in `_proxy()`'s finally block
+  now calls the extracted function and emits a `[telemetry]` warning on mismatch.
+  The `token_mismatch` telemetry column feeds CPVO's quality penalty.
+
 **Deliverable:** Quality-aware routing decisions. Optimizer sees
 effective cost (price / success_rate), not just sticker price.
 Silent downgrades detected within 4h. Billing fraud detected immediately.
+
+**Verified:** End-to-end test flips a failover decision — a cheap-but-flaky
+provider (80% success) is passed over for a reliable one once CPVO inflates its
+effective rate. 722 tests pass; coverage 91% on touched modules.
 
 ---
 

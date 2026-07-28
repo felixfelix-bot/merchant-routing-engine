@@ -40,12 +40,13 @@ _PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PARENT not in sys.path:
     sys.path.insert(0, _PARENT)
 
-from src.price_kalman import PriceKalman
+from src.price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
 from src.consumption_kalman import ConsumptionKalman
 from src.routing_optimizer import RoutingOptimizer
 from src.provider_names import normalize_provider_name
 from src.pricing_engine import pace_factor_multi
 from src.quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
+from src.cpvo_calculator import CPVOCalculator
 
 __all__ = ["LiveRouter"]
 
@@ -76,6 +77,11 @@ _ZAI_PEAK: tuple[int, int] = (6, 10)
 
 # All providers that are NOT z.ai — these are the failover candidates
 _EXTERNAL_PROVIDERS = ("ollama_cloud", "ppq", "openrouter", "deepinfra")
+
+# ── CPVO cache (Phase 2.5.4) ─────────────────────────────────────────────────
+# Effective-rate lookups query the telemetry DB; cache them so a hot failover
+# path stays well under the 10 ms budget.  Refreshed every 5 minutes.
+_CPVO_CACHE_TTL = 300.0  # seconds
 
 
 class LiveRouter:
@@ -127,6 +133,9 @@ class LiveRouter:
         self._db_path = db_path
         rates = converged_rates if converged_rates is not None else dict(_DEFAULT_CONVERGED_RATES)
 
+        # Keep the unadjusted base rates for CPVO queries and fallback.
+        self._base_rates: dict[str, float] = dict(rates)
+
         # Per-provider Kalman instances (persist across calls)
         self._price_kalmans: dict[str, PriceKalman] = {}
         self._consumption_kalmans: dict[str, ConsumptionKalman] = {}
@@ -149,6 +158,15 @@ class LiveRouter:
 
         # Track initialized providers for introspection
         self._provider_names = list(rates.keys())
+
+        # ── CPVO quality-aware effective rates (Phase 2.5.4) ───────────────
+        # Queries the provider_telemetry table to inflate the base rate of
+        # low-success providers (effective = base / success_rate).  Cached so
+        # the hot failover path stays fast; falls back to base rates on any
+        # error.  ``db_path`` is the same usage DB the proxy writes to.
+        self._cpvo: CPVOCalculator = CPVOCalculator(db_path)
+        self._cpvo_cache: dict[str, float] | None = None
+        self._cpvo_cache_ts: float = 0.0
 
     # ── Public API ───────────────────────────────────────────────────────
 
@@ -249,6 +267,38 @@ class LiveRouter:
 
     # ── Internal ─────────────────────────────────────────────────────────
 
+    def _get_effective_rates(self) -> dict[str, float]:
+        """Return CPVO-adjusted effective rates, cached for ``_CPVO_CACHE_TTL``.
+
+        Quality-aware routing entry point (Phase 2.5.4).  A provider with a
+        low success rate sees its base rate inflated by ``1 / success_rate``
+        (via :meth:`CPVOCalculator.get_effective_rates`) so the optimizer
+        picks it only with eyes open about the quality risk.
+
+        * Cached so the hot failover path stays < 10 ms; the cache refreshes
+          every 5 minutes.
+        * On ANY error (DB locked, corrupt, missing table) the unadjusted
+          base rates are returned — quality-awareness must never break routing.
+
+        Never raises.
+        """
+        try:
+            now = time.time()
+            if (
+                self._cpvo_cache is not None
+                and (now - self._cpvo_cache_ts) < _CPVO_CACHE_TTL
+            ):
+                return self._cpvo_cache
+            effective = self._cpvo.get_effective_rates(self._base_rates)
+            # Guard against a pathological empty/None return.
+            if not effective:
+                effective = dict(self._base_rates)
+            self._cpvo_cache = effective
+            self._cpvo_cache_ts = now
+            return effective
+        except Exception:
+            return dict(self._base_rates)
+
     def _do_select_failover(
         self,
         quota_state: dict[str, Any],
@@ -264,6 +314,15 @@ class LiveRouter:
             peak_mult=3.0,
             exhaustion_horizon=1,
         )
+
+        # ── Quality-aware effective rates (Phase 2.5.4) ───────────────────
+        # Adjust each provider's base rate with the CPVO quality penalty
+        # (effective = base / success_rate for low-success providers) BEFORE
+        # handing rates to the optimizer.  A throwaway PriceKalman seeded with
+        # the effective rate is used so the optimizer's peak/scarcity/health
+        # multipliers still apply on top of the quality-adjusted base.  On any
+        # CPVO failure this falls back to the unadjusted base rates.
+        effective_rates = self._get_effective_rates()
 
         # Register ALL providers (ours + friend + externals).
         # ours is expected to be exhausted (breaker tripped), but we include
@@ -299,7 +358,19 @@ class LiveRouter:
 
             optimizer.add_provider(
                 name=name,
-                price_kalman=self._price_kalmans[name],
+                # Quality-aware base rate: a throwaway PriceKalman seeded with
+                # the CPVO effective rate.  Keeps the optimizer's multiplier
+                # pipeline (peak/scarcity/health/pace) intact while making the
+                # base reflect provider quality.  Falls back to the live
+                # PriceKalman when CPVO has no entry for this provider.
+                price_kalman=PriceKalman(
+                    initial_rate=max(
+                        float(effective_rates.get(name, self._base_rates.get(name, 0.001))),
+                        MIN_EFFECTIVE_PRICE,
+                    ),
+                    process_noise=1e-6,
+                    measurement_noise=1e-4,
+                ),
                 consumption_kalman=self._consumption_kalmans[name],
                 quota_remaining=remaining,
                 breaker_tripped=not healthy,
@@ -351,12 +422,31 @@ class LiveRouter:
                 for name in self._provider_names:
                     pk = self._price_kalmans[name]
                     ck = self._consumption_kalmans[name]
-                    state[name] = {
+                    entry = {
                         "base_rate": pk.base_rate,
                         "burn_rate": ck.burn_rate,
                         "tokens_used": ck.tokens_used,
                         "updates": ck.update_count,
                     }
+                    # ── Quality score (Phase 2.5.4) ───────────────────────
+                    # Per-provider quality metrics from the telemetry table:
+                    # success_rate, avg_latency_ms, token_mismatch_rate.
+                    # Used for monitoring/debugging.  Wrapped so a CPVO/DB
+                    # failure never empties the whole state report.
+                    try:
+                        qs = self._cpvo.get_quality_score(
+                            name, 24.0, base_rate=self._base_rates.get(name),
+                        )
+                        entry["quality_score"] = {
+                            "success_rate": qs.get("success_rate", 0.0),
+                            "avg_latency_ms": qs.get("avg_latency_ms", 0.0),
+                            "token_mismatch_rate": qs.get("token_mismatch_rate", 0.0),
+                            "sample_count": qs.get("sample_count", 0),
+                            "effective_rate": qs.get("effective_rate"),
+                        }
+                    except Exception:
+                        entry["quality_score"] = None
+                    state[name] = entry
                 return state
         except Exception:
             return {}
