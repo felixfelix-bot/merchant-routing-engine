@@ -380,8 +380,13 @@ quality scores, so a silently-downgraded provider is penalized within the
 **Status:** ✅ DONE (2026-07-28) — CPVO wired into LiveRouter, token audit extracted; cold-reviewed, in merge-review
 
 Compare billed tokens vs actual response length. Mismatch = billing fraud.
-- `billed_tokens` from API response usage field
-- `actual_tokens` from len(response) / 4 (rough char-to-token estimate)
+- `billed_tokens` from API response `usage.completion_tokens` (NOT total_tokens —
+  see 2.5.4 false-positive note below)
+- `actual_tokens` estimated from the **extracted completion text** (Phase 3.5):
+  `_extract_completion_text` pulls content from a single JSON body
+  (`choices[].message.content`) or concatenates SSE `choices[].delta.content`
+  across `data:` frames, then `_estimate_tokens` counts them with `tiktoken`
+  (cl100k_base, optional/lazy) or a `chars/4` fallback on the text.
 - If mismatch > 20% → flag provider for investigation
 - Feed mismatch rate into CPVO calculator as quality penalty
 
@@ -406,6 +411,37 @@ Silent downgrades detected within 4h. Billing fraud detected immediately.
 **Verified:** End-to-end test flips a failover decision — a cheap-but-flaky
 provider (80% success) is passed over for a reliable one once CPVO inflates its
 effective rate. 722 tests pass; coverage 91% on touched modules.
+
+#### 2.5.4 → 3.5 — Token-audit false-positive fix
+
+**Status:** ✅ DONE (2026-07-29) — extraction-based estimator; in merge-review
+
+The shipped `len(response_buffer)//4` estimate counted raw response *bytes*. For
+a streaming (SSE) response the buffer is not the completion text — it is a run
+of `data: {...}` frames whose JSON scaffolding (keys, indexes, the embedded
+`usage` object, the `[DONE]` marker) is 30–60× the real content size. The
+heuristic therefore over-estimated `actual_tokens` and tripped the >20 % gate on
+almost every streaming request. Production telemetry confirmed it: **94.4 % of
+billed requests were flagged** (862/913) — a rate impossible for genuine fraud.
+
+Two compounding bugs were both fixed:
+1. The call site (`zai_proxy.py`) now passes `usage.completion_tokens`, not
+   `total_tokens` — the estimate is completion-only, so comparing against
+   prompt+completion manufactured a false gap on any non-trivial prompt.
+2. `audit_token_count` now estimates from the **extracted completion text**
+   (`_extract_completion_text` mirrors the proxy's `_parse_usage` SSE/JSON scan),
+   via `tiktoken` when importable else a `chars/4` heuristic on that text.
+   `len(buf)//4` survives only as a degenerate fallback for non-JSON blobs.
+
+`_extract_completion_text` also distinguishes "content-less but structured"
+(error envelope, `[DONE]`-only stream → 0 tokens, no flag) from "raw blob"
+(byte fallback), so error responses no longer report a spurious estimate.
+
+**Verified:** 23 unit tests (SSE, non-streaming, error, empty, multi-delta,
+degenerate blob, never-crash) + full suite 733 pass. Soak reconstruction on
+real billed-token shapes: OLD flagged 7/7, NEW flagged 0/7 with estimates
+matching the real completion count.
+
 
 ---
 

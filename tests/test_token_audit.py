@@ -100,3 +100,154 @@ class TestNeverCrashes:
         assert mismatch_default is False  # 0.12 < 0.20
         _, mismatch_strict, _ = audit_token_count(100, b"x" * 352, threshold=0.10)
         assert mismatch_strict is True  # 0.12 > 0.10
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase 3.5 — SSE / JSON false-positive regression
+#
+# The original `len(buffer)//4` heuristic counted the raw response BYTES, which
+# for a streaming (SSE) response include `data: {...}` framing, JSON keys, the
+# final `[DONE]` marker and the embedded `usage` object. That scaffolding is
+# easily 30–60× the size of the actual completion text, so `actual_tokens` was
+# massively inflated and almost every streaming request tripped the >20 %
+# mismatch gate — a false-positive billing-fraud alert.
+#
+# These tests pin the FIXED behaviour: the estimate must be derived from the
+# EXTRACTED completion text, not the raw buffer length.
+# ────────────────────────────────────────────────────────────────────────────
+
+# A realistic z.ai streaming completion. The actual assistant text is just
+# "Hello there!" (≈3 tokens); the surrounding JSON/SSE framing is ~600 bytes.
+_SSE_BUFFER = b"\n".join([
+    b'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}',
+    b"",
+    b'data: {"choices":[{"index":0,"delta":{"content":"Hello"}}]}',
+    b"",
+    b'data: {"choices":[{"index":0,"delta":{"content":" there!"}}]}',
+    b"",
+    b'data: {"choices":[{"index":0,"delta":{"content":""},"finish_reason":"stop"}],'
+    b'"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}',
+    b"",
+    b"data: [DONE]",
+    b"",
+])
+
+# The same completion delivered as a single (non-streaming) JSON body.
+_JSON_BUFFER = (
+    b'{"id":"chatcmpl-1","object":"chat.completion","model":"glm-4.6",'
+    b'"choices":[{"index":0,"message":{"role":"assistant","content":"Hello there!"},'
+    b'"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,'
+    b'"total_tokens":10}}'
+)
+
+# A bare API error envelope (no choices, no usable content).
+_ERROR_BUFFER = (
+    b'{"error":{"code":"rate_exceeded","message":"quota exceeded"}}'
+)
+
+
+class TestSSEStreamingFalsePositive:
+    """Gate 1 (TDD) — this MUST fail on the old len(buffer)//4 code and pass
+    after the Phase 3.5 fix."""
+
+    def test_short_streaming_completion_not_flagged(self):
+        """billed completion_tokens=3, real text "Hello there!" ≈3 tokens.
+        Old code: len(_SSE_BUFFER)//4 ≫ 3 → spurious mismatch. Fixed code:
+        extract text → ≈3 tokens → no mismatch."""
+        actual, mismatch, rate = audit_token_count(3, _SSE_BUFFER)
+        assert mismatch is False, (
+            f"FALSE POSITIVE: estimated actual={actual} vs billed=3 "
+            f"(rate={rate:.0%}) — SSE framing must not inflate the estimate"
+        )
+
+    def test_sse_actual_close_to_real_text_tokens(self):
+        """The estimate should be in the ballpark of the true completion
+        token count (≈3), NOT the raw buffer length (≈600 bytes ÷ 4 ≈ 150)."""
+        actual, _, _ = audit_token_count(3, _SSE_BUFFER)
+        # True count is 3; allow a generous band (1–8) but reject the old ≈150.
+        assert 1 <= actual <= 8, f"actual={actual} looks like raw-buffer len//4"
+
+
+class TestExtractionNonStreaming:
+    """Single-JSON (non-streaming) bodies — content taken from
+    choices[].message.content, not the raw byte length."""
+
+    def test_non_streaming_completion_not_flagged(self):
+        """billed=3, content 'Hello there!' (12 chars ≈ 3 tokens) → no
+        mismatch. Old code would estimate from the ~190-byte JSON envelope."""
+        actual, mismatch, rate = audit_token_count(3, _JSON_BUFFER)
+        assert actual == 3, f"actual={actual} — expected text-derived estimate"
+        assert mismatch is False
+        assert rate == 0.0
+
+    def test_non_streaming_real_mismatch_still_detected(self):
+        """A genuine over-billing (billed=50 for ~3 real tokens) is still
+        caught — the fix must not blind the audit, only kill false positives."""
+        actual, mismatch, rate = audit_token_count(50, _JSON_BUFFER)
+        assert actual == 3
+        assert mismatch is True
+        assert rate == pytest.approx((50 - 3) / 50)
+
+
+class TestExtractionErrorAndEmpty:
+    """Error responses and content-less buffers must never flag a mismatch."""
+
+    def test_error_envelope_no_content_zero_tokens(self):
+        """A quota-exceeded error has no completion content. With billed=0
+        (no usage), mismatch must be False and actual should be 0 (not a
+        byte-fallback of the error JSON length)."""
+        actual, mismatch, rate = audit_token_count(0, _ERROR_BUFFER)
+        assert mismatch is False
+        assert rate == 0.0
+        assert actual == 0, "error envelope must not yield a byte estimate"
+
+    def test_error_envelope_with_spurious_billed_no_flag(self):
+        """Even if a bogus billed count slips through, an error envelope has
+        no content → actual=0 → billed<=0-or-actual<=0 guard ⇒ no mismatch."""
+        actual, mismatch, _ = audit_token_count(999, _ERROR_BUFFER)
+        assert actual == 0
+        assert mismatch is False
+
+    def test_done_only_stream_no_content(self):
+        """A stream that is just the terminator frame carries no content."""
+        buf = b"data: [DONE]\n\n"
+        actual, mismatch, _ = audit_token_count(5, buf)
+        assert actual == 0
+        assert mismatch is False
+
+    def test_truly_empty_buffer(self):
+        actual, mismatch, rate = audit_token_count(100, b"")
+        assert actual == 0
+        assert mismatch is False
+        assert rate == 0.0
+
+    def test_none_buffer(self):
+        actual, mismatch, rate = audit_token_count(100, None)
+        assert actual == 0
+        assert mismatch is False
+        assert rate == 0.0
+
+    def test_truncated_binary_blob_uses_byte_fallback(self):
+        """A non-JSON / non-SSE blob (truncated response) falls back to the
+        coarse byte estimate rather than crashing — and with no billing still
+        reports mismatch=False."""
+        blob = b"\x00\x01\x02garbage" * 40  # 400 bytes, unparseable
+        actual, mismatch, _ = audit_token_count(0, blob)
+        assert actual == 100  # 400 // 4 degenerate fallback
+        assert mismatch is False
+
+
+class TestStreamingMultiDeltaAggregation:
+    """Content split across many deltas is concatenated before estimating."""
+
+    def test_many_small_deltas_concatenated(self):
+        # 5 deltas of "ab" each → "ababababab" (10 chars ≈ 2 tokens), billed 2.
+        frames = []
+        for _ in range(5):
+            frames.append(b'data: {"choices":[{"delta":{"content":"ab"}}]}')
+            frames.append(b"")
+        frames.append(b"data: [DONE]")
+        buf = b"\n".join(frames)
+        actual, mismatch, _ = audit_token_count(2, buf)
+        assert actual == 2, f"actual={actual} — deltas must be concatenated"
+        assert mismatch is False
