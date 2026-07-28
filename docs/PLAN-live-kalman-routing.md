@@ -324,6 +324,7 @@ Consumers (not yet wired — Phase 3.x):
 - Calibration cron — will feed quality-adjusted rates to PriceKalman
 
 ### 2.5.3 — Quality probes (canary prompts)
+**Status:** ✅ DONE (2026-07-28) — cold-reviewed, in merge-review
 
 Periodically send a known prompt to each provider and compare output:
 - "What is 2+2?" → should return "4"
@@ -335,12 +336,44 @@ it's running a different model or a degraded version. This is the
 canary in the coal mine — detect silent downgrades BEFORE they affect
 production routing.
 
-Build as `scripts/quality_probe.py`:
-- Cron job (every 4h)
-- Sends 3 probe prompts to each provider
-- Scores: valid_response (bool), correct_answer (bool), latency_ms
-- Logs to provider_telemetry table
-- Alerts if quality drops below threshold
+Built as `scripts/quality_probe.py` (standalone cron job, stdlib HTTP via
+`urllib`, optional `pyyaml` with built-in provider defaults fallback):
+- Sends 3 probe prompts to each provider (probe_id 1-3)
+- Scores per probe: `response_received`, `correct_answer`, `latency_ms`,
+  `response_text` (first 500 chars), `error_type`, `timestamp`
+- Correctness is the pure function `evaluate_correctness(probe_id, text)`
+  (single source of truth): probe 1 ⇔ contains "4", probe 2 ⇔ contains both
+  "def add" and "return", probe 3 ⇔ contains "Paris" (case-insensitive)
+- Logs to the `provider_telemetry` table (same as 2.5.1), extending it
+  idempotently with 3 columns: `probe_id`, `response_text`, `correct_answer`.
+  The base schema is character-identical to the production proxy's; both
+  INSERTs name columns explicitly, so the extension is non-destructive
+  regardless of which process creates the table first.
+- Alerts: any provider failing ≥2 probes → stderr warning + exit 1 (cron
+  alert); any provider latency >10s → stderr warning. Exit code drives the
+  cron alert pipeline.
+- **Never crashes** — every network/DB/parse path is wrapped in try/except;
+  a bad endpoint or timeout records a failed result and continues.
+- Output: `--json` for cron (pure JSON to stdout, warnings to stderr);
+  human-readable table otherwise. `--dry-run` for no-network validation.
+
+Tests: `tests/test_quality_probe.py` — 59 tests, 96% coverage. Cold review:
+APPROVED (probe logic correct, every exception path traced, JSON valid,
+alert threshold verified, schema extension non-destructive vs production).
+
+**Cron setup** (every 4 hours, JSON for machine consumption, exit 1 fires
+the cron alert):
+
+```
+0 */4 * * * cd ~/merchant-routing-engine && python3 scripts/quality_probe.py --json >> /tmp/quality_probe.log 2>&1
+```
+
+`--dry-run` smoke test (no network/keys needed): `python3 scripts/quality_probe.py --dry-run`
+
+Consumers (Phase 3.x): the `CPVOCalculator` (2.5.2) will query
+`provider_telemetry WHERE probe_id IS NOT NULL` to fold canary results into
+quality scores, so a silently-downgraded provider is penalized within the
+4h probe cadence.
 
 ### 2.5.4 — Token count audit
 
