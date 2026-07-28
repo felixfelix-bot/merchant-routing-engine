@@ -90,17 +90,32 @@ class ShadowHook:
             cls._instance = cls(db_path)
         return cls._instance
 
-    def __init__(self, db_path: str | None = None):
+    def __init__(
+        self,
+        db_path: str | None = None,
+        converged_rates: dict[str, float] | None = None,
+    ):
         """Initialize Kalman filters and shadow logger.
 
         Args:
             db_path: SQLite path for ShadowLogger. Defaults to production usage DB.
+            converged_rates: Converged base rates ($/M) from historical data.
+                When provided, PriceKalman instances are seeded with these
+                values instead of the static ``_SEED_COSTS`` defaults.  Keys
+                not present in the dict fall back to ``_SEED_COSTS``.
         """
         if db_path is None:
             db_path = os.path.expanduser("~/.hermes/bot/zai_usage.db")
 
         self._logger = ShadowLogger(db_path)
         self._last_update = time.time()
+
+        # Build the effective seed table: converged overrides take precedence
+        # over the static _SEED_COSTS defaults.
+        effective_seeds: dict[str, float] = dict(_SEED_COSTS)
+        if converged_rates:
+            for name, rate in converged_rates.items():
+                effective_seeds[name] = rate
 
         # Per-provider Kalman instances (persist across calls)
         self._price_kalmans: dict[str, PriceKalman] = {}
@@ -109,7 +124,7 @@ class ShadowHook:
 
         for name in _SEED_COSTS:
             self._price_kalmans[name] = PriceKalman(
-                initial_rate=_SEED_COSTS[name],
+                initial_rate=effective_seeds[name],
                 process_noise=1e-6,
                 measurement_noise=1e-4,
             )
