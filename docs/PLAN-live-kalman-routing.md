@@ -402,7 +402,94 @@ request handler needs to format for ollama's API. This is the risky step
 
 **Gate:** Separate canary for ollama-as-primary. Has its own kill switch.
 
-**Deliverable:** Full price-driven routing across all providers.
+### 4.5 — Model-aware routing (kimi-k3 on ollama + task-type mapping)
+
+**WHY:** Currently proxy sends same model name to every provider. When
+z.ai exhausts, it requests glm-5.2 from ollama — but ollama may serve
+a different model or not have glm-5.2 at all. Kimi K3 (2.8T MoE agentic)
+is now available on ollama cloud. It may produce better code than
+kimi-k2.7-code for coding tasks. But we don't know without measuring.
+
+This phase makes the optimizer model-aware: different models on
+different providers, chosen by CPVO per (provider, model, task_type).
+
+#### 4.5.1 — Model mapping table
+
+Build `src/model_mapping.py`:
+
+```python
+MODEL_MAP = {
+    # (provider, task_type) → model_name
+    ("z.ai", "reasoning"): "glm-5.2",
+    ("z.ai", "coding"): "kimi-k2.7-code",
+    ("z.ai", "simple"): "glm-4.5-flash",
+    ("ollama_cloud", "reasoning"): "glm-5.2",      # if available
+    ("ollama_cloud", "coding"): "kimi-k3",          # new — MoE agentic
+    ("ollama_cloud", "simple"): "gemma4",            # lightweight
+    ("friend", "reasoning"): "glm-5.2",
+    ("friend", "coding"): "kimi-k2.7-code",          # if friend has it
+    ("friend", "simple"): "glm-4.5-flash",
+    ("openrouter", "*"): "auto",                      # let OR pick
+}
+
+def get_model_for(provider: str, task_type: str) -> str:
+    """Return model name for (provider, task_type). Falls back to
+    provider's default if no specific mapping exists."""
+```
+
+Task type comes from the worker profile making the API call:
+- worker-balloon, worker-admin, worker-plebeian → "coding"
+- worker-fips, worker-tollgate, treasurer → "reasoning"
+- worker-base, worker-dq05 → "simple"
+
+The proxy extracts task_type from the request header or worker
+profile config and passes it to LiveRouter.
+
+#### 4.5.2 — CPVO per (provider, model) pair
+
+Extend `src/cpvo_calculator.py`:
+- `compute_cpvo(provider, model, window_hours)` — not just per provider
+- Quality probes test EACH model on EACH provider independently
+- CPVO table: rows = (provider, model), columns = success_rate, avg_latency, cpvo
+
+This tells us: "kimi-k3 on ollama at $0.05/M with 95% success for coding
+tasks" vs "kimi-k2.7-code on z.ai at $0.001/M with 99% success for coding
+tasks." The optimizer picks the lower CPVO.
+
+#### 4.5.3 — Model-aware request formatting
+
+In `_proxy()`, when LiveRouter returns a provider+model pair:
+- If model differs from what z.ai expects → reformat request body
+  (change "model" field in OpenAI-compatible request)
+- Most providers are OpenAI-compatible → just change the model string
+- Log the model swap in provider_telemetry
+
+#### 4.5.4 — Worker profile → task_type mapping
+
+Add `task_type` field to worker profile configs:
+```yaml
+# ~/.hermes/profiles/worker-balloon/config.yaml
+task_type: coding
+
+# ~/.hermes/profiles/worker-fips/config.yaml
+task_type: reasoning
+
+# ~/.hermes/profiles/worker-base/config.yaml
+task_type: simple
+```
+
+Proxy reads this from the profile config and includes it in the
+routing decision context.
+
+**Gate:** Kimi-k3 CPVO must be measured for ≥ 7 days before routing
+coding tasks to it. If CPVO > kimi-k2.7-code CPVO → don't switch.
+
+**Gate:** Model-aware routing has its own kill switch:
+`~/.hermes/bot/.enable_model_aware_routing`
+
+**Deliverable:** Optimizer picks the best (provider, model) pair per
+task type. Kimi-k3 used for coding ONLY if CPVO proves it's worth it.
+Silent model substitution on any provider detected by quality probes.
 
 ---
 
