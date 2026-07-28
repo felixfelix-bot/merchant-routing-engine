@@ -175,15 +175,11 @@ class TestSelectFailover:
         )
         assert chosen == "ollama_cloud"
 
-    def test_returns_friend_when_ours_exhausted_friend_ok(
+    def test_returns_ollama_when_ours_exhausted_friend_ok(
         self, router, quota_ours_exhausted_friend_ok, all_healthy
     ):
-        """When only ours is exhausted, friend should be chosen (cheaper
-        than ollama_cloud at 0.029 vs 0.024... actually ollama is cheaper).
-
-        With converged rates: friend=0.029, ollama=0.024 — ollama is cheaper.
-        But friend is high-tier and so is ollama. Let's just verify the
-        chosen is one of the non-exhausted providers.
+        """When ours is exhausted but friend has quota, ollama_cloud should
+        still be chosen because converged rate ollama (0.024) < friend (0.029).
         """
         chosen, fallback = router.select_failover(
             quota_state=quota_ours_exhausted_friend_ok,
@@ -193,6 +189,8 @@ class TestSelectFailover:
         assert chosen is not None
         # ours is exhausted (remaining=0), should not be chosen
         assert chosen != "ours"
+        # ollama_cloud is cheaper than friend at converged rates
+        assert chosen == "ollama_cloud"
 
     def test_returns_tuple(self, router, quota_both_exhausted, all_healthy):
         """select_failover always returns a 2-tuple."""

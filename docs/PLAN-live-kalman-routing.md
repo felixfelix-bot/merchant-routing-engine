@@ -109,6 +109,7 @@ Pass as `pace_mults` to optimizer.
 ## Phase 1: LiveRouter — Failover Selection Only (safe hot path)
 
 ### 1.1 — Create `LiveRouter` class
+**Status:** DONE (commit 1b76b7b, branch converged-rate-replay)
 **File:** `merchant-routing-engine/src/live_router.py`
 
 ```python
