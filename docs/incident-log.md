@@ -73,6 +73,51 @@ The tokens spent on reasoning aren't wasted. No external failover needed.
 
 ---
 
+## Incident 6: LiveRouter returns None on failover (t_2532b185)
+
+**Symptom**: When both z.ai keys are exhausted, `LiveRouter.select_failover()`
+returns `(None, None)`. The production proxy silently falls back to the
+hardcoded `ollama → ppq → openrouter` chain instead of using Kalman-optimized
+provider selection. The Kalman failover path effectively never engages.
+
+**Root cause**: `_do_select_failover` queried the `RoutingOptimizer` at
+`difficulty="high"` only. The pay-per-token externals (ppq / openrouter /
+deepinfra) are registered as tier `low` (rank 0), which fails the high-tier
+gate (required rank 2). So when **both z.ai keys AND `ollama_cloud`** were
+unavailable (the realistic 48h-soak scenario where ollama is rate-limited
+daily), *no high-tier provider* was viable → `route()` returned
+`chosen_provider="fallback"` → `select_failover` mapped that to `None`.
+
+A secondary failure mode: `pace_factor_multi` was called without a
+per-provider guard, so one provider's malformed pace-window tuple could raise
+and be swallowed into `(None, None)`.
+
+The bug was masked whenever `ollama_cloud` was still up (it is high-tier), so
+it only surfaced in the all-high-tier-dead case.
+
+**Impact**: Kalman-optimized failover selection was bypassed during exactly
+the outage it was built for. Traffic used the hardcoded chain (worse cost
+ordering, no health/quality awareness) instead of the converged-rate routing.
+
+**Fix**:
+1. Progressive tier relaxation in `_do_select_failover`: route at
+   `high → medium → low`, breaking when a viable provider is found, so the
+   low-tier pay-per-token externals are reached when nothing higher is viable.
+2. Wrap each `pace_factor_multi` call per-provider so one bad window cannot
+   abort the whole failover.
+
+**Invariant restored**: `select_failover` never returns `(None, None)` when a
+healthy registered provider exists.
+
+**Regression tests**: `tests/test_live_router.py::TestSelectFailover` —
+`test_returns_external_when_all_high_tier_dead` (off-peak + peak variants) and
+`test_malformed_pace_window_does_not_break_failover`. All fail pre-fix, pass
+post-fix.
+
+**Docs**: `docs/live-router-failover.md`.
+
+---
+
 ## Summary
 
 | Incident | Root Cause | Impact | Fix |
@@ -82,3 +127,4 @@ The tokens spent on reasoning aren't wasted. No external failover needed.
 | 3 | False key exhaustion | Unnecessary PPQ spending | Don't mark empty content as exhausted |
 | 4 | Reasoning in wrong field | "No fallback" errors | Inject reasoning as content |
 | 5 | No funding tracker | 402 spam on dead provider | Provider funding tracker |
+| 6 | Tier gate hid low-tier externals | Kalman failover bypassed | Progressive tier relaxation + pace wrap |
