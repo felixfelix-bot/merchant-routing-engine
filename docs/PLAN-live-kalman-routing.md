@@ -147,43 +147,50 @@ class LiveRouter:
 
 ### 1.2 — Modify failover path in zai_proxy.py
 **File:** `~/.hermes/bot/zai_proxy.py`
+**Status:** ✅ DONE (2026-07-28)
 
 ONLY the failover section changes. Normal `best_key()` path is untouched.
 
-```python
-def best_key() -> str:
-    # --- EXISTING: normal routing (ours vs friend) --- 
-    # Phase 1-4: proactive prediction, _best_unlocked, recovery, health check
-    # ... completely unchanged ...
-    
-    # --- EXISTING: both keys exhausted → external failover ---
-    if chosen is None:
-        # NEW: price-driven failover ordering
-        if _LIVE_ROUTER and os.path.exists(ENABLE_FLAG):
-            try:
-                provider, fallback = _LIVE_ROUTER.select_failover(
-                    quota_state=_snapshot_quota(),
-                    health_state=_snapshot_health(),
-                    peak=_is_peak(),
-                    ...
-                )
-                _log_key_decision(chosen_key=provider, 
-                                  reason="live_kalman_failover", ...)
-                return provider
-            except Exception:
-                pass  # fall through to hardcoded failover
-        
-        # EXISTING: hardcoded failover (ollama → ppq → openrouter)
-        ... unchanged ...
-```
+**What was implemented:**
 
-**What changed:** One try/except block in the failover section. If LiveRouter
-fails, the existing hardcoded ollama→ppq→openrouter chain still runs. Hermes
-always gets tokens.
+1. **Startup (after ShadowHook init):** `_LIVE_ROUTER` is created with
+   converged rates from `load_historical_rates()`. Wrapped in try/except —
+   import failure sets `_LIVE_ROUTER = None` and the proxy continues normally.
 
-**What did NOT change:** The entire ours/friend selection path. Proactive
-Kalman predictions, reactive thresholds, recovery checks, health gates —
-all untouched.
+2. **`best_key()` Phase 5 (new, after Phase 4 health check):** When
+   `chosen is None` (both z.ai keys exhausted) AND `_LIVE_ROUTER` is not None
+   AND the kill-switch file `~/.hermes/bot/.enable_live_routing` exists,
+   calls `_LIVE_ROUTER.select_failover()` with quota/health/peak snapshots.
+   If LiveRouter returns a provider, logs the decision and returns it.
+   On any exception, falls through to `return None` and the hardcoded
+   failover chain in `_proxy()` runs.
+
+3. **`_proxy()` external provider dispatch (new block after `if chosen is None:`):**
+   When `best_key()` returns an external provider (not in `KEYS`), routes
+   to `_try_ollama_cloud()` or `_try_external_failover()` as appropriate.
+   If the LiveRouter-chosen provider fails, falls through to the same
+   hardcoded chain. Hermes always gets tokens.
+
+**What changed:** One try/except block in `best_key()` (Phase 5) + one
+dispatch block in `_proxy()`. If LiveRouter fails, the existing hardcoded
+ollama→ppq→openrouter chain still runs. Hermes always gets tokens.
+
+**What did NOT change:** The entire ours/friend selection path (Phases 1-4).
+Proactive Kalman predictions, reactive thresholds, recovery checks, health
+gates — all untouched. `_best_unlocked()` and `_refresh_loop()` untouched.
+
+**Tests:** `tests/test_live_router_wire.py` — 8 tests covering:
+  - LiveRouter called when both keys exhausted + kill switch ON
+  - LiveRouter NOT called when kill switch OFF (normal routing unchanged)
+  - LiveRouter exception falls through to hardcoded failover
+  - Normal routing path COMPLETELY UNCHANGED (keys available)
+  - `_LIVE_ROUTER = None` (import failure) → normal behavior
+  - LiveRouter returns (None, None) → falls through
+  - Kill switch path constant check
+
+**Cold review:** APPROVED — all 9 criteria verified (normal routing
+untouched, LiveRouter only fires on both-exhausted, kill switch checked,
+all calls wrapped in try/except, hardcoded chain preserved).
 
 ### 1.3 — Kill switch
 ```bash
