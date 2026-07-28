@@ -227,6 +227,82 @@ LiveRouter for pace_factor_multi().
 
 ---
 
+## Phase 2.5: Provider Quality Telemetry (CPVO Foundation)
+
+**WHY:** All providers advertise GLM-5.2. None are guaranteed to actually
+serve GLM-5.2. A provider running a quantized model, truncating context,
+or inflating token counts would be invisible without measurement. The
+Kalman optimizer would see the cheaper provider as lower cost and route
+MORE traffic there — exactly the wrong direction.
+
+This phase builds the measurement layer BEFORE the soak test so we can
+validate provider quality during real traffic, not just provider cost.
+
+### 2.5.1 — Telemetry table (success/fail/latency per request)
+
+Add columns to shadow_decisions table (or new provider_telemetry table):
+- `response_received` (bool) — did the API return anything?
+- `response_valid` (bool) — did the response parse as valid LLM output?
+- `latency_ms` (int) — time from request to first token
+- `error_type` (text) — timeout, auth, rate_limit, parse_error, none
+- `billed_tokens` (int) — what the provider claimed in usage
+- `actual_tokens` (int) — what we measured from response length
+- `token_mismatch` (bool) — billed != actual (fraud signal)
+
+One INSERT per request. Costs nothing. Gives us the data foundation
+for CPVO and quality probes.
+
+### 2.5.2 — CPVO calculator
+
+CPVO = SUM(cost) / SUM(success) per provider per time window.
+
+If provider A is $0.001/M with 92% success and provider B is $0.029/M
+with 99.9% success:
+- A effective: $0.001 / 0.92 = $0.00109/M per successful request
+- B effective: $0.029 / 0.999 = $0.029/M per successful request
+
+A is still cheaper. But if A drops to 80% success → $0.00125/M.
+The math works until it doesn't — we won't know when it stops without measuring.
+
+Build as `src/cpvo_calculator.py`:
+- Query provider_telemetry table for given time window
+- Compute CPVO per provider
+- Feed CPVO-adjusted rate back to PriceKalman as effective rate
+- This makes the optimizer quality-aware, not just price-aware
+
+### 2.5.3 — Quality probes (canary prompts)
+
+Periodically send a known prompt to each provider and compare output:
+- "What is 2+2?" → should return "4"
+- "Write a 3-line Python function" → should produce valid Python
+- "Summarize this text in one sentence" → should produce coherent text
+
+If a provider returns garbage, truncated output, or wrong answers,
+it's running a different model or a degraded version. This is the
+canary in the coal mine — detect silent downgrades BEFORE they affect
+production routing.
+
+Build as `scripts/quality_probe.py`:
+- Cron job (every 4h)
+- Sends 3 probe prompts to each provider
+- Scores: valid_response (bool), correct_answer (bool), latency_ms
+- Logs to provider_telemetry table
+- Alerts if quality drops below threshold
+
+### 2.5.4 — Token count audit
+
+Compare billed tokens vs actual response length. Mismatch = billing fraud.
+- `billed_tokens` from API response usage field
+- `actual_tokens` from len(response) / 4 (rough char-to-token estimate)
+- If mismatch > 20% → flag provider for investigation
+- Feed mismatch rate into CPVO calculator as quality penalty
+
+**Deliverable:** Quality-aware routing decisions. Optimizer sees
+effective cost (price / success_rate), not just sticker price.
+Silent downgrades detected within 4h. Billing fraud detected immediately.
+
+---
+
 ## Phase 3: Validation (failover-only soak)
 
 ### 3.1 — Shadow comparison (48h)
