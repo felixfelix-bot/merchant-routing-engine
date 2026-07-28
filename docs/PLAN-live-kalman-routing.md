@@ -1,4 +1,4 @@
-# PLAN: Live Kalman Price-Driven Routing (v2.0)
+# PLAN: Live Kalman Price-Driven Routing (v2.1)
 
 **Author:** Manager (Hermes)
 **Date:** 2026-07-28
@@ -16,6 +16,16 @@ When ours exhausts, optimizer picks ollama_cloud ($0.024/M) over friend
 ($0.029/M) — 17% savings on 77% of traffic. Current production burns money
 on the wrong fallback.
 
+### Critical Design Principle: Never Break Token Flow
+
+**The optimizer's primary value is FALLBACK SELECTION, not primary routing.**
+
+Normal requests (ours or friend available) → unchanged z.ai path.
+When both z.ai keys exhaust → optimizer picks cheapest external provider.
+This means NO new request-formatting code on the hot path until Phase 4
+(canary-proven). External provider endpoints stay behind the existing
+failover boundary. Hermes can ALWAYS burn tokens.
+
 ---
 
 ## Current Architecture (what we have)
@@ -32,27 +42,30 @@ zai_proxy.py (port 9099)
   └── _refresh_loop()               ← polls z.ai quota API every 5 min
 ```
 
-**Problem:** `best_key()` picks between ours/friend only. External providers
-(ollama_cloud etc.) are only reached via separate failover paths after a
-request fails. The optimizer considers ALL providers simultaneously.
+**Problem:** `best_key()` picks between ours/friend only. When both exhaust,
+failover to external providers is ad-hoc (tries ollama, then ppq, then
+openrouter in hardcoded order — no price awareness). Optimizer would pick
+ollama_cloud ($0.024/M) over friend ($0.029/M) when both z.ai keys are dead.
 
 ---
 
-## Target Architecture
+## Target Architecture (v2.1 — safer sequencing)
 
 ```
 zai_proxy.py (port 9099)
   ├── best_key()                    ← WRAPPER (backward compat, logging)
-  │   └── calls RoutingOptimizer.route() when ENABLED
-  ├── RoutingOptimizer (LIVE)       ← NEW HOT PATH
-  │   ├── PriceKalman (converged from historical data)
-  │   ├── ConsumptionKalman (live burn tracking)
-  │   ├── scarcity_factor (quota % ramp)
-  │   ├── peak_multiplier (3x during 6-10 UTC)
-  │   ├── health_pricing_factor (graduated failure penalty)
-  │   └── pace_factor (predictive burn-rate adjustment)
-  ├── External failover (unchanged) ← emergency fallback only
+  │   ├── Normal path: ours/friend (unchanged z.ai routing)
+  │   └── Failover path: calls LiveRouter.select_failover()
+  │       when BOTH z.ai keys exhausted
+  ├── LiveRouter (LIVE, failover-only initially)
+  │   ├── RoutingOptimizer with converged Kalman rates
+  │   ├── Considers ollama_cloud, friend, ppq, openrouter, deepinfra
+  │   ├── Picks cheapest viable external provider
+  │   └── Returns (provider, fallback) pair for retry safety
+  ├── External failover (enhanced)  ← optimizer-driven ordering
   └── _refresh_loop()               ← feeds quota state to optimizer
+
+  Later (Phase 4+): optimizer also picks PRIMARY provider when canary-proven.
 ```
 
 ---
@@ -93,16 +106,18 @@ Pass as `pace_mults` to optimizer.
 
 ---
 
-## Phase 1: Optimizer Integration (the hot path)
+## Phase 1: LiveRouter — Failover Selection Only (safe hot path)
 
-### 1.1 — Create `LiveRouter` class (new module)
+### 1.1 — Create `LiveRouter` class
 **File:** `merchant-routing-engine/src/live_router.py`
 
 ```python
 class LiveRouter:
-    """Bridges zai_proxy.py to RoutingOptimizer for live routing.
+    """Bridges zai_proxy.py to RoutingOptimizer for LIVE failover routing.
     
-    Maintains persistent Kalman state across requests.
+    PHASE 1 SCOPE: Only called when BOTH z.ai keys are exhausted.
+    Normal requests (ours or friend available) use unchanged best_key() path.
+    
     Thread-safe (called from ThreadingHTTPServer handler threads).
     """
     def __init__(self, db_path, converged_rates):
@@ -110,139 +125,163 @@ class LiveRouter:
         self._consumption_kalmans = {name: ConsumptionKalman() for ...}
         self._lock = threading.Lock()
     
-    def select_key(self, model, tokens, quota_state, health_state, peak, 
-                   failure_counts, pace_windows) -> str:
-        """Returns provider name ('ours', 'friend', 'ollama_cloud', ...)."""
-        # Build optimizer with current state
+    def select_failover(self, quota_state, health_state, peak,
+                        failure_counts, pace_windows) -> tuple[str, str]:
+        """Returns (provider, fallback_provider) when z.ai is exhausted.
+        
+        Considers: ollama_cloud, friend (if recovered), ppq, openrouter, deepinfra.
+        Returns cheapest viable + a fallback for retry safety.
+        """
+        # Build optimizer with all external providers + exhausted z.ai keys
         # Call route()
-        # Return chosen_provider
+        # Return (chosen, next_cheapest)
+    
+    def select_primary(self, model, tokens, quota_state, ...) -> str:
+        """PHASE 4 ONLY: Pick primary provider (ours vs friend vs ollama).
+        Not called in Phase 1. Exists for future canary rollout."""
     
     def record_request(self, provider, tokens, cost_estimate):
         """Update Kalman filters after request completes."""
 ```
 
-### 1.2 — Modify `best_key()` to call LiveRouter
+### 1.2 — Modify failover path in zai_proxy.py
 **File:** `~/.hermes/bot/zai_proxy.py`
+
+ONLY the failover section changes. Normal `best_key()` path is untouched.
 
 ```python
 def best_key() -> str:
-    # --- NEW: price-driven routing (when enabled) ---
-    if _LIVE_ROUTER and os.path.exists(ENABLE_FLAG):
-        try:
-            choice = _LIVE_ROUTER.select_key(
-                model=..., tokens=..., quota_state=..., ...
-            )
-            # Still log to key_decisions for audit trail
-            _log_key_decision(...)
-            return choice
-        except Exception:
-            pass  # fall through to existing logic
+    # --- EXISTING: normal routing (ours vs friend) --- 
+    # Phase 1-4: proactive prediction, _best_unlocked, recovery, health check
+    # ... completely unchanged ...
     
-    # --- EXISTING: binary quota routing (fallback) ---
-    ... (unchanged) ...
+    # --- EXISTING: both keys exhausted → external failover ---
+    if chosen is None:
+        # NEW: price-driven failover ordering
+        if _LIVE_ROUTER and os.path.exists(ENABLE_FLAG):
+            try:
+                provider, fallback = _LIVE_ROUTER.select_failover(
+                    quota_state=_snapshot_quota(),
+                    health_state=_snapshot_health(),
+                    peak=_is_peak(),
+                    ...
+                )
+                _log_key_decision(chosen_key=provider, 
+                                  reason="live_kalman_failover", ...)
+                return provider
+            except Exception:
+                pass  # fall through to hardcoded failover
+        
+        # EXISTING: hardcoded failover (ollama → ppq → openrouter)
+        ... unchanged ...
 ```
 
-**Key design decisions:**
-- **Kill switch:** Touch file `~/.hermes/bot/.disable_live_routing` → instant revert
-- **Model detection:** Map incoming model name to difficulty tier (already in shadow_hook)
-- **Thread safety:** LiveRouter uses internal lock, same pattern as quota_cache
-- **Logging:** key_decisions table gets `routing_engine='live_kalman'` tag
+**What changed:** One try/except block in the failover section. If LiveRouter
+fails, the existing hardcoded ollama→ppq→openrouter chain still runs. Hermes
+always gets tokens.
 
-### 1.3 — Map optimizer output to zai_proxy key names
-The optimizer returns provider names like "ours", "friend", "ollama_cloud".
-zai_proxy needs to map these to actual API keys:
+**What did NOT change:** The entire ours/friend selection path. Proactive
+Kalman predictions, reactive thresholds, recovery checks, health gates —
+all untouched.
+
+### 1.3 — Kill switch
+```bash
+# Enable:  touch ~/.hermes/bot/.enable_live_routing
+# Disable: rm ~/.hermes/bot/.enable_live_routing
+# No restart needed. Next request falls through to hardcoded failover.
+```
+
+**Deliverable:** Optimizer picks cheapest external provider when z.ai is down.
+Normal routing untouched. Hermes always has tokens.
+
+---
+
+## Phase 2: Kalman Data Feeds (keep filters fresh)
+
+### 2.1 — Converged rates at startup
+**DONE:** `scripts/feed_historical_costs.py` exists.
+**TODO:** Call `load_historical_rates()` in zai_proxy.py startup, pass to
+LiveRouter constructor.
+
+### 2.2 — Live price observations (daily cron)
+Every 24h: compute effective $/M from daily_spend, feed to PriceKalman.
+**File:** `scripts/calibrate_kalman_daily.py` (new cron job)
+
+### 2.3 — Live consumption tracking
+Wire `consumption_kalman.update(tokens)` after every completed request.
+LiveRouter.record_request() handles this.
+
+### 2.4 — Pace window computation
+In `_refresh_loop()`, compute pace windows from quota_cache and pass to
+LiveRouter for pace_factor_multi().
+
+**Deliverable:** All 5 Kalman inputs stay fresh without manual intervention.
+
+---
+
+## Phase 3: Validation (failover-only soak)
+
+### 3.1 — Shadow comparison (48h)
+LiveRouter runs in parallel with hardcoded failover. Log what optimizer
+WOULD pick vs what hardcoded chain actually picked.
+
+**Gate:** Divergence rate and cost savings measured. If optimizer never
+picks differently → investigate (rates may be too close to matter).
+
+### 3.2 — Live failover (when both z.ai keys exhaust)
+Enable LiveRouter for failover only. Since failover is rare (both keys
+dead), this tests the optimizer on real traffic with minimal risk.
+
+**Gate:** 10 failover events with zero incidents → proceed to Phase 4.
+
+### 3.3 — Kill switch test
+Verify: `rm ~/.hermes/bot/.enable_live_routing` → next request uses
+hardcoded failover. No restart, no error.
+
+**Deliverable:** Confidence that optimizer-driven failover is safe.
+
+---
+
+## Phase 4: Primary Routing (canary — only after Phase 3 proven)
+
+### 4.1 — Enable select_primary() on hot path
+Now LiveRouter picks BETWEEN ours and friend (not just external failover).
+Still wrapped in try/except, still has kill switch.
 
 ```python
-PROVIDER_TO_KEY = {
-    "ours": KEYS["ours"],
-    "friend": KEYS["friend"], 
-    "ollama_cloud": OLLAMA_CLOUD_KEY,
-    "ppq": _EXTERNAL_KEYS.get("ppq", ""),
-    "openrouter": _EXTERNAL_KEYS.get("openrouter", ""),
-}
+def best_key() -> str:
+    if _LIVE_ROUTER and os.path.exists(ENABLE_FLAG):
+        try:
+            choice = _LIVE_ROUTER.select_primary(model, tokens, ...)
+            if choice:  # optimizer gave us an answer
+                _log_key_decision(...)
+                return choice
+        except Exception:
+            pass  # fall through
+    
+    # --- EXISTING: unchanged fallback ---
+    ...
 ```
 
-And handle the response routing accordingly (zai upstream vs ollama endpoint).
+### 4.2 — Canary: 10% traffic
+Hash on request ID. 90% uses old best_key(), 10% uses LiveRouter.
+Monitor: error rate, latency, provider distribution.
 
-**Deliverable:** LiveRouter that can actually route requests to any provider.
+**Gate:** 24h zero incidents → 50%.
+**Gate:** 48h zero incidents → 100%.
 
----
+### 4.3 — 100% primary routing
+Remove canary gate. LiveRouter is primary router for ALL requests.
+best_key() stays as permanent emergency fallback.
 
-## Phase 2: Provider Endpoint Routing (multi-provider)
+### 4.4 — Multi-provider primary routing (future)
+When optimizer picks ollama_cloud as PRIMARY (not just failover), the
+request handler needs to format for ollama's API. This is the risky step
+— only done after canary proves optimizer picks correctly.
 
-### 2.1 — z.ai providers (ours, friend)
-No change — same upstream URL, different API key header.
+**Gate:** Separate canary for ollama-as-primary. Has its own kill switch.
 
-### 2.2 — ollama_cloud
-Currently handled in separate failover code. Need to route to it as a
-PRIMARY choice (not just on failure).
-
-**TODO:** Extract ollama_cloud request handler into a callable that
-LiveRouter can invoke when optimizer picks it. This means:
-- Building the request with ollama's API format
-- Handling ollama's response format
-- Logging tokens/cost
-
-### 2.3 — ppq, openrouter (paid providers)
-Keep as last-resort failover. Optimizer picks them only when all
-free/flat providers are exhausted. Low priority for Phase 2.
-
-**Deliverable:** Any provider the optimizer picks gets correctly routed.
-
----
-
-## Phase 3: Continuous Kalman Calibration
-
-### 3.1 — Daily rate reconciliation
-Every 24h (in a background thread or cron):
-1. Query `daily_spend` for yesterday's effective rates
-2. Feed to PriceKalman via `.update()`
-3. Log convergence state to `kalman_samples` table
-
-### 3.2 — Convergence monitoring
-Reuse existing `kalman-convergence-check` skill. Alert if:
-- Uncertainty > 30% (Kalman hasn't converged)
-- Rate drift > 50% in 7 days (provider pricing changed)
-
-### 3.3 — Adaptive retraining
-ConsumptionKalman should retrain from recent burn history when burn
-patterns shift (e.g., new cron jobs, worker profile changes).
-
-**Deliverable:** Self-maintaining Kalman system that stays accurate.
-
----
-
-## Phase 4: Validation & Rollout
-
-### 4.1 — Shadow comparison period (minimum 48h)
-Run LiveRouter in PARALLEL mode:
-- `best_key()` still makes the real decision
-- LiveRouter logs what it WOULD have picked
-- Compare divergence rate, cost estimates
-
-**Gate:** If divergence > 30% without cost improvement → investigate.
-
-### 4.2 — Canary mode (10% traffic)
-Route 10% of requests through LiveRouter (hash on request ID).
-Monitor:
-- Error rate (must be ≤ baseline)
-- Latency (must be ≤ baseline + 5ms)
-- Provider distribution (compare against replay predictions)
-
-**Gate:** 24h with zero incidents → proceed to 50%.
-
-### 4.3 — 50% rollout
-Same monitoring. **Gate:** 48h → proceed to 100%.
-
-### 4.4 — 100% rollout
-Remove parallel/shadow logging. LiveRouter is the primary router.
-Keep `best_key()` fallback alive for emergencies.
-
-**Gate:** 7 days stable → archive fallback code.
-
-### 4.5 — Kill switch
-At any point: `rm ~/.hermes/bot/.enable_live_routing` → instant revert
-to old `best_key()` logic. No restart needed.
+**Deliverable:** Full price-driven routing across all providers.
 
 ---
 
@@ -270,25 +309,26 @@ Currently difficulty is binary (high/medium/low). Add:
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| Optimizer picks dead provider | Medium | High | Health gate + breaker in optimizer; 50ms timeout → retry on next provider |
-| Kalman rates drift | Low | Medium | Daily reconciliation + convergence monitoring |
+| Optimizer picks dead failover provider | Medium | Low | Returns (provider, fallback) pair; handler retries with fallback. Hardcoded chain still runs on exception. |
+| Kalman rates drift | Low | Medium | Daily reconciliation cron + convergence monitoring |
 | Thread contention | Low | Medium | LiveRouter lock is fine-grained; optimizer builds fresh per call |
 | External provider rate limit | Medium | Low | Quota tracking for ollama_cloud; PPQ/OpenRouter are pay-per-token |
-| Regression vs binary router | Medium | High | Canary rollout + instant kill switch |
+| LiveRouter exception breaks failover | Low | HIGH | try/except wraps ALL LiveRouter calls. Exception → hardcoded chain. Hermes always gets tokens. |
+| Normal routing regression | LOW (Phase 1-3) | N/A | Normal path UNTOUCHED until Phase 4 canary. Phase 1-3 only changes failover section. |
 
 ---
 
 ## File Inventory
 
 **New files:**
-- `src/live_router.py` — LiveRouter class
-- `src/provider_endpoint.py` — Multi-provider request routing
-- `scripts/calibrate_kalman_daily.py` — Daily rate reconciliation
+- `src/live_router.py` — LiveRouter class (select_failover + select_primary)
+- `scripts/calibrate_kalman_daily.py` — Daily rate reconciliation cron
 - `tests/test_live_router.py` — Integration tests
 
 **Modified files:**
-- `~/.hermes/bot/zai_proxy.py` — best_key() calls LiveRouter, startup loads converged rates
-- `~/.hermes/bot/zai_proxy.py` — _refresh_loop() feeds optimizer state
+- `~/.hermes/bot/zai_proxy.py` — failover section calls LiveRouter (Phase 1); startup loads converged rates (Phase 2)
+- `~/.hermes/bot/zai_proxy.py` — _refresh_loop() computes pace windows (Phase 2)
+- `~/.hermes/bot/zai_proxy.py` — best_key() calls select_primary() (Phase 4 only, canary-gated)
 
 **Unchanged (already done):**
 - `src/routing_optimizer.py` — core optimizer
@@ -300,17 +340,18 @@ Currently difficulty is binary (high/medium/low). Add:
 
 ## Effort Estimate
 
-| Phase | Description | Time |
-|-------|-------------|------|
-| 0 | Data infrastructure | 2-3 hours (delegate to worker) |
-| 1 | Optimizer integration | 3-4 hours (delegate, manager reviews) |
-| 2 | Provider endpoints | 2-3 hours (delegate) |
-| 3 | Kalman calibration | 1-2 hours (cron job setup) |
-| 4 | Validation & rollout | 5-7 days (soak time, canary gates) |
-| 5 | Post-rollout tuning | Ongoing |
+| Phase | Description | Time | Risk |
+|-------|-------------|------|------|
+| 0 | Data infrastructure | 2-3 hours | None — read-only feeds |
+| 1 | LiveRouter (failover only) | 3-4 hours | LOW — normal path untouched |
+| 2 | Kalman data feeds | 1-2 hours | None — background only |
+| 3 | Failover soak validation | 3-5 days | LOW — failover is rare |
+| 4 | Primary routing canary | 5-7 days | MEDIUM — canary-gated |
+| 5 | Post-rollout tuning | Ongoing | Low |
 
-**Code work:** ~1 day of focused implementation (split across 3-4 kanban tasks).
-**Soak time:** 7-10 days for full canary → 100% rollout.
+**Phase 1-2 code:** ~1 day (split across 3 kanban tasks).
+**Phase 3-4 soak:** 8-12 days total (canary gates, no shortcuts).
+**Hermes never loses token access at any point.**
 
 ---
 
