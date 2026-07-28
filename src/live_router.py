@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from typing import Any
 
 # ── Path bootstrap (same as shadow_hook) ────────────────────────────────────
@@ -44,6 +45,7 @@ from src.consumption_kalman import ConsumptionKalman
 from src.routing_optimizer import RoutingOptimizer
 from src.provider_names import normalize_provider_name
 from src.pricing_engine import pace_factor_multi
+from src.quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
 
 __all__ = ["LiveRouter"]
 
@@ -363,3 +365,128 @@ class LiveRouter:
     def provider_names(self) -> list[str]:
         """List of registered provider names."""
         return list(self._provider_names)
+
+    # ── Pace window computation (Phase 2.4) ──────────────────────────────
+
+    def compute_pace_windows(
+        self,
+        quota_cache: dict[str, tuple[list[dict], float]] | None,
+    ) -> dict[str, list[tuple[float, float, float, float, float]]]:
+        """Convert the proxy's quota_cache into pace_factor input tuples.
+
+        Iterates over the proxy's ``quota_cache`` dict (mapping key names to
+        ``(windows_list, timestamp)`` tuples), parses each window dict, and
+        returns a dict of provider → list of tuples in the format expected by
+        :func:`src.pricing_engine.pace_factor_multi`::
+
+            (quota_used, quota_total, time_elapsed_pct, burn_rate,
+             window_duration_hours)
+
+        The burn_rate for each provider is pulled from that provider's
+        :class:`~src.consumption_kalman.ConsumptionKalman` instance.
+
+        Never raises. Malformed/missing entries are silently skipped.
+
+        Args:
+            quota_cache: The proxy's ``quota_cache`` dict, or None.
+
+        Returns:
+            Dict of provider → list of pace_factor tuples. Empty if no
+            valid windows found or on any error.
+        """
+        try:
+            if not quota_cache or not isinstance(quota_cache, dict):
+                return {}
+
+            now = time.time()
+            result: dict[str, list[tuple[float, float, float, float, float]]] = {}
+
+            with self._lock:
+                for key_name, cache_entry in quota_cache.items():
+                    # Only process providers we know about
+                    if key_name not in self._consumption_kalmans:
+                        continue
+
+                    # Unpack (windows_list, timestamp)
+                    if not isinstance(cache_entry, (tuple, list)) or len(cache_entry) < 1:
+                        continue
+                    windows = cache_entry[0]
+                    if not isinstance(windows, list):
+                        continue
+
+                    # Get burn_rate from this provider's ConsumptionKalman
+                    ck = self._consumption_kalmans[key_name]
+                    burn_rate = ck.burn_rate
+
+                    # Get quota_total for this provider
+                    quota_total = _QUOTA_TOTALS.get(key_name, 2_000_000.0)
+
+                    for window in windows:
+                        if not isinstance(window, dict):
+                            continue
+                        tup = self._parse_pace_window(
+                            window, quota_total, burn_rate, now
+                        )
+                        if tup is not None:
+                            result.setdefault(key_name, []).append(tup)
+
+            return result
+
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _parse_pace_window(
+        window: dict,
+        quota_total: float,
+        burn_rate: float,
+        now: float,
+    ) -> tuple[float, float, float, float, float] | None:
+        """Parse a single window dict into a pace_factor tuple.
+
+        Returns None if the window should be skipped (missing fields,
+        unknown name, error sentinel, zero window_hours, resets_at==0).
+        """
+        # ── Required fields ───────────────────────────────────────────
+        name = window.get("name")
+        if name is None or name not in _KNOWN_WINDOW_NAMES:
+            return None
+
+        used_pct = window.get("used_pct")
+        if used_pct is None:
+            return None
+
+        resets_at = window.get("resets_at")
+        if resets_at is None or resets_at == 0:
+            return None
+
+        window_hours = window.get("window_hours")
+        if window_hours is None or window_hours <= 0:
+            return None
+
+        # ── Skip error sentinel ──────────────────────────────────────
+        try:
+            used_pct = int(used_pct)
+        except (TypeError, ValueError):
+            return None
+
+        if used_pct == _ERROR_SENTINEL_PCT:
+            return None
+
+        # ── Compute quota_used from percentage ────────────────────────
+        clamped_pct = max(0, min(used_pct, 100))
+        quota_used = quota_total * (clamped_pct / 100.0)
+
+        # ── Compute time_elapsed_pct ──────────────────────────────────
+        window_seconds = float(window_hours) * 3600.0
+        window_start = float(resets_at) - window_seconds
+        elapsed_raw = (now - window_start) / window_seconds
+        elapsed_pct = max(0.0, min(elapsed_raw, 1.0))
+
+        return (
+            quota_used,
+            quota_total,
+            elapsed_pct,
+            float(burn_rate),
+            float(window_hours),
+        )

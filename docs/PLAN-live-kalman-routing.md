@@ -207,21 +207,53 @@ Normal routing untouched. Hermes always has tokens.
 ## Phase 2: Kalman Data Feeds (keep filters fresh)
 
 ### 2.1 — Converged rates at startup
-**DONE:** `scripts/feed_historical_costs.py` exists.
-**TODO:** Call `load_historical_rates()` in zai_proxy.py startup, pass to
-LiveRouter constructor.
+**DONE:** `scripts/feed_historical_costs.py` exists. Called at proxy startup
+via `_converged_rates = load_historical_rates()` → passed to LiveRouter
+constructor.
 
 ### 2.2 — Live price observations (daily cron)
-Every 24h: compute effective $/M from daily_spend, feed to PriceKalman.
-**File:** `scripts/calibrate_kalman_daily.py` (new cron job)
+**DONE:** `scripts/calibrate_kalman_daily.py` — daily PriceKalman calibration.
+
+Queries `daily_spend` for yesterday's effective $/M per provider, feeds to
+PriceKalman via `.update()`, and logs convergence to `kalman_samples` table.
+
+Usage (standalone):
+
+    python3 scripts/calibrate_kalman_daily.py
+    python3 scripts/calibrate_kalman_daily.py --db /path/to/zai_usage.db
+    python3 scripts/calibrate_kalman_daily.py --days-back 7   # catch up after downtime
+
+Cron setup (daily at 02:00 UTC):
+
+    0 2 * * * cd ~/merchant-routing-engine && python3 scripts/calibrate_kalman_daily.py >> /tmp/kalman_calibration.log 2>&1
+
+Tests: `tests/test_calibration.py` (21 tests — import, query, feed, log,
+standalone execution, robustness). Coverage: 85%.
 
 ### 2.3 — Live consumption tracking
-Wire `consumption_kalman.update(tokens)` after every completed request.
-LiveRouter.record_request() handles this.
+**DONE:** Wired in `zai_proxy.py` `_proxy()` finally block. After every
+completed request, calls `_LIVE_ROUTER.record_request(provider, tokens)`.
+This updates the ConsumptionKalman for the serving provider, keeping
+burn-rate predictions fresh. Wrapped in try/except — NEVER breaks request
+handling.
 
 ### 2.4 — Pace window computation
-In `_refresh_loop()`, compute pace windows from quota_cache and pass to
-LiveRouter for pace_factor_multi().
+**DONE:** Wired in `zai_proxy.py` `_refresh_loop()`. After quota refresh,
+calls `_LIVE_ROUTER.compute_pace_windows(quota_cache)` to compute pace
+factor input tuples from quota windows + ConsumptionKalman burn rates.
+Stored in `_pace_windows` global, passed to `select_failover()` in
+`best_key()` on the next failover call. Wrapped in try/except — NEVER
+blocks quota refresh.
+
+`LiveRouter.compute_pace_windows()` (new method in `src/live_router.py`):
+converts the proxy's `quota_cache` structure into pace_factor input tuples
+for `pace_factor_multi()`. Uses `quota_window_extractor` constants for
+known window names and error sentinels. Thread-safe via `self._lock`.
+
+Tests: `tests/test_live_router.py::TestComputePaceWindows` (10 tests —
+dict keyed by provider, 5-element tuples, 5h+weekly windows, quota_used
+math, burn_rate from ConsumptionKalman, skips unknown/malformed, never
+raises on garbage). Coverage: 93%.
 
 **Deliverable:** All 5 Kalman inputs stay fresh without manual intervention.
 

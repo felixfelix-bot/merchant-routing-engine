@@ -361,6 +361,12 @@ class TestRecordRequest:
         router.record_request(123, None)
         # No assertion — just must not raise
 
+    def test_never_raises_on_internal_corruption(self, router):
+        """record_request must never raise even if internal state is corrupt."""
+        router._consumption_kalmans = None
+        router.record_request("ours", 10000)
+        # No assertion — must not raise
+
 
 # ── Thread safety ────────────────────────────────────────────────────────────
 
@@ -498,3 +504,106 @@ class TestGetKalmanState:
         router._price_kalmans = None
         result = router.get_kalman_state()
         assert result == {}
+
+
+# ── compute_pace_windows ──────────────────────────────────────────────────────
+
+
+class TestComputePaceWindows:
+    """Test LiveRouter.compute_pace_windows — converts quota_cache to pace tuples."""
+
+    @pytest.fixture
+    def quota_cache_with_windows(self):
+        """Simulate a quota_cache with 5h + weekly windows for ours + friend."""
+        import time as _time
+        now = int(_time.time())
+        return {
+            "ours": ([
+                {"name": "5-hour", "used_pct": 80,
+                 "resets_at": now - 4 * 3600 + 5 * 3600, "window_hours": 5},
+                {"name": "weekly", "used_pct": 40,
+                 "resets_at": now - 50 * 3600 + 168 * 3600, "window_hours": 168},
+            ], _time.time()),
+            "friend": ([
+                {"name": "5-hour", "used_pct": 30,
+                 "resets_at": now - 2 * 3600 + 5 * 3600, "window_hours": 5},
+            ], _time.time()),
+        }
+
+    def test_returns_dict_keyed_by_provider(self, router, quota_cache_with_windows):
+        result = router.compute_pace_windows(quota_cache_with_windows)
+        assert isinstance(result, dict)
+        assert "ours" in result
+        assert "friend" in result
+
+    def test_tuples_have_five_elements(self, router, quota_cache_with_windows):
+        result = router.compute_pace_windows(quota_cache_with_windows)
+        for name, windows in result.items():
+            for tup in windows:
+                assert len(tup) == 5, f"{name} window has {len(tup)} elements"
+
+    def test_5h_and_weekly_windows_returned(self, router, quota_cache_with_windows):
+        result = router.compute_pace_windows(quota_cache_with_windows)
+        durations = [w[4] for w in result["ours"]]
+        assert 5.0 in durations
+        assert 168.0 in durations
+
+    def test_used_pct_reflected_in_quota_used(self, router, quota_cache_with_windows):
+        """quota_used = used_pct/100 * quota_total (default 2M)."""
+        result = router.compute_pace_windows(quota_cache_with_windows)
+        # ours 5h at 80%: 0.80 * 2_000_000 = 1_600_000
+        ours_5h = [w for w in result["ours"] if w[4] == 5.0][0]
+        assert ours_5h[0] == pytest.approx(1_600_000, rel=1e-3)
+
+    def test_burn_rate_from_consumption_kalman(self, router, quota_cache_with_windows):
+        """burn_rate in the tuple should match the ConsumptionKalman's burn_rate."""
+        router.record_request("ours", 50000)
+        router.record_request("ours", 60000)
+        result = router.compute_pace_windows(quota_cache_with_windows)
+        ck_burn = router._consumption_kalmans["ours"].burn_rate
+        ours_5h = result["ours"][0]
+        assert ours_5h[3] == pytest.approx(ck_burn)
+
+    def test_skips_unknown_provider_in_cache(self, router):
+        """Providers in quota_cache not in the router are silently skipped."""
+        import time as _time
+        now = int(_time.time())
+        cache = {
+            "nonexistent": ([
+                {"name": "5-hour", "used_pct": 50,
+                 "resets_at": now + 3600, "window_hours": 5},
+            ], _time.time()),
+        }
+        result = router.compute_pace_windows(cache)
+        assert "nonexistent" not in result
+
+    def test_empty_cache_returns_empty(self, router):
+        result = router.compute_pace_windows({})
+        assert result == {}
+
+    def test_none_cache_returns_empty(self, router):
+        result = router.compute_pace_windows(None)
+        assert result == {}
+
+    def test_malformed_windows_skipped(self, router):
+        """Malformed window dicts should be silently skipped."""
+        cache = {
+            "ours": ([
+                {"name": "broken"},  # missing fields
+                {"name": "5-hour", "used_pct": 50,
+                 "resets_at": int(__import__("time").time()) + 3600,
+                 "window_hours": 5},
+            ], 0.0),
+        }
+        result = router.compute_pace_windows(cache)
+        assert "ours" in result
+        assert len(result["ours"]) == 1  # only the valid window
+
+    def test_never_raises_on_garbage(self, router):
+        """compute_pace_windows must never raise, even with garbage input."""
+        result = router.compute_pace_windows("garbage")
+        assert isinstance(result, dict)
+        result = router.compute_pace_windows({"ours": "not_a_tuple"})
+        assert isinstance(result, dict)
+        result = router.compute_pace_windows({"ours": (None, 0.0)})
+        assert isinstance(result, dict)
