@@ -93,9 +93,14 @@ def test_live_router_called_when_both_keys_exhausted_and_flag_enabled(
 ):
     """When both z.ai keys are dead AND .enable_live_routing exists,
     best_key() should call LiveRouter.select_failover and return its result."""
-    # Mock _LIVE_ROUTER on the proxy module
+    # Mock _LIVE_ROUTER on the proxy module.
+    # NOTE: select_failover returns ((provider, model), (fallback, model)) —
+    # a tuple of tuples (P3.4 corrected contract; the old gate wrongly treated
+    # the inner (provider, model) tuple as the provider string).
     mock_router = MagicMock()
-    mock_router.select_failover.return_value = ("ollama_cloud", "ppq")
+    mock_router.select_failover.return_value = (
+        ("ollama_cloud", "glm-5.2"), ("ppq", None))
+    mock_router.last_pace_mults = {"ollama_cloud": 1.0}
     proxy._LIVE_ROUTER = mock_router
 
     # Mock health checks — both keys unhealthy (exhausted)
@@ -108,11 +113,12 @@ def test_live_router_called_when_both_keys_exhausted_and_flag_enabled(
     })
     proxy._is_peak_hour = MagicMock(return_value=False)
 
-    # Mock _log_key_decision so it doesn't touch the DB
+    # Mock decision logging so tests never touch the real usage DB
     proxy._log_key_decision = MagicMock()
+    proxy._log_live_decision = MagicMock()
 
     # Call best_key — should go through Phases 1-4, find both keys dead,
-    # then hit the LiveRouter failover path
+    # then hit the LiveRouter failover path (via _consult_live_router)
     result = proxy.best_key()
 
     # Verify LiveRouter was called
@@ -251,10 +257,10 @@ def test_live_router_none_when_import_fails(proxy):
 
 
 def test_live_router_returns_none_provider_falls_through(proxy, enable_flag):
-    """If LiveRouter.select_failover returns (None, None), best_key() should
-    return None so the hardcoded failover chain runs."""
+    """If LiveRouter.select_failover returns ((None, None), (None, None)),
+    best_key() should return None so the hardcoded failover chain runs."""
     mock_router = MagicMock()
-    mock_router.select_failover.return_value = (None, None)
+    mock_router.select_failover.return_value = ((None, None), (None, None))
     proxy._LIVE_ROUTER = mock_router
 
     proxy._is_key_healthy = MagicMock(return_value=False)
@@ -274,12 +280,160 @@ def test_live_router_returns_none_provider_falls_through(proxy, enable_flag):
 
 
 def test_kill_switch_path_constant(proxy):
-    """The kill switch path should be ~/.hermes/bot/.enable_live_routing"""
-    # The proxy module should reference this path
+    """The kill switch path ~/.hermes/bot/.enable_live_routing must be
+    referenced by the LiveRouter consultation logic. P3.4 centralised the
+    kill-switch check into _consult_live_router (shared by the best_key()
+    gate AND the retry-loop terminal fallback), so we inspect that helper."""
     expected = os.path.expanduser("~/.hermes/bot/.enable_live_routing")
-    # Check that the module has the constant or uses the right path
-    # We verify by checking the source
     import inspect
-    source = inspect.getsource(proxy.best_key)
+    # _consult_live_router is the single LiveRouter entry point (P3.4).
+    source = inspect.getsource(proxy._consult_live_router)
     assert ".enable_live_routing" in source, \
-        "best_key() source should reference .enable_live_routing"
+        "_consult_live_router should reference .enable_live_routing"
+    assert proxy._LIVE_ROUTING_FLAG == expected, \
+        f"Expected kill-switch path {expected}, got {proxy._LIVE_ROUTING_FLAG!r}"
+
+
+# ── P3.4 Fix 1 (retry-loop bypass) + Fix 2 (routing_live_decisions) ─────────
+#
+# _consult_live_router() is the single entry point that BOTH the best_key()
+# Phase 5 gate AND the request-handler retry-loop terminal fallback call. The
+# retry loop is the real PRODUCTION dual-exhaustion path: best_key()'s health
+# cache lags the actual 429, so it returns a key that 429s mid-request, the
+# loop exhausts both keys, and (pre-P3.4) fell straight to the hardcoded
+# ollama->external chain — bypassing LiveRouter entirely (841 events/2h,
+# 0 live events). These tests pin the wiring fix + the new decisions table.
+
+import json
+import sqlite3
+
+
+@pytest.fixture
+def consult_env(proxy, tmp_path):
+    """Wire a mock LiveRouter + isolated kill-switch flag + isolated usage DB.
+
+    Patches proxy._LIVE_ROUTING_FLAG to a temp path (so the real production
+    flag is NEVER touched) and proxy._usage_db to a temp SQLite file so the
+    routing_live_decisions writes are isolated. Yields (proxy, mock_router,
+    conn, flag_path).
+    """
+    mock_router = MagicMock()
+    mock_router.select_failover.return_value = (
+        ("deepinfra", "deepseek-ai/DeepSeek-V4-Pro"),
+        ("ppq", "deepseek/deepseek-v4-pro"),
+    )
+    mock_router.last_pace_mults = {"deepinfra": 1.0, "ppq": 1.2}
+    proxy._LIVE_ROUTER = mock_router
+
+    # Isolated kill-switch flag (default ON)
+    flag = tmp_path / ".enable_live_routing"
+    flag.write_text("1")
+    proxy._LIVE_ROUTING_FLAG = str(flag)
+
+    # Deterministic snapshots (values don't matter — select is mocked)
+    proxy._snapshot_quota = MagicMock(return_value={"ours": {"used_pct": 100.0}})
+    proxy._snapshot_health = MagicMock(
+        return_value={"ours": False, "friend": False})
+    proxy._is_peak_hour = MagicMock(return_value=False)
+    proxy._pace_windows = {}
+
+    # Isolated usage DB so _log_live_decision writes land in a temp file.
+    # NOTE: _log_live_decision is left REAL so Fix 2 (table + row) is exercised.
+    db_path = tmp_path / "usage.db"
+    conn = sqlite3.connect(str(db_path), isolation_level=None,
+                           check_same_thread=False)
+    # Pre-create the live-decisions table so count assertions work even when
+    # _consult_live_router returns early (no pick) and never logs.
+    conn.execute(proxy._ROUTING_LIVE_DECISIONS_SQL)
+    proxy._usage_db = lambda: conn
+    yield proxy, mock_router, conn, flag
+    conn.close()
+
+
+def test_consult_picks_provider_on_dual_exhaustion(consult_env):
+    """(a) The retry-loop terminal fallback calls _consult_live_router and gets
+    back a real provider to route to (previously bypassed)."""
+    proxy, mock_router, _, _ = consult_env
+    pick, model, fb, fb_model = proxy._consult_live_router()
+    assert pick == "deepinfra"
+    assert model == "deepseek-ai/DeepSeek-V4-Pro"
+    assert fb == "ppq"
+    mock_router.select_failover.assert_called_once()
+
+
+def test_consult_pick_is_string_not_tuple(consult_env):
+    """Regression for the latent tuple-unpack bug: the provider must be a bare
+    STRING, not a (provider, model) tuple (the old gate returned the tuple)."""
+    proxy, _, _, _ = consult_env
+    pick, *_ = proxy._consult_live_router()
+    assert isinstance(pick, str)
+
+
+def test_consult_logs_live_decision_row(consult_env):
+    """Fix 2: each live engagement writes a row to routing_live_decisions
+    (the new table) with the pace multipliers LiveRouter used."""
+    proxy, _, conn, _ = consult_env
+    proxy._consult_live_router()
+    row = conn.execute(
+        "SELECT live_provider, live_model, shadow_provider, pace_mults "
+        "FROM routing_live_decisions ORDER BY id DESC LIMIT 1").fetchone()
+    assert row is not None
+    assert row[0] == "deepinfra"
+    assert row[1] == "deepseek-ai/DeepSeek-V4-Pro"
+    assert row[2] == "ppq"          # fallback provider (shadow_provider col)
+    assert row[3] is not None       # pace_mults JSON
+    assert "deepinfra" in json.loads(row[3])
+
+
+def test_consult_no_pick_no_log(consult_env):
+    """When LiveRouter finds no viable provider, nothing is logged."""
+    proxy, mock_router, conn, _ = consult_env
+    mock_router.select_failover.return_value = ((None, None), (None, None))
+    before = conn.execute(
+        "SELECT COUNT(*) FROM routing_live_decisions").fetchone()[0]
+    pick, *_ = proxy._consult_live_router()
+    assert pick is None
+    after = conn.execute(
+        "SELECT COUNT(*) FROM routing_live_decisions").fetchone()[0]
+    assert after == before
+
+
+def test_consult_kill_switch_off_disables(consult_env):
+    """(b) Flag absent -> no consultation, no logging, instant revert to the
+    hardcoded chain. Acceptance criterion 3."""
+    proxy, mock_router, conn, flag = consult_env
+    flag.unlink()  # remove the kill-switch flag
+    pick, model, fb, fb_model = proxy._consult_live_router()
+    assert pick is None and model is None
+    mock_router.select_failover.assert_not_called()
+
+
+def test_consult_exception_safe_fallthrough(consult_env):
+    """(c) Any LiveRouter failure degrades to (None,...) — the caller then
+    falls through to the hardcoded chain. LiveRouter failures must NEVER break
+    routing. Acceptance criterion 4."""
+    proxy, mock_router, _, _ = consult_env
+    mock_router.select_failover.side_effect = RuntimeError("boom")
+    pick, model, fb, fb_model = proxy._consult_live_router()
+    assert pick is None and model is None
+
+
+def test_consult_router_none_disables(proxy):
+    """_LIVE_ROUTER is None (import failed at startup) -> safe no-op."""
+    proxy._LIVE_ROUTER = None
+    pick, *_ = proxy._consult_live_router()
+    assert pick is None
+
+
+def test_retry_loop_terminal_calls_consult(proxy):
+    """The retry-loop terminal fallback source must call _consult_live_router
+    (the previously-bypassed path). Source-level check pins the wiring."""
+    import inspect
+    # _proxy is the request handler; find the retry-loop terminal block.
+    src = inspect.getsource(proxy.Handler._proxy)
+    assert "_consult_live_router()" in src, \
+        "retry-loop terminal fallback must consult LiveRouter (P3.4 Fix 1)"
+    # The LiveRouter pick must be routed via the external handlers, honouring
+    # LiveRouter's choice via the `preferred` kwarg (not silently overridden).
+    assert "preferred=_pick" in src, \
+        "LiveRouter pick must be routed with preferred= (honour the choice)"

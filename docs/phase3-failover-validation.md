@@ -192,7 +192,27 @@ Plus: create the `routing_live_decisions` table (same schema as
 `routing_shadow_decisions` + `pace_mults` column) and log each live decision
 there (see §6 blocker #2).
 
-Until one of these lands, a 48 h soak produces zero live events by construction.
+> **STATUS: ✅ APPLIED (P3.4, task t_6f12b943).** Option 1 + Fix 2 landed.
+> The production proxy (`~/.hermes/bot/zai_proxy.py`) now:
+>   - centralises the kill-switch + `select_failover` call + safe-fallthrough
+>     into a single `_consult_live_router()` helper;
+>   - calls it from BOTH the `best_key()` Phase 5 gate AND the retry-loop
+>     terminal fallback (the previously-bypassed production path);
+>   - fixes the latent tuple-unpack bug (the old gate did
+>     `_provider, _fallback = select_failover(...)` then used `_provider` — a
+>     `(provider, model)` tuple — as the provider string, so even when the gate
+>     fired the pick was never routable);
+>   - honours the LiveRouter pick via a new `preferred=` kwarg on
+>     `_try_external_failover` (tried first; cost-sorted chain remains the
+>     safe fallback);
+>   - logs each engagement to the new `routing_live_decisions` table (with
+>     `pace_mults` captured from `LiveRouter.last_pace_mults`).
+> `LiveRouter.last_pace_mults` (engine `src/live_router.py`) exposes the actual
+> multipliers used. Regression tests in `tests/test_live_router_wire.py`
+> (consult/kill-switch/fallthrough/table) + `tests/test_live_router.py`
+> (`last_pace_mults`). Full suite: 865 pass (2 pre-existing CPVO failures from
+> P4.5c model-aware change, unrelated). The 48 h soak (t_ffa4f4f8) can now
+> accumulate `live_kalman_failover_*` events.
 
 ## 6. Open blockers (need resolution before completion)
 

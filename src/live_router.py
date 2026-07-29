@@ -161,6 +161,12 @@ class LiveRouter:
         # Track initialized providers for introspection
         self._provider_names = list(rates.keys())
 
+        # Last per-provider pace multipliers computed by _do_select_failover.
+        # Exposed via the ``last_pace_mults`` property so the production proxy
+        # can log the ACTUAL multipliers used in a failover decision to
+        # routing_live_decisions (P3.4, Fix 2). Single source of truth.
+        self._last_pace_mults: dict[str, float] = {}
+
         # ── CPVO quality-aware effective rates (Phase 2.5.4) ───────────────
         # Queries the provider_telemetry table to inflate the base rate of
         # low-success providers (effective = base / success_rate).  Cached so
@@ -405,6 +411,11 @@ class LiveRouter:
                     except Exception:
                         pass  # skip this provider's pace, never break routing
 
+        # Stash the computed multipliers so the production proxy can log the
+        # ACTUAL values used in this failover decision (P3.4, Fix 2). Read via
+        # the ``last_pace_mults`` property immediately after select_failover.
+        self._last_pace_mults = dict(pace_mults)
+
         # Route the request. We prefer the HIGHEST quality tier that has a
         # viable provider, then relax downward (high → medium → low). This
         # guarantees we never return None when a healthy external provider
@@ -443,6 +454,20 @@ class LiveRouter:
         fallback_model = get_model(fallback, task_type) if fallback is not None else None
 
         return ((chosen, chosen_model), (fallback, fallback_model))
+
+    @property
+    def last_pace_mults(self) -> dict[str, float]:
+        """Per-provider pace multipliers used by the most recent failover.
+
+        Set inside ``_do_select_failover`` under ``self._lock``. Read by the
+        production proxy immediately after ``select_failover`` to log the
+        ACTUAL multipliers to ``routing_live_decisions`` (P3.4, Fix 2).
+        Returns a copy so callers cannot mutate internal state.
+        """
+        try:
+            return dict(self._last_pace_mults)
+        except Exception:
+            return {}
 
     # ── Introspection (for monitoring / tests) ────────────────────────────
 

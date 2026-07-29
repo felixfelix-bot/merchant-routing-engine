@@ -709,4 +709,63 @@ class TestComputePaceWindows:
         result = router.compute_pace_windows({"ours": "not_a_tuple"})
         assert isinstance(result, dict)
         result = router.compute_pace_windows({"ours": (None, 0.0)})
-        assert isinstance(result, dict)
+
+
+# ── P3.4 Fix 2: last_pace_mults (exposed for routing_live_decisions) ────────
+
+
+class TestLastPaceMults:
+    """``LiveRouter.last_pace_mults`` exposes the per-provider pace multipliers
+    computed inside ``_do_select_failover`` so the production proxy can log the
+    ACTUAL multipliers used in a failover decision to ``routing_live_decisions``
+    (P3.4, Fix 2)."""
+
+    def test_empty_before_any_failover(self, router):
+        """A fresh router has computed no multipliers yet."""
+        assert router.last_pace_mults == {}
+
+    def test_empty_when_no_pace_windows(self, router, quota_both_exhausted,
+                                        both_unhealthy):
+        """select_failover with pace_windows=None stashes an empty dict
+        (no windows → no multipliers), but the stash still happens."""
+        router.select_failover(
+            quota_state=quota_both_exhausted, health_state=both_unhealthy,
+            peak=False, pace_windows=None)
+        assert router.last_pace_mults == {}
+
+    def test_populated_after_failover_with_windows(
+            self, router, quota_both_exhausted, both_unhealthy):
+        """When pace_windows are provided, the computed multipliers are stashed
+        and exposed via last_pace_mults."""
+        import time
+        now = int(time.time())
+        win = {"name": "5-hour", "used_pct": 50,
+               "resets_at": now + 3600, "window_hours": 5}
+        cache = {
+            "ours": ([win], 0.0),
+            "friend": ([win], 0.0),
+        }
+        pw = router.compute_pace_windows(cache)
+        router.select_failover(
+            quota_state=quota_both_exhausted, health_state=both_unhealthy,
+            peak=False, pace_windows=pw)
+        # At least one provider with a window should have a multiplier.
+        assert isinstance(router.last_pace_mults, dict)
+        assert any(name in pw for name in router.last_pace_mults), \
+            "last_pace_mults should reflect providers that had pace windows"
+
+    def test_returns_a_copy(self, router, quota_both_exhausted,
+                            both_unhealthy):
+        """Mutating the returned dict must not corrupt internal state."""
+        import time
+        now = int(time.time())
+        win = {"name": "5-hour", "used_pct": 50,
+               "resets_at": now + 3600, "window_hours": 5}
+        pw = router.compute_pace_windows({"ours": ([win], 0.0)})
+        router.select_failover(
+            quota_state=quota_both_exhausted, health_state=both_unhealthy,
+            peak=False, pace_windows=pw)
+        snapshot = router.last_pace_mults
+        snapshot["__injected__"] = 999.0
+        # Re-read — the injected key must not persist internally.
+        assert "__injected__" not in router.last_pace_mults
