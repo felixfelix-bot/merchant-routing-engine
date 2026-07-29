@@ -1,12 +1,10 @@
 # Phase 3 Failover Validation — Interim Checkpoint
 
-> **Status: INTERIM** (not final). Soak ~3.7% complete (~1.8 h of 48 h).
-> This is a checkpoint from the first post-fix run. It records the major
-> validation result (BLOCKER A resolved) plus open blockers that must clear
-> before the 48 h soak can be declared complete.
->
-> Author: worker-merchant (run on t_ffa4f4f8, 2026-07-29 ~04:5x IST)
-> Branch: `converged-rate-replay`
+> **Status: BLOCKED — root cause of 0 live events found (wiring bug).** Soak
+> ~5% complete (~2.5 h of 48 h). This update (run 27, 2026-07-29 05:25 IST)
+> corrects the interim checkpoint's wrong "timing" conclusion: the LiveRouter
+> failover gate is on the wrong code path and produces 0 events by construction.
+> See §5 for the definitive root cause and the required code fix.
 
 ## TL;DR
 
@@ -17,7 +15,7 @@
 | Telemetry quality (>90% valid-of-received) | ✅ **MET** post-fixes (friend 96–100%, ours 93%) |
 | Kill-switch mechanism (rm flag → instant revert) | ✅ verified (per-request check, no restart) |
 | Service health | ✅ active, NRestarts=0, ExecMainStatus=0 |
-| **Live failover events observed on real traffic** | ❌ **0** — both-exhausted windows are bursty; none coincided with a flag-on observation window |
+| **Live failover events observed on real traffic** | ❌ **0** — ROOT CAUSE FOUND (§5): the LiveRouter gate is wired into `best_key()`'s None-branch, but production routes dual-exhaustion through the retry-loop hardcoded fallback (zai_proxy.py:2326-2333), which bypasses LiveRouter entirely. Not a timing issue — no soak will produce events until the wiring is fixed |
 | **`routing_live_decisions` table** | ❌ **MISSING** — code logs to `key_decisions` (reason `live_kalman_failover_*`) only |
 | **Kill-switch flag stability** | ⚠️ flag sporadically deleted by an unidentified process (survived 90 s–5 min in some windows, vanished in others) |
 | **48 h soak** | ❌ ~3.7% complete — cannot finish in one session |
@@ -113,47 +111,144 @@ didn't engage or fell through safely).
 - **Instant:** the `os.path.exists` call is nanosecond-cheap and per-request, so
   `rm` of the flag reverts on the next request with no process restart.
 
-## 5. Why 0 live events were observed (open item, not a bug)
+## 5. ROOT CAUSE — LiveRouter gate is on the wrong code path (wiring bug)
 
-LiveRouter Phase 5 fires **only** when `chosen is None` (both z.ai keys
-exhausted after the Phase 4 health check). The dual-exhaustion condition is
-**bursty**: quota windows reset cyclically, so dual-exhaustion clustered (58
-events in 3.5 min at one point) then disappeared entirely (0 events in a 5-min
-window once `friend` recovered to healthy). None of the bursts coincided with a
-flag-on observation window long enough to capture a `live_kalman_failover`
-decision. This is a timing/waiting issue — exactly what the 48 h soak is meant
-to accumulate.
+> **This section corrects the interim checkpoint's §5, which wrongly concluded
+> the 0-event count was a "bursty timing / waiting" issue. It is not. It is a
+> code-level wiring defect: no amount of soaking will produce live failover
+> events until the gate is moved to the code path that actually handles
+> dual-key exhaustion.**
+
+### Where the LiveRouter gate lives
+
+The Phase 5 LiveRouter failover gate is at **`zai_proxy.py:1698-1724`**, *inside*
+the `best_key()` function. It fires **only** when `best_key()` has set
+`chosen = None` (i.e. its own Phase 4 health check concluded both z.ai keys are
+exhausted) AND the kill-switch flag exists:
+
+```
+if chosen is None and _LIVE_ROUTER is not None and os.path.exists(flag):
+    _provider, _fallback = _LIVE_ROUTER.select_failover(...)
+    if _provider:
+        reason = f"live_kalman_failover_{_provider}"   # ← only logged on success
+        return chosen
+```
+
+### Where production actually handles dual-key exhaustion
+
+In live traffic, `best_key()` **returns a key** (ours or friend) on the initial
+call (zai_proxy.py:2061) because its health cache (`_is_key_healthy`) has not
+yet registered the exhaustion. The selected key then **429s mid-request**. The
+request handler's retry loop (zai_proxy.py:2260-2340) then:
+
+1. marks the key exhausted (`_mark_key_exhausted`, :2291),
+2. retries the next key, which also 429s,
+3. after all keys fail, falls to **:2326-2333 — the hardcoded chain**:
+   `_try_ollama_cloud(...)` (logs reason `zai_both_keys_exhausted_ollama_fallback`
+   at :1842) then `_try_external_failover(...)`.
+
+**This hardcoded fallback at :2326-2333 never consults LiveRouter.** And because
+`best_key()` returned a non-None key on the initial call (its health cache lagged
+the 429), the LiveRouter gate at :1698 was never reached either. LiveRouter is
+dead code on the actual failover path.
+
+### Proof from the production database (zai_usage.db, 2 h window)
+
+| reason (key_decisions) | count (2 h) | source |
+|---|---|---|
+| `both_keys_exhausted` (best_key returns None → LiveRouter gate path) | **0** | best_key :1689/1722 |
+| `live_kalman_failover_*` (LiveRouter actually picked a provider) | **0** (0 ever, all history) | best_key :1714 |
+| `zai_both_keys_exhausted_ollama_fallback` (hardcoded retry-loop fallback) | **841** | _try_ollama_cloud :1842 via :2328 |
+
+`both_keys_exhausted` is **0 in the last 2 h** (18,802 historically — it *used*
+to fire when the health cache was stale enough) while the hardcoded ollama
+fallback fires **841 times in 2 h**. The two numbers being non-overlapping
+proves the ollama fallback does **not** flow through `best_key()`'s None branch.
+The dual-exhaustion events are real and frequent (~7/min) — they are simply
+routed around LiveRouter entirely.
+
+### Why `select_failover` returning a provider (run-21 fix f882812) did not help
+
+Commit f882812 made `select_failover()` return a real provider for synthetic
+inputs (verified in §1). But that fix is irrelevant on the live path: the gate
+that *calls* `select_failover` (best_key :1706) is never reached, so a working
+`select_failover` can never produce a `live_kalman_failover_*` event. The fix
+addressed a real bug in the function body, but the function is never invoked
+under production failover conditions.
+
+### The fix (code change — out of scope for this no-code soak card)
+
+One of:
+1. **Move/add the LiveRouter consultation into the retry-loop fallback** at
+   zai_proxy.py:2326 (before the hardcoded `_try_ollama_cloud`), passing the same
+   `select_failover(quota_state, health_state, peak, pace_windows)` call; or
+2. **Make `best_key()` proactively detect both-keys-429-exhausted** (refresh
+   health from the live quota cache, not the lagging breaker) and return None so
+   the existing :1698 gate fires; or
+3. **Add a LiveRouter call at the `if chosen is None:` block** (:2087) as a
+   second engagement point.
+
+Plus: create the `routing_live_decisions` table (same schema as
+`routing_shadow_decisions` + `pace_mults` column) and log each live decision
+there (see §6 blocker #2).
+
+Until one of these lands, a 48 h soak produces zero live events by construction.
 
 ## 6. Open blockers (need resolution before completion)
 
-1. **Kill-switch flag instability.** `.enable_live_routing` is untracked and
-   NOT gitignored in the bot repo. It was deleted by an unidentified process
-   within minutes of creation on two occasions (04:41-04:43, 04:49-04:53),
-   though it survived 90 s–5 min in other windows (sporadic, not a fixed cron).
-   No filesystem script, cron, process cmdline, or proxy code-path deletes it;
-   no `git clean` script targets the bot repo. Likely an occasional external
-   operator/sync action. **Action:** gitignore the flag + identify/stop the
-   sporadic deleter so the soak can hold the flag on for 48 h.
+1. **🔴 WIRING BUG (primary blocker — see §5).** The LiveRouter failover gate
+   is in `best_key()` (zai_proxy.py:1698), but production dual-key exhaustion is
+   served by the retry-loop hardcoded fallback (zai_proxy.py:2326-2333), which
+   bypasses LiveRouter. Result: 0 live events despite 841 dual-exhaustion
+   events/2 h. **Action:** spawn a code task to move/add the LiveRouter
+   consultation to the actual failover path (see §5 fix options). This is the
+   gate to Phase 4 — without it, the soak cannot produce the deliverable.
 2. **`routing_live_decisions` table does not exist.** The task requires logging
    live decisions to a new table (same schema as `routing_shadow_decisions` +
-   `pace_mults`). `zai_proxy.py` only logs the decision reason to
-   `key_decisions` (`live_kalman_failover_{provider}`); no `CREATE TABLE
-   routing_live_decisions` exists anywhere. **Action:** spawn a code task to
-   add the table + insert (small, contained change) — out of scope for this
-   no-code-change soak card.
-3. **48 h wall-clock** (~3.7% complete) — cannot elapse in one agent session.
-4. **10+ live failover events gate** — 0 observed; requires blocker #1 cleared
-   plus natural dual-exhaustion bursts during the 48 h window.
+   `pace_mults`). `zai_proxy.py` only logs the decision reason to `key_decisions`
+   (`live_kalman_failover_{provider}`); no `CREATE TABLE routing_live_decisions`
+   exists anywhere. **Action:** the code task above should also add this table +
+   insert (small, contained change).
+3. **parse_error quality regression.** valid-of-received dropped to friend 80% /
+   ours 28% (was >90% in the interim checkpoint), driven by 583 `parse_error`
+   events/2 h. Not LiveRouter-caused. **Action:** separate quality task to
+   investigate the parse-error source (possible SSE/parsing regression).
+4. **48 h wall-clock** (~5% complete) — cannot elapse in one agent session.
+5. **Kill-switch flag stability** — ⚠️ previously sporadically deleted; currently
+   **stable** (ON since 04:56 IST, 30+ min, survived this whole run). Lower
+   priority now; gitignoring the flag is still advisable for robustness.
 
-## 7. Verification checklist (real output)
+## 7. Verification checklist (real output — run 27, 2026-07-29 05:25 IST)
 
-1. Failover event count (live): **0** observed (bursty dual-exhaustion; see §5).
-2. Error rate: hard errors since flag-enable = **0**; valid-of-received >90%.
-3. Latency: friend avg ~9.7 s (unchanged from baseline; reasoning model), ours
-   avg ~3.4 s. No latency regression introduced.
-4. Cost savings: not yet measurable (0 live events). Shadow data shows
-   ollama_cloud ($0.024/M) cheapest; LiveRouter matches it when ollama healthy.
-5. Kill switch test: **PASS** — flag-off ⇒ 0 live decisions; per-request check
-   ⇒ instant revert; flag-on ⇒ `select_failover` returns provider (direct test).
-6. `git log` / `git status` / `git push`: see commit for this report.
-9. Gate criteria: **NOT MET** (0 live events; 48 h incomplete). Zero incidents ✅.
+1. Failover event count (live): **0** (`live_kalman_failover_*`, 0 ever in all
+   history). Dual-exhaustion events DO occur — `zai_both_keys_exhausted_ollama_fallback`
+   = **841 in the last 2 h** — but they are served by the hardcoded retry-loop
+   fallback, not LiveRouter. See §5 root cause.
+2. Error rate: 3 hard errors in 2 h (1 `Network is unreachable`, 1 DNS failure,
+   1 `api_error`) — none attributable to LiveRouter (it never engaged).
+   `no_response` = 3299 (quota exhaustion — the expected failover condition).
+   `parse_error` = **583** — see quality note below.
+3. Latency: friend avg **7462 ms**, ours avg **3683 ms** (last 2 h). No regression
+   from baseline.
+4. Cost savings: not measurable (0 live events). Shadow optimizer (last 2 h,
+   8124 rows) would pick `ours` 5846 (72%) / `ollama_cloud` 2278 (28%); live picks
+   diverge significantly (`friend` 2300, `ours` 1773, `ollama_cloud` 819).
+5. Kill switch test: PASS — flag-off ⇒ 0 live decisions (empirically confirmed);
+   per-request `os.path.exists` check (zai_proxy.py:1699) ⇒ instant revert.
+   Flag currently **ON** (stable since 04:56 IST, 30+ min).
+6. `git log --oneline -5`: see commit for this report (HEAD of
+   `converged-rate-replay`).
+7. `git status`: clean (only this docs change).
+8. `git push github`: see output below.
+9. Gate criteria: **NOT MET** — 0 live events (need 10+); 48 h ~5% complete;
+   valid-of-received below 90% (friend 80%, ours 28% — see quality note).
+
+### Quality note (regression from interim checkpoint)
+
+The interim checkpoint (run 21) reported valid-of-received >90% (friend 96–100%,
+ours 93%). The current 2 h window shows a **regression**: friend **80%**,
+ours **28%**, driven by **583 `parse_error` events** in 2 h. This is NOT caused
+by LiveRouter (which never engaged) — it is a response-parse quality issue on
+the hardcoded z.ai/ollama path. The manager's "Mark done when >90% valid rate"
+criterion is **not currently met** and warrants investigation as a separate
+quality task. Token-mismatch rate is also elevated (friend 35.3%, ours 16.9%).
