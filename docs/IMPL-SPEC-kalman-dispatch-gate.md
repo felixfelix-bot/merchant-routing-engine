@@ -1,8 +1,8 @@
 # IMPL-SPEC: Kalman-Gated Kanban Dispatch
 
-**Status:** APPROVED by operator (2026-07-29)
+**Status:** APPROVED by operator (2026-07-29) — REVISED with hardware gate (v2)
 **Branch:** converged-rate-replay
-**Complexity:** ~40 lines proxy endpoint + ~30 lines daemon update
+**Complexity:** ~60 lines proxy endpoint + ~50 lines daemon update
 
 ---
 
@@ -312,9 +312,218 @@ Once the Kalman gate is live, the daemon auto-dispatches when quota windows open
 
 ---
 
+## HARDWARE GATE (v2 addition)
+
+### Problem: Compounding Failure Cost
+
+Software task fails on quota: wastes ~50K tokens (~$0.001). No side effects.
+
+Hardware task fails on quota: wastes ~50K tokens + holds board lock for 300s timeout + blocks all other hardware tasks from using that board + may leave board half-flashed. Cost: ~$0.001 + 300s hardware downtime + recovery work.
+
+**Hardware tasks need LARGER Kalman safety margins because the blast radius is wider.**
+
+### Three-Dimensional Gate
+
+The dispatch gate has three dimensions. They are NOT equal — there's a priority cascade:
+
+```
+DIMENSION 1: Hardware availability (binary, instantaneous)
+    Board present? DQ05 reachable? Lock free?
+    → If NO: HOLD. Re-check next tick.
+    → If YES: escalate priority, relax price gate.
+
+DIMENSION 2: Quota sufficiency (Kalman, predictive)
+    Will both keys exhaust within task budget?
+    Safety margin: 4x for hardware tasks, 2x for software tasks
+    → If YES (enough headroom): proceed to price check
+    → If NO: try model downgrade → hold if still insufficient
+
+DIMENSION 3: Price optimization (PriceKalman, trend-aware)
+    Is it peak hour (3x multiplier)?
+    → If hardware present: DISPATCH ANYWAY (scarcity override)
+    → If no hardware needed: hold non-urgent tasks until off-peak
+```
+
+**Key insight:** When dimensions 1 and 3 conflict (board is here but it's peak hours), hardware WINS. A board physically present is scarcer than quota — quota resets every 5h, the board might be unplugged in 30 min.
+
+### Extended Endpoint
+
+```
+GET /v1/dispatch_gate?estimated_tokens=200000&task_type=coding&hardware_req=board
+```
+
+New `hardware_req` parameter (default: `none`):
+- `none` — software only (compile, edit, docs, review)
+- `board` — needs one physical board connected (flash, capture, serial)
+- `dual_board` — needs two boards (handshake, phy exchange)
+- `dq05` — needs DQ05 reachable via SSH/Netbird (remote builds)
+
+### Extended Response
+
+```json
+{
+  "can_dispatch": true,
+  "reason": "board present, quota sufficient with 4x margin",
+  "recommended_model": "glm-5.2",
+  "effective_price_per_m": 0.009,
+  "predicted_cost": 0.0018,
+  "hours_until_exhaustion": {"ours": 4.5, "friend": 8.2},
+  "quota_used_pct": {"ours": 45.0, "friend": 30.0},
+  "is_peak_hour": true,
+  "peak_multiplier": 3.0,
+  "scarcity_override": true,
+  "hardware": {
+    "required": "board",
+    "board_present": true,
+    "board_id": "F242D",
+    "lock_status": "free",
+    "queue_depth": 0,
+    "estimated_wait_minutes": 0
+  }
+}
+```
+
+### Hardware State Sources
+
+The endpoint reads hardware state from existing infrastructure:
+
+| Signal | Source | Already exists? |
+|--------|--------|----------------|
+| Board presence | `ls /dev/ttyACM*` + udevadm | Yes — board_watcher.sh |
+| Board identity | udevadm serial number (F242D) | Yes |
+| Lock status | `~/.hermes/peripheral_locks/board-lock-monitor.json` | Yes (needs refresh cron) |
+| DQ05 reachable | `dq05_detect` MCP call or health endpoint | Yes — dq05_monitor MCP |
+| Queue depth | Count running/ready kanban tasks with same hardware_req | New (daemon-side) |
+
+### Hardware Kalman Margin Logic
+
+```python
+# In the gate decision logic:
+SAFETY_MARGIN = {
+    'none': 2.0,       # software: 2x budget headroom
+    'board': 4.0,      # single board: 4x (flash + test takes time)
+    'dual_board': 6.0, # two boards: 6x (harder to coordinate)
+    'dq05': 3.0,       # remote: 3x (network adds variance)
+}
+
+margin = SAFETY_MARGIN.get(hardware_req, 2.0)
+required_headroom = task_budget * margin
+
+if ours_remaining < required_headroom and friend_remaining < required_headroom:
+    # Not enough for this task type with hardware margin
+    # Try downgrade to flash (0.3x token usage, same margin)
+    flash_required = task_budget * 0.3 * margin
+    if ours_remaining < flash_required and friend_remaining < flash_required:
+        can_dispatch = False
+        reason = f"insufficient quota for {hardware_req} task ({margin}x margin)"
+    else:
+        model = 'glm-4.5-flash'
+        downgraded = True
+```
+
+### Hardware Task Duration Impact
+
+Hardware tasks consume quota DURING execution (flash + test + capture = more wall-clock). The ConsumptionKalman burn_rate already accounts for aggregate burn, but for a hardware task specifically:
+
+```python
+# Estimate wall-clock duration from task type + hardware
+DURATION_MINUTES = {
+    'flash': 10,      # pio upload + verify
+    'capture': 20,    # serial capture window
+    'throughput': 15, # tx/rx test cycle
+    'handshake': 60,  # two-node integration test
+}
+
+# Quota consumed during task = burn_rate * (duration / 60)
+task_duration_hours = DURATION_MINUTES.get(task_subtype, 15) / 60
+quota_during_task = ours_burn_rate * task_duration_hours
+effective_budget = task_budget + quota_during_task  # tokens consumed by task + tokens burned while waiting
+```
+
+### Daemon Task Type → Hardware Inference
+
+```bash
+infer_hardware_req() {
+    local title="$1"
+    title_lower=$(echo "$title" | tr '[:upper:]' '[:lower:]')
+    
+    # Two-board tasks
+    if echo "$title_lower" | grep -qE 'handshake|two.node|2.node|phy.exchange|dual'; then
+        echo "dual_board"
+    # Single-board tasks
+    elif echo "$title_lower" | grep -qE 'flash|pio.upload|serial|capture|throughput|f242d|bootsel'; then
+        echo "board"
+    # DQ05-dependent tasks
+    elif echo "$title_lower" | grep -qE 'dq05|remote.build|ssh.*compile'; then
+        echo "dq05"
+    else
+        echo "none"
+    fi
+}
+```
+
+### Hardware Queue Prediction (simple model, not Kalman)
+
+Board is a single-server queue. Predict wait time for new tasks:
+
+```python
+def hardware_queue_wait(hardware_req, running_tasks, ready_tasks):
+    """Estimate minutes until a board slot opens."""
+    if hardware_req == 'none':
+        return 0  # no hardware needed
+    
+    # Count tasks ahead in queue with same hardware_req
+    ahead = [t for t in running_tasks if t.hardware_req == hardware_req]
+    ready_ahead = [t for t in ready_tasks if t.hardware_req == hardware_req]
+    
+    if not ahead:
+        return 0  # board is free now
+    
+    # Estimate completion time of running hardware tasks
+    wait = sum(t.estimated_remaining_minutes for t in ahead)
+    
+    return wait
+```
+
+This doesn't need Kalman because hardware tasks have known durations (flash=10min, capture=20min) — no noisy measurements to smooth. Simple sum of estimated remaining times.
+
+### What Needs Fixing Before Hardware Gate Works
+
+1. **board-lock-monitor.json is STALE** — last updated 2026-07-24. The board-access-monitor.sh cron needs to run more frequently (every 5 min, not whenever someone remembers).
+
+2. **No hardware_req field on kanban tasks** — daemon infers from title keywords (above). Later: add explicit field to `hermes kanban create`.
+
+3. **DQ05 reachability check** — currently only via MCP tool. Daemon needs a lightweight `curl` or `ssh -o ConnectTimeout=3` check. Don't spawn a full MCP call per dispatch tick.
+
+### Existing Hardware Gate Infrastructure
+
+| Component | Path | Status |
+|-----------|------|--------|
+| Board lock monitor | `~/.hermes/peripheral_locks/board-lock-monitor.json` | Stale, needs cron refresh |
+| Board watcher | `~/.hermes/profiles/manager/scripts/board_watcher.sh` | Works, detects F242D |
+| Board access monitor | `~/.hermes/profiles/manager/scripts/board-access-monitor.sh` | Needs frequency increase |
+| DQ05 monitor MCP | `/home/c03rad0r/scripts/dq05_monitor_mcp.py` | Running (PID 8657) |
+| flock mutex system | Board workspaces + lock files | Works, last-line defense |
+| Balloon board-access skill | `skills/balloon-board-access/` | Has lock protocol docs |
+
+### Mutex vs Gate — Complementary, Not Competing
+
+| Layer | When | What | Prevents |
+|-------|------|------|----------|
+| **Hardware gate** | PRE-dispatch | "Is board present + free?" | Spawning worker that can't succeed |
+| **Quota gate** (Kalman) | PRE-dispatch | "Will quota last with Nx margin?" | Spawning during exhaustion |
+| **Price gate** (PriceKalman) | PRE-dispatch | "Is now cost-effective?" (overridden by hardware presence) | Wasting money at peak rates |
+| **flock mutex** | RUNTIME | "Only one process flashes this board" | Concurrent hardware collision |
+
+Gate is first line of defense (don't spawn). Mutex is last line (if two somehow spawn, only one gets hardware). Both needed.
+
+---
+
 ## QUESTIONS FOR MERCHANT MODULE CONTEXT
 
 1. Does the proxy HTTP handler have a clean dispatch table for GET routes, or does it use if/elif chains? (affects where to add the endpoint)
 2. Is `_read_zai_state()` the right function to get current quota percentages, or should we read from the in-memory dict directly?
-3. Should the gate endpoint use ConsumptionKalman.will_exhaust() directly (better prediction but needs the Kalman instances exposed), or is the simple `remaining > 2x budget` check sufficient for v1?
+3. Should the gate endpoint use ConsumptionKalman.will_exhaust() directly (better prediction but needs the Kalman instances exposed), or is the simple `remaining > Nx budget` check sufficient for v1?
 4. Any concerns about thread safety? The endpoint is read-only but reads shared Kalman state.
+5. **NEW:** The hardware gate needs to read board-lock-monitor.json + check /dev/ttyACM*. Should this happen inside the proxy endpoint (proxy reads files directly) or in the daemon (daemon curls a separate hardware health endpoint)?
+6. **NEW:** For DQ05 reachability, should the gate use `ssh -o ConnectTimeout=3` (fast, direct) or the existing MCP `dq05_detect` (richer but heavier)?
