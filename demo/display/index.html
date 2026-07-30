@@ -1,0 +1,1030 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sovereign Routing Engine — Display</title>
+<!-- Offline-bundled vendor libs (no CDN) -->
+<script src="vendor/plotly-2.35.2.min.js"></script>
+<script src="vendor/nostr-tools.min.js"></script>
+<script src="vendor/qrcode.min.js"></script>
+<style>
+/* ════════════════════════════════════════════════════════════════════════
+   DARK THEME + RESPONSIVE GRID
+   ════════════════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#0a0e14; --bg2:#0d1117; --card:#131820; --card2:#161b22;
+  --border:#21262d; --border2:#30363d;
+  --txt:#c9d1d9; --txt-dim:#8b949e; --txt-bright:#f0f6fc;
+  --blue:#58a6ff; --green:#3fb950; --red:#f85149; --yellow:#d29922;
+  --purple:#bc8cff; --cyan:#39d2c0; --orange:#f0883e;
+  --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg);color:var(--txt);font-family:var(--sans);
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;
+}
+
+/* ── top bar ── */
+.topbar{
+  display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  padding:12px 20px;background:var(--bg2);border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:50;backdrop-filter:blur(8px);
+}
+.topbar h1{font-size:16px;font-weight:600;color:var(--txt-bright);letter-spacing:-.2px}
+.topbar h1 .accent{color:var(--cyan)}
+.topbar .spacer{flex:1}
+.badge{
+  font-family:var(--mono);font-size:11px;font-weight:600;padding:3px 8px;
+  border-radius:4px;border:1px solid var(--border2);color:var(--txt-dim);
+  display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
+}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+.badge.demo{border-color:var(--yellow);color:var(--yellow)}
+.badge.demo .dot{background:var(--yellow);animation:pulse 1.5s infinite}
+.badge.live .dot{background:var(--green);animation:pulse 2s infinite}
+.badge.error{border-color:var(--red);color:var(--red)}
+.badge.error .dot{background:var(--red)}
+.badge.connecting{border-color:var(--blue);color:var(--blue)}
+.badge.connecting .dot{background:var(--blue);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── responsive grid ── */
+.grid{
+  display:grid;gap:14px;padding:14px 20px 40px;
+  grid-template-columns:repeat(12,1fr);
+  grid-auto-rows:min-content;
+  max-width:1800px;margin:0 auto;
+}
+.card{
+  background:var(--card);border:1px solid var(--border);border-radius:10px;
+  padding:16px;display:flex;flex-direction:column;min-width:0;overflow:hidden;
+}
+.card h2{
+  font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;
+  color:var(--txt-dim);margin-bottom:12px;display:flex;align-items:center;gap:8px;
+}
+.card h2 .num{
+  width:18px;height:18px;border-radius:5px;background:var(--border2);
+  display:inline-flex;align-items:center;justify-content:center;font-size:10px;
+  color:var(--cyan);
+}
+/* spans */
+.col-qr    {grid-column:span 3}
+.col-diag  {grid-column:span 5}
+.col-cost  {grid-column:span 4}
+.col-charts{grid-column:span 7}
+.col-econ  {grid-column:span 5}
+.col-quota {grid-column:span 4}
+.col-flow  {grid-column:span 5}
+.col-gate  {grid-column:span 3}
+.full      {grid-column:span 12}
+
+/* ── phone / tablet ── */
+@media(max-width:1100px){
+  .col-qr,.col-diag,.col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate{grid-column:span 6}
+}
+@media(max-width:700px){
+  .grid{grid-template-columns:1fr;padding:10px}
+  .col-qr,.col-diag,.col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate,.full{grid-column:span 1}
+  .topbar{padding:10px 12px}
+  .topbar h1{font-size:14px}
+}
+
+/* ═══ PANEL 1: QR CODE ═══ */
+.qr-wrap{display:flex;flex-direction:column;align-items:center;gap:10px;flex:1;justify-content:center}
+.qr-box{
+  background:#fff;padding:12px;border-radius:10px;
+  display:flex;align-items:center;justify-content:center;
+}
+.qr-box svg{display:block}
+.qr-label{font-size:11px;color:var(--txt-dim);text-align:center;word-break:break-all;line-height:1.4}
+.qr-label .url{font-family:var(--mono);color:var(--cyan);font-size:10px}
+
+/* ═══ PANEL 2: SYSTEM DIAGRAM ═══ */
+.diagram{display:flex;flex-direction:column;gap:0;flex:1;justify-content:center;position:relative;padding:4px 0}
+.diag-row{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;position:relative;z-index:2}
+.diag-node{
+  background:var(--bg2);border:1px solid var(--border2);border-radius:9px;
+  padding:10px 14px;text-align:center;min-width:80px;position:relative;
+  transition:border-color .3s,box-shadow .3s;
+}
+.diag-node .dn-icon{font-size:20px;line-height:1}
+.diag-node .dn-label{font-size:10px;font-weight:600;color:var(--txt-bright);margin-top:4px;letter-spacing:.3px}
+.diag-node .dn-sub{font-size:9px;color:var(--txt-dim);font-family:var(--mono)}
+.diag-node.active{border-color:var(--green);box-shadow:0 0 16px rgba(63,185,80,.25)}
+.diag-node.relay{border-color:var(--blue)}
+.diag-node.relay.active{border-color:var(--blue);box-shadow:0 0 16px rgba(88,166,255,.25)}
+.diag-node.phone{border-color:var(--purple)}
+.diag-node.phone.active{border-color:var(--purple);box-shadow:0 0 12px rgba(188,140,255,.25)}
+.diag-node.dq05{border-color:var(--cyan)}
+.diag-node.dq05.active{border-color:var(--cyan);box-shadow:0 0 18px rgba(57,210,192,.3)}
+.diag-spacer{height:28px;position:relative;z-index:1}
+.diag-line{
+  position:absolute;left:50%;top:0;bottom:0;width:2px;transform:translateX(-50%);
+  background:linear-gradient(180deg,var(--border2),var(--border2));
+}
+.diag-line .flow-dot{
+  position:absolute;left:50%;width:6px;height:6px;border-radius:50%;
+  background:var(--green);box-shadow:0 0 8px var(--green);
+  transform:translateX(-50%);animation:flowdown 1.5s linear infinite;
+}
+@keyframes flowdown{0%{top:0;opacity:1}90%{opacity:1}100%{top:100%;opacity:0}}
+.diag-h-line{
+  height:2px;background:var(--border2);position:relative;flex:1;min-width:20px;align-self:center;
+}
+.diag-h-line .flow-dot-r{
+  position:absolute;top:50%;width:6px;height:6px;border-radius:50%;
+  background:var(--blue);box-shadow:0 0 8px var(--blue);
+  transform:translateY(-50%);animation:flowright 1.8s linear infinite;
+}
+@keyframes flowright{0%{left:0;opacity:1}90%{opacity:1}100%{left:100%;opacity:0}}
+
+/* ═══ PANEL 3: PER-KEY PRICE CHARTS ═══ */
+.charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:560px){.charts-grid{grid-template-columns:1fr}}
+.mini-chart-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 8px 4px}
+.mini-chart-wrap .mc-head{
+  display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;padding:0 4px;
+}
+.mini-chart-wrap .mc-name{font-size:12px;font-weight:600;color:var(--txt-bright)}
+.mini-chart-wrap .mc-price{font-family:var(--mono);font-size:12px;color:var(--cyan)}
+.mini-chart{width:100%;height:130px}
+.legend-row{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;padding:0 4px}
+.legend-row .lg{font-size:10px;color:var(--txt-dim);display:flex;align-items:center;gap:5px}
+.legend-row .lg .swatch{width:14px;height:3px;border-radius:2px}
+.sw-cost{background:var(--blue)} .sw-price{background:var(--cyan);background-image:repeating-linear-gradient(90deg,var(--cyan) 0 4px,transparent 4px 7px)}
+.sw-margin{background:var(--purple);opacity:.4;border-radius:2px;width:10px;height:10px}
+
+/* ═══ PANEL 4: QUOTA BARS ═══ */
+.quota-bar-wrap{display:flex;flex-direction:column;gap:18px;flex:1;justify-content:center}
+.qb{display:flex;flex-direction:column;gap:6px}
+.qb .qb-top{display:flex;justify-content:space-between;align-items:baseline}
+.qb .qb-name{font-weight:600;font-size:13px;color:var(--txt-bright)}
+.qb .qb-pct{font-family:var(--mono);font-size:18px;font-weight:600}
+.qb-track{height:22px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;overflow:hidden;position:relative}
+.qb-fill{height:100%;border-radius:5px 0 0 5px;transition:width .8s cubic-bezier(.4,0,.2,1),background .4s;position:relative}
+.qb-fill::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.12),transparent);animation:shimmer 2.5s infinite}
+@keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+.qb-fill.green{background:linear-gradient(90deg,#1a7f37,#3fb950)}
+.qb-fill.yellow{background:linear-gradient(90deg,#9e6a03,#d29922)}
+.qb-fill.red{background:linear-gradient(90deg,#da3633,#f85149)}
+.qb-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--txt-dim);font-family:var(--mono)}
+
+/* ═══ PANEL 5: COST METER ═══ */
+.cost-big{font-family:var(--mono);font-size:48px;font-weight:700;color:var(--green);line-height:1;text-align:center;margin:8px 0}
+.cost-big .cents{font-size:26px;color:var(--txt-dim)}
+.cost-sub{text-align:center;font-size:12px;color:var(--txt-dim);font-family:var(--mono)}
+.cost-sub .burn{color:var(--orange)}
+.cost-bar{height:6px;background:var(--bg2);border-radius:3px;margin-top:14px;overflow:hidden}
+.cost-bar .cb-fill{height:100%;background:linear-gradient(90deg,var(--green),var(--yellow));border-radius:3px;transition:width .8s}
+
+/* ═══ PANEL 6: REQUEST FLOW ═══ */
+.flow-list{display:flex;flex-direction:column;gap:7px;max-height:340px;overflow-y:auto;flex:1}
+.flow-list::-webkit-scrollbar{width:6px} .flow-list::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+.flow-card{
+  background:var(--bg2);border:1px solid var(--border);border-radius:7px;padding:9px 12px;
+  display:grid;grid-template-columns:auto 1fr auto;gap:8px 12px;align-items:center;
+  animation:slidein .4s ease;font-size:12px;
+}
+@keyframes slidein{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+.flow-card .fc-time{font-family:var(--mono);font-size:10px;color:var(--txt-dim);white-space:nowrap}
+.flow-card .fc-mid{min-width:0}
+.flow-card .fc-prov{font-weight:600;font-size:12px}
+.flow-card .fc-model{font-family:var(--mono);font-size:10px;color:var(--txt-dim)}
+.flow-card .fc-right{text-align:right;font-family:var(--mono);font-size:11px;white-space:nowrap}
+.flow-card .fc-cost{color:var(--orange)}
+.flow-card .fc-tok{color:var(--txt-dim);font-size:10px}
+.flow-card .fc-who{font-family:var(--mono);font-size:10px;color:var(--purple)}
+.flow-empty{padding:30px;text-align:center;color:var(--txt-dim);font-size:12px}
+.pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:600}
+.pill.ours{background:rgba(88,166,255,.15);color:var(--blue)}
+.pill.friend{background:rgba(188,140,255,.15);color:var(--purple)}
+.pill.ollama{background:rgba(57,210,192,.15);color:var(--cyan)}
+.pill.ppq{background:rgba(240,136,62,.15);color:var(--orange)}
+
+/* ═══ PANEL 7: DISPATCH GATE ═══ */
+.gate-wrap{display:flex;align-items:center;gap:14px;flex:1;flex-wrap:wrap;justify-content:center}
+.gate-light{
+  width:72px;height:72px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  font-size:28px;transition:all .5s;position:relative;
+}
+.gate-light.go{background:radial-gradient(circle,#3fb950,#1a7f37);box-shadow:0 0 30px rgba(63,185,80,.5)}
+.gate-light.hold{background:radial-gradient(circle,#f85149,#da3633);box-shadow:0 0 30px rgba(248,81,73,.5)}
+.gate-light::after{content:'';position:absolute;inset:-6px;border-radius:50%;border:2px solid currentColor;opacity:.3;animation:ring 2s infinite}
+.gate-light.go::after{color:var(--green)} .gate-light.hold::after{color:var(--red)}
+@keyframes ring{0%{transform:scale(1);opacity:.4}100%{transform:scale(1.25);opacity:0}}
+.gate-info{flex:1;min-width:100px;text-align:center}
+.gate-info .gi-status{font-size:18px;font-weight:700}
+.gate-info .gi-status.go{color:var(--green)} .gate-info .gi-status.hold{color:var(--red)}
+.gate-info .gi-model{font-family:var(--mono);font-size:12px;color:var(--cyan);margin:3px 0}
+.gate-info .gi-reason{font-size:10px;color:var(--txt-dim);line-height:1.4}
+.gate-stats{display:flex;gap:10px;margin-top:8px;flex-wrap:wrap;justify-content:center}
+.gate-stats .gs{font-size:11px}
+.gate-stats .gs .gs-l{color:var(--txt-dim);text-transform:uppercase;letter-spacing:.3px;font-size:8px}
+.gate-stats .gs .gs-v{font-family:var(--mono);color:var(--txt-bright);font-size:12px}
+
+/* ═══ PANEL 8: TOKEN ECONOMY SUMMARY ═══ */
+.econ-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;flex:1;align-content:start}
+.econ-stat{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+.econ-stat .es-l{font-size:9px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:.4px}
+.econ-stat .es-v{font-family:var(--mono);font-size:20px;font-weight:600;color:var(--txt-bright);margin-top:2px}
+.econ-stat .es-v.cyan{color:var(--cyan)} .es-stat .es-v.green{color:var(--green)} .es-stat .es-v.orange{color:var(--orange)}
+.econ-stat .es-sub{font-size:10px;color:var(--txt-dim);font-family:var(--mono);margin-top:1px}
+.scarcity-bar{margin-top:10px}
+.scarcity-bar .sb-top{display:flex;justify-content:space-between;font-size:10px;color:var(--txt-dim);margin-bottom:4px}
+.scarcity-track{height:10px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;overflow:hidden;display:flex}
+.scarcity-seg{height:100%;transition:opacity .5s}
+.scarcity-seg.s1{background:#1a7f37} .scarcity-seg.s2{background:#9e6a03}
+.scarcity-seg.s3{background:#d29922} .scarcity-seg.s4{background:#f0883e} .scarcity-seg.s5{background:#da3633}
+.leaderboard-mini{margin-top:10px;max-height:100px;overflow-y:auto;border:1px solid var(--border);border-radius:6px}
+.lb-row{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);font-size:11px}
+.lb-row:last-child{border-bottom:none}
+.lb-row .who{font-family:var(--mono);color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lb-row .spent{font-family:var(--mono);color:var(--orange);font-size:10px}
+.lb-row .prompts{font-family:var(--mono);color:var(--txt-dim);font-size:10px}
+.lb-empty{padding:14px;text-align:center;color:var(--txt-dim);font-size:11px}
+</style>
+</head>
+<body>
+
+<!-- ═══ TOP BAR ═══ -->
+<div class="topbar">
+  <h1>⚡ Sovereign Routing <span class="accent">Engine</span></h1>
+  <span class="spacer"></span>
+  <span class="badge connecting" id="conn-badge"><span class="dot"></span><span id="conn-text">connecting…</span></span>
+  <span class="badge" id="time-badge"><span class="dot" style="background:var(--txt-dim)"></span><span id="time-text">--:--:--</span></span>
+</div>
+
+<div class="grid">
+
+  <!-- ═══ PANEL 1: QR CODE ═══ -->
+  <div class="card col-qr">
+    <h2><span class="num">1</span> Join the Demo — scan to participate</h2>
+    <div class="qr-wrap">
+      <div class="qr-box" id="qr-box"></div>
+      <div class="qr-label">Scan with your phone<br><span class="url" id="qr-url">—</span></div>
+    </div>
+  </div>
+
+  <!-- ═══ PANEL 2: SYSTEM DIAGRAM ═══ -->
+  <div class="card col-diag">
+    <h2><span class="num">2</span> System Diagram — live infrastructure</h2>
+    <div class="diagram" id="diagram">
+      <div class="diag-row">
+        <div class="diag-node dq05 active" id="node-dq05">
+          <div class="dn-icon">🖥️</div>
+          <div class="dn-label">DQ05</div>
+          <div class="dn-sub">Kalman · CVM</div>
+        </div>
+        <div class="diag-h-line"><div class="flow-dot-r"></div></div>
+        <div class="diag-node relay active" id="node-relays">
+          <div class="dn-icon">📡</div>
+          <div class="dn-label">RELAYS</div>
+          <div class="dn-sub" id="relay-sub">3 connected</div>
+        </div>
+      </div>
+      <div class="diag-spacer"><div class="diag-line"><div class="flow-dot"></div></div></div>
+      <div class="diag-row" id="phone-row">
+        <div class="diag-node phone" id="node-phone-0"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>
+        <div class="diag-node phone" id="node-phone-1"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>
+        <div class="diag-node phone" id="node-phone-2"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ PANEL 5: COST METER ═══ -->
+  <div class="card col-cost">
+    <h2><span class="num">5</span> Cost Meter — today</h2>
+    <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
+      <div class="cost-big" id="cost-big">$0<span class="cents">.00</span></div>
+      <div class="cost-sub"><span class="burn" id="burn-rate">$0.00</span> / hour burn</div>
+      <div class="cost-bar"><div class="cb-fill" id="cost-bar-fill" style="width:0%"></div></div>
+      <div class="cost-sub" style="margin-top:6px;font-size:10px" id="cost-ticks">0 requests today</div>
+    </div>
+  </div>
+
+  <!-- ═══ PANEL 3: PER-KEY PRICE CHARTS ═══ -->
+  <div class="card col-charts">
+    <h2><span class="num">3</span> Per-Key Price Economics — cost basis · your price · margin%</h2>
+    <div class="charts-grid" id="charts-grid"></div>
+    <div class="legend-row">
+      <span class="lg"><span class="swatch sw-cost"></span> Cost basis ($/M)</span>
+      <span class="lg"><span class="swatch sw-price"></span> Your price + margin ($/M)</span>
+      <span class="lg"><span class="swatch sw-margin"></span> Margin % (right axis)</span>
+    </div>
+  </div>
+
+  <!-- ═══ PANEL 8: TOKEN ECONOMY SUMMARY ═══ -->
+  <div class="card col-econ">
+    <h2><span class="num">8</span> Token Economy — participants · price · scarcity</h2>
+    <div class="econ-stats">
+      <div class="econ-stat"><div class="es-l">Participants</div><div class="es-v cyan" id="econ-participants">—</div></div>
+      <div class="econ-stat"><div class="es-l">Total Prompts</div><div class="es-v" id="econ-prompts">—</div></div>
+      <div class="econ-stat"><div class="es-l">Avg Price $/M</div><div class="es-v cyan" id="econ-avgprice">—</div></div>
+      <div class="econ-stat"><div class="es-l">Tokens Used</div><div class="es-v" id="econ-tokens">—</div></div>
+    </div>
+    <div class="scarcity-bar">
+      <div class="sb-top"><span>Scarcity <span id="econ-scarcity" style="color:var(--yellow);font-family:var(--mono)">1.0×</span></span><span id="econ-budget-pct">0% budget used</span></div>
+      <div class="scarcity-track">
+        <div class="scarcity-seg s1" style="flex:20"></div>
+        <div class="scarcity-seg s2" style="flex:20"></div>
+        <div class="scarcity-seg s3" style="flex:20"></div>
+        <div class="scarcity-seg s4" style="flex:20"></div>
+        <div class="scarcity-seg s5" style="flex:20"></div>
+      </div>
+    </div>
+    <div class="leaderboard-mini" id="econ-leaderboard"><div class="lb-empty">No participants yet</div></div>
+  </div>
+
+  <!-- ═══ PANEL 4: QUOTA BARS ═══ -->
+  <div class="card col-quota">
+    <h2><span class="num">4</span> Quota — per key, live</h2>
+    <div class="quota-bar-wrap" id="quota-wrap"></div>
+  </div>
+
+  <!-- ═══ PANEL 6: REQUEST FLOW ═══ -->
+  <div class="card col-flow">
+    <h2><span class="num">6</span> Request Flow — last 20, live</h2>
+    <div class="flow-list" id="flow-list"><div class="flow-empty">Waiting for requests…</div></div>
+  </div>
+
+  <!-- ═══ PANEL 7: DISPATCH GATE ═══ -->
+  <div class="card col-gate">
+    <h2><span class="num">7</span> Dispatch Gate</h2>
+    <div class="gate-wrap">
+      <div class="gate-light go" id="gate-light">✓</div>
+      <div class="gate-info">
+        <div class="gi-status go" id="gate-status">CLEAR</div>
+        <div class="gi-model" id="gate-model">glm-5.2</div>
+        <div class="gi-reason" id="gate-reason">sufficient headroom</div>
+      </div>
+    </div>
+    <div class="gate-stats">
+      <div class="gs"><div class="gs-l">Effective $/M</div><div class="gs-v" id="gate-price">—</div></div>
+      <div class="gs"><div class="gs-l">Margin</div><div class="gs-v" id="gate-margin">—</div></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════════════
+   CONFIG
+   ════════════════════════════════════════════════════════════════════════ */
+// CVM server npub — set this when Task A1 provides the key. Accepts npub1... or hex.
+// Leave empty to run in DEMO MODE (generates realistic synthetic data).
+// Override at runtime: ?server=npub1... or set in localStorage 'cvm_server'
+const DEFAULT_SERVER_NPUB = '';
+// Participant nsite URL for the QR code. Override: ?participant=https://...
+const DEFAULT_PARTICIPANT_URL = 'https://participant.nsite.lol';
+// Nostr relays (persistent WebSocket connections)
+const RELAYS = ['wss://nostr.mom', 'wss://relay.primal.net', 'wss://nos.lol'];
+
+const KEYS = ['ours','friend','ollama','ppq'];
+const KEY_LABEL = {ours:'OURS',friend:'FRIEND',ollama:'OLLAMA',ppq:'PPQ'};
+const KEY_COLOR = {ours:'#58a6ff',friend:'#bc8cff',ollama:'#39d2c0',ppq:'#f0883e'};
+const POLL_MS = 5000;
+const STARTING_BALANCE = 50000;
+const HIST_MAX = 480;                  // ~40min at 5s polling
+const CVM_TIMEOUT_MS = 15000;
+
+/* ════════════════════════════════════════════════════════════════════════
+   STATE
+   ════════════════════════════════════════════════════════════════════════ */
+let state = {
+  mode: 'demo',                        // 'live' | 'demo' | 'offline'
+  serverPubkey: null,                  // hex pubkey of CVM server
+  cvm: null,                           // CVMClient instance
+  snapshot: null,
+  priceHist: {},                       // key -> [{t,cost_basis,your_price,margin_pct}]
+  costToday: 0,
+  phonePulseIdx: 0,                    // rotates which phone pulses
+};
+KEYS.forEach(k => state.priceHist[k] = []);
+
+/* ════════════════════════════════════════════════════════════════════════
+   URL / CONFIG PARSING
+   ════════════════════════════════════════════════════════════════════════ */
+function param(name) {
+  return new URLSearchParams(location.search).get(name);
+}
+function resolveServerKey() {
+  // Priority: URL param > localStorage > constant
+  let raw = param('server') || localStorage.getItem('cvm_server') || DEFAULT_SERVER_NPUB;
+  if (!raw) return null;
+  raw = raw.trim();
+  // Convert npub1... to hex
+  if (raw.startsWith('npub1') && window.NostrTools?.nip19) {
+    try {
+      const d = window.NostrTools.nip19.decode(raw);
+      if (d.type === 'npub') return d.data;
+    } catch (e) { console.warn('npub decode failed:', e); }
+  }
+  // Validate hex
+  if (/^[0-9a-f]{64}$/i.test(raw)) return raw.toLowerCase();
+  return null;
+}
+function resolveParticipantUrl() {
+  return param('participant') || localStorage.getItem('participant_url') || DEFAULT_PARTICIPANT_URL;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   UTILITIES
+   ════════════════════════════════════════════════════════════════════════ */
+function fmt$(n, dp=3){
+  if(n==null||isNaN(n)) return '—';
+  if(n>=1) return '$'+n.toFixed(2);
+  return '$'+n.toFixed(dp);
+}
+function fmtTok(n){
+  if(n==null||isNaN(n)) return '—';
+  n = Number(n);
+  if(n>=1e6) return (n/1e6).toFixed(2)+'M';
+  if(n>=1e3) return (n/1e3).toFixed(1)+'K';
+  return String(Math.round(n));
+}
+function fmtTime(ts){
+  const d=new Date(ts*1000); return d.toLocaleTimeString('en-GB',{hour12:false});
+}
+function shortNpub(n){ return n ? n.slice(0,10)+'…'+n.slice(-4) : 'anon'; }
+function clampPct(p){ return Math.max(0,Math.min(100,p)); }
+function uuidv4(){
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const b = new Uint8Array(16); crypto.getRandomValues(b);
+  b[6]=(b[6]&0x0f)|0x40; b[8]=(b[8]&0x3f)|0x80;
+  const h=Array.from(b,x=>x.toString(16).padStart(2,'0')).join('');
+  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+}
+function setConn(mode){
+  const b=document.getElementById('conn-badge'), t=document.getElementById('conn-text');
+  b.className='badge';
+  if(mode==='live'){b.classList.add('live');t.textContent='LIVE · CVM';}
+  else if(mode==='demo'){b.classList.add('demo');t.textContent='DEMO MODE';}
+  else if(mode==='connecting'){b.classList.add('connecting');t.textContent='CVM connecting…';}
+  else{b.classList.add('error');t.textContent='OFFLINE';}
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   CVM BROWSER CLIENT
+   Direct nostr-tools implementation (gift-wrap kind 1059, inner kind 25910).
+   Protocol: ctxcn-client.ts pattern. Persistent relay subscription for
+   responses addressed to our ephemeral pubkey.
+   ════════════════════════════════════════════════════════════════════════ */
+const CVM_MSG_KIND = 25910;
+const GIFT_WRAP_KIND = 1059;
+
+class CVMClient {
+  constructor(serverPubkeyHex) {
+    const N = window.NostrTools;
+    this.nip44 = N.nip44;
+    this.finalizeEvent = N.finalizeEvent;
+    this.getPublicKey = N.getPublicKey;
+    this.pool = new N.SimplePool();
+    this.relays = RELAYS;
+    this.serverPubkey = serverPubkeyHex;
+    // Ephemeral client key — different from server (pitfall: client/server
+    // MUST use different keys).
+    this.sk = N.generateSecretKey();
+    this.pk = this.getPublicKey(this.sk);
+    this.pending = new Map();
+    this.sub = null;
+    this.connected = false;
+    this._seenIds = new Set();      // dedupe gift-wrap events
+  }
+
+  async connect() {
+    // Persistent subscription for gift-wrapped responses addressed to us.
+    // Per contextvm skill pitfall: #p tag filter may not work on all relays
+    // for kind 1059. We subscribe broadly + filter client-side as fallback.
+    this.sub = this.pool.subscribeMany(
+      this.relays,
+      { kinds: [GIFT_WRAP_KIND], '#p': [this.pk], limit: 100 },
+      {
+        onevent: (ev) => this._handleResponse(ev),
+        oneose: () => { this.connected = true; },
+        onclose: () => { this.connected = false; },
+      }
+    );
+    // Give relays a moment to establish
+    await new Promise(r => setTimeout(r, 800));
+    return this.connected;
+  }
+
+  _handleResponse(ev) {
+    // Dedupe (relays may deliver the same event multiple times)
+    if (this._seenIds.has(ev.id)) return;
+    this._seenIds.add(ev.id);
+    // Cap seen-set size
+    if (this._seenIds.size > 500) {
+      const arr = [...this._seenIds]; this._seenIds = new Set(arr.slice(-300));
+    }
+    try {
+      // Decrypt gift wrap with our private key + wrapper's pubkey
+      const ck = this.nip44.v2.utils.getConversationKey(this.sk, ev.pubkey);
+      const decrypted = this.nip44.v2.decrypt(ev.content, ck);
+      const inner = JSON.parse(decrypted);
+      const msg = JSON.parse(inner.content);
+      // Correlate by request id
+      const id = msg.id || (inner.tags && inner.tags.find(t => t[0] === 'e') ? inner.tags.find(t => t[0]==='e')[1] : null);
+      if (!id) return;
+      const p = this.pending.get(id);
+      if (!p) return;
+      this.pending.delete(id);
+      clearTimeout(p.timer);
+      const result = (msg.result && msg.result.structuredContent) ? msg.result.structuredContent : msg.result;
+      if (msg.isError || (result && result.error)) {
+        p.reject(new Error((result && result.error) || 'CVM error'));
+      } else {
+        p.resolve(result);
+      }
+    } catch (e) {
+      // Malformed or not for us — silently ignore
+    }
+  }
+
+  callTool(name, args = {}) {
+    const id = uuidv4();
+    const mcpReq = {
+      jsonrpc: '2.0',
+      id,
+      method: 'tools/call',
+      params: { name, arguments: args },
+    };
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pending.has(id)) {
+          this.pending.delete(id);
+          reject(new Error('CVM timeout (' + name + ')'));
+        }
+      }, CVM_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer });
+      // Send after subscription is warm
+      setTimeout(async () => {
+        try { await this._sendGiftWrap(mcpReq); }
+        catch (e) {
+          if (this.pending.has(id)) {
+            this.pending.delete(id); clearTimeout(timer); reject(e);
+          }
+        }
+      }, 400);
+    });
+  }
+
+  async _sendGiftWrap(mcpMsg) {
+    // 1. Build + sign the inner event (kind 25910 — CVM tool call)
+    const innerEvent = {
+      pubkey: this.pk,
+      kind: CVM_MSG_KIND,
+      tags: [['p', this.serverPubkey]],
+      content: JSON.stringify(mcpMsg),
+      created_at: Math.floor(Date.now() / 1000),
+    };
+    const signedInner = this.finalizeEvent(innerEvent, this.sk);
+
+    // 2. Gift-wrap with a random one-time key (NIP-59 sender anonymity)
+    const wrapSk = crypto.getRandomValues(new Uint8Array(32));
+    const wrapPk = this.getPublicKey(wrapSk);
+    const ck = this.nip44.v2.utils.getConversationKey(wrapSk, this.serverPubkey);
+    const encrypted = this.nip44.v2.encrypt(JSON.stringify(signedInner), ck);
+
+    const giftWrap = {
+      kind: GIFT_WRAP_KIND,
+      content: encrypted,
+      tags: [['p', this.serverPubkey]],
+      created_at: Math.floor(Date.now() / 1000),
+      pubkey: wrapPk,
+    };
+    const signedWrap = this.finalizeEvent(giftWrap, wrapSk);
+
+    // 3. Publish to all relays (Promise.allSettled — tolerate relay failures)
+    await Promise.allSettled(
+      this.relays.map(r =>
+        Promise.resolve(this.pool.publish([r], signedWrap)).catch(() => {})
+      )
+    );
+  }
+
+  close() {
+    this.pending.forEach(p => { clearTimeout(p.timer); p.reject(new Error('closed')); });
+    this.pending.clear();
+    if (this.sub) { try { this.sub.close(); } catch {} }
+    try { this.pool.close(this.relays); } catch {}
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   DEMO DATA GENERATORS  (used when CVM server is unreachable / unconfigured)
+   ════════════════════════════════════════════════════════════════════════ */
+const demo = {
+  t0: Date.now()/1000 - 86400,
+  participants: [],
+  init(){
+    const now=Date.now()/1000;
+    // seed per-key history — flat-rate keys amortise (cost falls over time)
+    for(const k of KEYS){
+      const base={ours:[0.12,0.16,40],friend:[0.14,0.18,28],ollama:[0.08,0.13,42],ppq:[0.14,0.21,33]}[k];
+      for(let i=0;i<120;i++){
+        const t = now - (120-i)*720;
+        const prog=i/120;
+        const amort = k==='ppq'?0:prog*0.30;
+        const noise=(Math.random()-0.5)*0.004;
+        const cb = base[0]*(1-amort)+noise;
+        const yp = cb/(1-base[2]/100)+noise*0.5;
+        const margin = base[2] + (Math.random()-0.5)*4 - amort*8;
+        state.priceHist[k].push({t, cost_basis:Math.max(0.001,cb), your_price:Math.max(0.001,yp), margin_pct:Math.max(5,margin)});
+      }
+    }
+    const names=['npub1felix2026','npub1satoshi9k','npub1cypherpunk','npub1engineer42','npub1builder77','npub1hal_finney'];
+    this.participants = names.map((n,i)=>({
+      npub:n, balance: STARTING_BALANCE - (i+1)*3200 - Math.floor(Math.random()*4000),
+      spent:(i+1)*3200+Math.floor(Math.random()*4000),
+      prompts: i+2+Math.floor(Math.random()*4)
+    }));
+  },
+  snapshot(){
+    const now=Date.now()/1000;
+    // advance pricing with a live tick
+    for(const k of KEYS){
+      const h=state.priceHist[k]; const last=h[h.length-1]||{cost_basis:0.1,your_price:0.15,margin_pct:33};
+      const drift=(Math.random()-0.5)*0.002;
+      const cb=Math.max(0.001,last.cost_basis+drift);
+      const margin=Math.max(5,last.margin_pct+(Math.random()-0.5)*1.5);
+      const yp=cb/(1-margin/100);
+      h.push({t:now,cost_basis:cb,your_price:yp,margin_pct:margin});
+      if(h.length>HIST_MAX) h.shift();
+    }
+    const pricing={};
+    for(const k of KEYS){const h=state.priceHist[k];const l=h[h.length-1];
+      pricing[k]={cost_basis:l.cost_basis,your_price:l.your_price,margin_pct:l.margin_pct,effective_rate:l.your_price};}
+    const oursPct = 38 + Math.sin(now/900)*6 + (Math.random()-0.5)*2;
+    const friendPct = 22 + Math.sin(now/1100)*4 + (Math.random()-0.5)*1.5;
+    const TOTAL=2_000_000;
+    return {
+      ts:now, pricing,
+      quota:{
+        ours:{used_pct:clampPct(oursPct),remaining:Math.round(TOTAL*(1-oursPct/100)),total:TOTAL,healthy:true,resets_in_min:Math.round(180+Math.random()*40)},
+        friend:{used_pct:clampPct(friendPct),remaining:Math.round(TOTAL*(1-friendPct/100)),total:TOTAL,healthy:true,resets_in_min:Math.round(160+Math.random()*50)}
+      },
+      requests: this._recentReqs(now),
+      provider_distribution:{ours:0.58,friend:0.22,ollama:0.13,ppq:0.07},
+      dispatch_gate:{
+        can_dispatch: oursPct<82, reason: oursPct<82?'sufficient headroom (ours key) with 2x margin':'quota pressure — holding',
+        recommended_model: oursPct<82?'glm-5.2':null, effective_price_per_m: pricing.ours.your_price*(oursPct>60?1.5:1),
+        scarcity_factor: oursPct<50?1:1+(oursPct-50)/50, safety_margin:2.0,
+        hours_until_exhaustion:{ours:+((100-oursPct)/9).toFixed(1),friend:+((100-friendPct)/6).toFixed(1)}, downgraded:false
+      },
+      cost_today: 2.34 + Math.sin(now/7200)*0.6 + (now%600)/600*0.08,
+      burn_rate_per_hour: 0.11 + Math.random()*0.04,
+      system:{cpu_pct:8+Math.random()*10,mem_pct:42+Math.random()*8},
+      // token economy fields (plan get_snapshot shape)
+      participants:{count:this.participants.length, total_prompts:this.participants.reduce((s,p)=>s+p.prompts,0), total_tokens:this.participants.reduce((s,p)=>s+p.spent,0)},
+      scarcity:{factor: oursPct<40?1.0:oursPct<60?1.2:oursPct<75?1.5:1.8, level:oursPct<40?'low':'moderate', budget_used_pct:clampPct(oursPct*0.8)},
+      ledger:this.participants.map(p=>({npub_short:p.npub, balance:p.balance, prompts_sent:p.prompts, tokens_spent:p.spent}))
+    };
+  },
+  _recentReqs(now){
+    const models=['glm-5.2','glm-4.5','glm-4.5-air','glm-4.5-flash'];
+    const provs=['ours','friend','ollama','ppq'];
+    const reasons=['sufficient headroom','scarcity ramp','failover from ours','flat-rate preferred'];
+    const out=[];
+    for(let i=0;i<14;i++){
+      const prov=provs[Math.floor(Math.random()*(i<8?2:4))];
+      const who=this.participants[Math.floor(Math.random()*this.participants.length)];
+      out.push({ts:now-i*(8+Math.random()*22),requester:who?who.npub:'internal',
+        provider:prov,model:models[Math.floor(Math.random()*4)],
+        tokens:200+Math.floor(Math.random()*3800),cost:0.0001+Math.random()*0.004,
+        reason:reasons[Math.floor(Math.random()*reasons.length)]});
+    }
+    return out.sort((a,b)=>b.ts-a.ts);
+  }
+};
+
+/* ════════════════════════════════════════════════════════════════════════
+   SNAPSHOT NORMALIZATION
+   Accepts both the plan get_snapshot shape and the API-CONTRACT.md shape.
+   ════════════════════════════════════════════════════════════════════════ */
+function normalizeSnapshot(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw.result || raw;  // CVM may wrap in {result:...}
+  return {
+    ts: r.ts || Date.now()/1000,
+    pricing: r.pricing || {},
+    pricing_history: r.pricing_history || null,
+    quota: r.quota || {},
+    requests: r.requests || r.routing_decisions || [],
+    provider_distribution: r.provider_distribution || r.provider_dist || {},
+    dispatch_gate: r.dispatch_gate || {can_dispatch: true},
+    cost_today: r.cost_today ?? 0,
+    burn_rate_per_hour: r.burn_rate_per_hour ?? r.cost_hour ?? 0,
+    system: r.system || {},
+    scarcity: r.scarcity || {},
+    participants: r.participants || {},
+    ledger: r.ledger || [],
+  };
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PLOTLY DARK TEMPLATE
+   ════════════════════════════════════════════════════════════════════════ */
+const PLOT_BG='#0d1117', PLOT_GRID='rgba(48,54,61,.4)';
+const axisBase=(title,side)=>({
+  title:{text:title,font:{size:10,color:'#8b949e'}}, side, overlaying:side==='right'?'y':undefined,
+  showgrid:side!=='right', gridcolor:PLOT_GRID, zeroline:false,
+  tickfont:{size:9,color:'#8b949e'}, tickcolor:'transparent', automargin:true,
+});
+
+/* ── PANEL 3: PER-KEY PRICE CHARTS ── */
+const miniCharts={};
+function initMiniCharts(){
+  const grid=document.getElementById('charts-grid');
+  grid.innerHTML='';
+  for(const k of KEYS){
+    const wrap=document.createElement('div');wrap.className='mini-chart-wrap';
+    wrap.innerHTML=`<div class="mc-head"><span class="mc-name" style="color:${KEY_COLOR[k]}">${KEY_LABEL[k]}</span><span class="mc-price" id="mc-price-${k}">—</span></div><div class="mini-chart" id="mc-${k}"></div>`;
+    grid.appendChild(wrap);
+    miniCharts[k]=document.getElementById('mc-'+k);
+    const h=state.priceHist[k];
+    Plotly.newPlot('mc-'+k,[
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.cost_basis),name:'Cost basis',mode:'lines',line:{color:'#58a6ff',width:2},yaxis:'y'},
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.your_price),name:'Your price',mode:'lines',line:{color:'#39d2c0',width:2,dash:'dash'},yaxis:'y'},
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),name:'Margin %',mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)',yaxis:'y2'},
+    ],{
+      paper_bgcolor:PLOT_BG,plot_bgcolor:PLOT_BG,margin:{l:38,r:38,t:4,b:20},
+      showlegend:false,
+      xaxis:{...axisBase(''),type:'date',gridcolor:PLOT_GRID,tickfont:{size:8,color:'#6e7681'},tickformat:'%H:%M'},
+      yaxis:{...axisBase('$/M','left'),tickformat:'.2f'},
+      yaxis2:{...axisBase('%','right'),side:'right',overlaying:'y',showgrid:false,tickformat:'d',range:[0,60]},
+      font:{family:'ui-monospace,monospace',size:9},
+    },{displayModeBar:false,staticPlot:false,responsive:true});
+  }
+}
+function updateMiniCharts(){
+  for(const k of KEYS){
+    const h=state.priceHist[k]; if(!h.length) continue;
+    const last=h[h.length-1];
+    Plotly.react('mc-'+k,[
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.cost_basis),mode:'lines',line:{color:'#58a6ff',width:2}},
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.your_price),mode:'lines',line:{color:'#39d2c0',width:2,dash:'dash'}},
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)'},
+    ],document.getElementById('mc-'+k).layout,{displayModeBar:false,responsive:true});
+    const el=document.getElementById('mc-price-'+k);
+    if(el) el.textContent=fmt$(last.your_price,3)+'/M · '+last.margin_pct.toFixed(0)+'%';
+  }
+}
+
+/* ── PANEL 1: QR CODE ── */
+function renderQR(){
+  const url = resolveParticipantUrl();
+  document.getElementById('qr-url').textContent = url.length > 42 ? url.slice(0,42)+'…' : url;
+  try {
+    if (typeof window.qrcode !== 'function') throw new Error('qrcode lib not loaded');
+    const qr = window.qrcode(0, 'M');
+    qr.addData(url);
+    qr.make();
+    // Build SVG manually for crisp rendering (version-agnostic)
+    const count = qr.getModuleCount();
+    const sz = count + 4; // 2-module quiet zone each side
+    let cells = '';
+    for (let r = 0; r < count; r++) {
+      for (let c = 0; c < count; c++) {
+        if (qr.isDark(r, c)) cells += `<rect x="${c+2}" y="${r+2}" width="1" height="1"/>`;
+      }
+    }
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${sz} ${sz}" width="160" height="160" shape-rendering="crispEdges"><rect width="${sz}" height="${sz}" fill="#fff"/><g fill="#0a0e14">${cells}</g></svg>`;
+    document.getElementById('qr-box').innerHTML = svg;
+  } catch (e) {
+    console.warn('QR render failed:', e);
+    document.getElementById('qr-box').innerHTML = '<div style="color:#888;font-size:11px;padding:20px">QR unavailable</div>';
+  }
+}
+
+/* ── PANEL 2: SYSTEM DIAGRAM ── */
+function updateDiagram(snap){
+  // Pulse DQ05 and relays based on activity
+  const reqs = (snap && snap.requests) || [];
+  const dq05 = document.getElementById('node-dq05');
+  const relays = document.getElementById('node-relays');
+  const active = reqs.length > 0;
+  dq05.classList.toggle('active', active);
+  relays.classList.toggle('active', active);
+  // Rotate phone pulse to simulate participant activity
+  const phoneCount = Math.max(3, Math.min(8, (snap && snap.participants && snap.participants.count) || 3));
+  const phoneRow = document.getElementById('phone-row');
+  // Rebuild phone nodes if count changed
+  if (phoneRow.children.length !== Math.min(phoneCount, 6)) {
+    const n = Math.min(phoneCount, 6);
+    phoneRow.innerHTML = '';
+    for (let i = 0; i < n; i++) {
+      phoneRow.innerHTML += `<div class="diag-node phone" id="node-phone-${i}"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>`;
+    }
+  }
+  // Pulse a random phone each update
+  const phones = phoneRow.querySelectorAll('.diag-node.phone');
+  phones.forEach(p => p.classList.remove('active'));
+  if (phones.length > 0 && active) {
+    state.phonePulseIdx = (state.phonePulseIdx + 1) % phones.length;
+    phones[state.phonePulseIdx].classList.add('active');
+  }
+}
+
+/* ── PANEL 4: QUOTA BARS ── */
+function updateQuota(snap){
+  const q=(snap && snap.quota)||{};
+  const wrap=document.getElementById('quota-wrap');
+  const keys=Object.keys(q).length?Object.keys(q):['ours','friend'];
+  wrap.innerHTML=keys.map(k=>{
+    const kk=q[k]||{used_pct:0,remaining:0,total:2e6,resets_in_min:0};
+    const pct=clampPct(kk.used_pct);
+    const cls=pct<50?'green':(pct<80?'yellow':'red');
+    return `<div class="qb"><div class="qb-top"><span class="qb-name">${KEY_LABEL[k]||k.toUpperCase()}</span><span class="qb-pct" style="color:var(--${cls==='green'?'green':cls==='yellow'?'yellow':'red'})">${pct.toFixed(1)}%</span></div><div class="qb-track"><div class="qb-fill ${cls}" style="width:${pct}%"></div></div><div class="qb-meta"><span>${fmtTok(kk.remaining)} / ${fmtTok(kk.total||2e6)} tok</span><span>resets in ${kk.resets_in_min||'—'}m</span></div></div>`;
+  }).join('');
+}
+
+/* ── PANEL 5: COST METER ── */
+function updateCost(snap){
+  const cost=(snap && snap.cost_today)||state.costToday;
+  const intp=Math.floor(cost), frac=Math.round((cost-intp)*100);
+  document.getElementById('cost-big').innerHTML='$'+intp+'<span class="cents">.'+String(frac).padStart(2,'0')+'</span>';
+  document.getElementById('burn-rate').textContent=fmt$(snap ? snap.burn_rate_per_hour : 0,2);
+  const reqs=(snap && snap.requests)||[];
+  document.getElementById('cost-ticks').textContent=reqs.length+' requests · '+new Date().toLocaleDateString();
+  const cap=10;
+  document.getElementById('cost-bar-fill').style.width=clampPct(cost/cap*100)+'%';
+}
+
+/* ── PANEL 6: REQUEST FLOW ── */
+function updateFlow(snap){
+  const reqs=(snap && snap.requests)||[];
+  const list=document.getElementById('flow-list');
+  if(!reqs.length){list.innerHTML='<div class="flow-empty">Waiting for requests…</div>';return;}
+  list.innerHTML=reqs.slice(0,20).map(r=>{
+    const provClass=r.provider||'ours';
+    const provNorm = provClass.includes('ollama')?'ollama':provClass;
+    return `<div class="flow-card"><span class="fc-time">${fmtTime(r.ts)}</span><div class="fc-mid"><span class="fc-prov"><span class="pill ${provNorm}">${(r.provider||'?').toUpperCase()}</span></span> <span class="fc-model">${r.model||''}</span>${r.requester&&r.requester!=='internal'?`<br><span class="fc-who">${shortNpub(r.requester)}</span>`:''}<br><span class="fc-model">${r.reason||''}</span></div><div class="fc-right"><div class="fc-cost">${fmt$(r.cost||0,5)}</div><div class="fc-tok">${fmtTok(r.tokens||0)} tok</div></div></div>`;
+  }).join('');
+}
+
+/* ── PANEL 7: DISPATCH GATE ── */
+function updateGate(snap){
+  const g=(snap && snap.dispatch_gate)||{can_dispatch:true};
+  const light=document.getElementById('gate-light');
+  const status=document.getElementById('gate-status');
+  if(g.can_dispatch){light.className='gate-light go'; light.textContent='✓';status.className='gi-status go'; status.textContent='CLEAR';}
+  else{light.className='gate-light hold'; light.textContent='✕';status.className='gi-status hold'; status.textContent='HOLD';}
+  document.getElementById('gate-model').textContent=g.recommended_model||'—';
+  document.getElementById('gate-reason').textContent=g.reason||'';
+  document.getElementById('gate-price').textContent=fmt$(g.effective_price_per_m,4)+'/M';
+  document.getElementById('gate-margin').textContent=(g.safety_margin||2)+'×';
+}
+
+/* ── PANEL 8: TOKEN ECONOMY SUMMARY ── */
+function updateEcon(snap){
+  const parts = (snap && snap.participants) || {};
+  const scarcity = (snap && snap.scarcity) || {};
+  const pricing = (snap && snap.pricing) || {};
+  const ledger = (snap && snap.ledger) || [];
+  // participants count
+  document.getElementById('econ-participants').textContent = parts.count != null ? parts.count : '—';
+  // total prompts
+  document.getElementById('econ-prompts').textContent = parts.total_prompts != null ? parts.total_prompts : '—';
+  // avg price — use ours your_price as representative
+  let avgPrice = '—';
+  if (pricing.ours && pricing.ours.your_price != null) avgPrice = fmt$(pricing.ours.your_price, 3)+'/M';
+  document.getElementById('econ-avgprice').textContent = avgPrice;
+  // tokens used
+  document.getElementById('econ-tokens').textContent = parts.total_tokens != null ? fmtTok(parts.total_tokens) : '—';
+  // scarcity
+  const sf = scarcity.factor || 1.0;
+  document.getElementById('econ-scarcity').textContent = sf.toFixed(1)+'× ('+(scarcity.level||'—')+')';
+  const budgetPct = scarcity.budget_used_pct || 0;
+  document.getElementById('econ-budget-pct').textContent = budgetPct.toFixed(0)+'% budget used';
+  // scarcity track highlight
+  const segs = document.querySelectorAll('.scarcity-seg');
+  const activeSeg = budgetPct < 20 ? 0 : budgetPct < 40 ? 1 : budgetPct < 60 ? 2 : budgetPct < 80 ? 3 : 4;
+  segs.forEach((s,i) => s.style.opacity = i <= activeSeg ? '1' : '0.2');
+  // leaderboard
+  const lb=document.getElementById('econ-leaderboard');
+  if(!ledger.length){
+    // fallback: use demo participants
+    if(demo.participants.length){
+      lb.innerHTML = demo.participants.slice(0,8).map(p=>
+        `<div class="lb-row"><span class="who">${shortNpub(p.npub)}</span><span class="prompts">${p.prompts} prompts</span><span class="spent">${fmtTok(p.spent)} tok</span></div>`
+      ).join('');
+    } else {
+      lb.innerHTML='<div class="lb-empty">No participants yet</div>';
+    }
+  } else {
+    lb.innerHTML=ledger.slice(0,8).map(p=>
+      `<div class="lb-row"><span class="who">${shortNpub(p.npub_short||p.npub)}</span><span class="prompts">${p.prompts_sent||p.prompts||0} prompts</span><span class="spent">${fmtTok(p.tokens_spent||p.spent||0)} tok</span></div>`
+    ).join('');
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   RENDER ALL
+   ════════════════════════════════════════════════════════════════════════ */
+function renderAll(){
+  const snap = state.snapshot;
+  // Merge pricing into history (whether from CVM or demo)
+  if(snap && snap.pricing){
+    const now=Date.now()/1000;
+    for(const k of KEYS){
+      const p=snap.pricing[k]; if(!p) continue;
+      const h=state.priceHist[k];
+      const needAppend = !snap.pricing_history;
+      if(needAppend){
+        h.push({t:now,cost_basis:p.cost_basis,your_price:p.your_price,margin_pct:p.margin_pct});
+        if(h.length>HIST_MAX) h.shift();
+      }
+    }
+    if(snap.pricing_history){
+      for(const k of KEYS){
+        if(snap.pricing_history[k]) state.priceHist[k]=snap.pricing_history[k].slice(-HIST_MAX);
+      }
+    }
+  }
+  updateMiniCharts();
+  updateDiagram(snap);
+  updateQuota(snap);
+  updateCost(snap);
+  updateFlow(snap);
+  updateGate(snap);
+  updateEcon(snap);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   POLL LOOP
+   Tries CVM get_snapshot. Falls back to DEMO MODE on failure/timeout.
+   ════════════════════════════════════════════════════════════════════════ */
+async function poll(){
+  // ── CVM path: server configured ──
+  if(state.cvm && state.serverPubkey){
+    try{
+      setConn('connecting');
+      const raw = await state.cvm.callTool('get_snapshot', {});
+      const snap = normalizeSnapshot(raw);
+      if(snap){
+        state.snapshot = snap;
+        state.mode = 'live';
+        setConn('live');
+        if(snap.cost_today!=null) state.costToday=snap.cost_today;
+      } else {
+        throw new Error('invalid snapshot');
+      }
+    }catch(e){
+      console.warn('CVM poll failed, falling back to demo:', e.message);
+      state.snapshot = demo.snapshot();
+      state.mode = 'demo';
+      setConn('demo');
+    }
+  } else {
+    // ── DEMO MODE (no server configured) ──
+    state.snapshot = demo.snapshot();
+    state.mode = 'demo';
+    setConn('demo');
+  }
+  renderAll();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   CLOCK
+   ════════════════════════════════════════════════════════════════════════ */
+function tickClock(){document.getElementById('time-text').textContent=new Date().toLocaleTimeString('en-GB',{hour12:false});}
+
+/* ════════════════════════════════════════════════════════════════════════
+   INIT
+   ════════════════════════════════════════════════════════════════════════ */
+async function init(){
+  demo.init();
+  renderQR();                    // Panel 1 (QR renders once, URL doesn't change)
+  initMiniCharts();              // Panel 3 charts
+  tickClock(); setInterval(tickClock,1000);
+
+  // Try to connect to CVM server if configured
+  state.serverPubkey = resolveServerKey();
+  if(state.serverPubkey && window.NostrTools){
+    try{
+      state.cvm = new CVMClient(state.serverPubkey);
+      setConn('connecting');
+      await state.cvm.connect();
+      console.info('CVM client connected. Server:', state.serverPubkey.slice(0,16)+'…', 'Client:', state.cvm.pk.slice(0,16)+'…');
+    }catch(e){
+      console.warn('CVM connect failed, will use demo mode:', e.message);
+      state.cvm = null;
+    }
+  } else {
+    console.info('No CVM server configured — running in DEMO MODE. Set ?server=npub1… to go live.');
+  }
+
+  // First poll + interval
+  await poll();
+  setInterval(poll, POLL_MS);
+}
+init();
+</script>
+</body>
+</html>
