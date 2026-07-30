@@ -256,17 +256,6 @@ body{
 
 <!-- ═══ 01: SYSTEM ARCHITECTURE ═══ -->
 <section class="section" id="arch">
-  <div class="section-header">
-    <span class="section-num">01 — SYSTEM ARCHITECTURE</span>
-    <h2 class="section-title">End-to-End Routing Pipeline</h2>
-    <p class="section-desc">
-      Every request flows from the client through a gateway into the orchestrator
-      proxy (<code>zai_proxy.py</code> at <code>localhost:9099</code>), which runs
-      a four-phase key selection, optional failover routing, pricing, and dispatch
-      gating before forwarding to the chosen provider.
-    </p>
-  </div>
-
   <div class="panel">
     <div class="panel-title">Full Pipeline <span class="tag">client → provider → log</span></div>
     <div class="svg-wrap">
@@ -339,17 +328,21 @@ body{
   <rect x="200" y="300" width="540" height="160" rx="10" fill="#131820" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4 3"/>
   <text x="470" y="322" text-anchor="middle" fill="#39d2c0" font-size="12" font-weight="700">STEP 1: best_key() — 4 Phases</text>
 
-  <rect x="220" y="332" width="240" height="28" rx="5" fill="#0d1117" stroke="#39d2c0" stroke-width="1"/>
-  <text x="340" y="350" text-anchor="middle" fill="#c9d1d9" font-size="10">Phase 1: Kalman burn prediction</text>
+  <rect x="220" y="332" width="240" height="36" rx="5" fill="#0d1117" stroke="#39d2c0" stroke-width="1"/>
+  <text x="340" y="348" text-anchor="middle" fill="#c9d1d9" font-size="9" font-weight="600">Phase 1: Predict quota exhaustion</text>
+  <text x="340" y="360" text-anchor="middle" fill="#8b949e" font-size="8">Kalman burn-rate forecast</text>
 
-  <rect x="480" y="332" width="240" height="28" rx="5" fill="#0d1117" stroke="#58a6ff" stroke-width="1"/>
-  <text x="600" y="350" text-anchor="middle" fill="#c9d1d9" font-size="10">Phase 2: Reactive lock thresholds</text>
+  <rect x="480" y="332" width="240" height="36" rx="5" fill="#0d1117" stroke="#58a6ff" stroke-width="1"/>
+  <text x="600" y="348" text-anchor="middle" fill="#c9d1d9" font-size="9" font-weight="600">Phase 2: Lock keys predicted to</text>
+  <text x="600" y="360" text-anchor="middle" fill="#8b949e" font-size="8">exhaust soon</text>
 
-  <rect x="220" y="368" width="240" height="28" rx="5" fill="#0d1117" stroke="#3fb950" stroke-width="1"/>
-  <text x="340" y="386" text-anchor="middle" fill="#c9d1d9" font-size="10">Phase 3: Recovery of locked keys</text>
+  <rect x="220" y="372" width="240" height="36" rx="5" fill="#0d1117" stroke="#3fb950" stroke-width="1"/>
+  <text x="340" y="388" text-anchor="middle" fill="#c9d1d9" font-size="9" font-weight="600">Phase 3: Unlock keys whose</text>
+  <text x="340" y="400" text-anchor="middle" fill="#8b949e" font-size="8">quota window has reset</text>
 
-  <rect x="480" y="368" width="240" height="28" rx="5" fill="#0d1117" stroke="#d29922" stroke-width="1"/>
-  <text x="600" y="386" text-anchor="middle" fill="#c9d1d9" font-size="10">Phase 4: Health + cost tie-break</text>
+  <rect x="480" y="372" width="240" height="36" rx="5" fill="#0d1117" stroke="#d29922" stroke-width="1"/>
+  <text x="600" y="388" text-anchor="middle" fill="#c9d1d9" font-size="9" font-weight="600">Phase 4: Pick cheapest unlocked</text>
+  <text x="600" y="400" text-anchor="middle" fill="#8b949e" font-size="8">key (health as tie-breaker)</text>
 
   <rect x="350" y="410" width="240" height="34" rx="6" fill="#0a0e14" stroke="#39d2c0" stroke-width="1.5"/>
   <text x="470" y="431" text-anchor="middle" fill="#39d2c0" font-size="11" font-weight="600">→ "ours" | "friend" | None</text>
@@ -361,20 +354,20 @@ body{
   <!-- ── LiveRouter ── -->
   <rect x="160" y="500" width="620" height="160" rx="10" fill="#131820" stroke="#f0883e" stroke-width="1.5" stroke-dasharray="4 3"/>
   <text x="470" y="522" text-anchor="middle" fill="#f0883e" font-size="12" font-weight="700">STEP 2: LiveRouter.select_failover()</text>
-  <text x="470" y="536" text-anchor="middle" fill="#8b949e" font-size="9">kill switch: ~/.hermes/bot/.enable_live_routing</text>
+  <text x="470" y="536" text-anchor="middle" fill="#8b949e" font-size="9">emergency fallback only · enabled by file flag</text>
 
   <!-- Three sub-engines -->
   <rect x="185" y="548" width="170" height="50" rx="6" fill="#0d1117" stroke="#39d2c0"/>
   <text x="270" y="568" text-anchor="middle" fill="#39d2c0" font-size="10" font-weight="600">PriceKalman</text>
-  <text x="270" y="584" text-anchor="middle" fill="#8b949e" font-size="9">2-state · per provider</text>
+  <text x="270" y="584" text-anchor="middle" fill="#8b949e" font-size="9">predicts true $/M from costs</text>
 
   <rect x="385" y="548" width="170" height="50" rx="6" fill="#0d1117" stroke="#bc8cff"/>
   <text x="470" y="568" text-anchor="middle" fill="#bc8cff" font-size="10" font-weight="600">ConsumptionKalman</text>
-  <text x="470" y="584" text-anchor="middle" fill="#8b949e" font-size="9">3-state · per provider</text>
+  <text x="470" y="584" text-anchor="middle" fill="#8b949e" font-size="9">predicts quota burn for failovers</text>
 
   <rect x="585" y="548" width="170" height="50" rx="6" fill="#0d1117" stroke="#58a6ff"/>
   <text x="670" y="568" text-anchor="middle" fill="#58a6ff" font-size="10" font-weight="600">CPVO Calculator</text>
-  <text x="670" y="584" text-anchor="middle" fill="#8b949e" font-size="9">effective rate from DB</text>
+  <text x="670" y="584" text-anchor="middle" fill="#8b949e" font-size="9">adjusts price for output quality</text>
 
   <rect x="260" y="612" width="420" height="34" rx="6" fill="#0a0e14" stroke="#f0883e" stroke-width="1.5"/>
   <text x="470" y="633" text-anchor="middle" fill="#f0883e" font-size="11" font-weight="600">→ RoutingOptimizer.route() → cheapest viable</text>
