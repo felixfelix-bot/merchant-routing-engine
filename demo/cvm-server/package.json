@@ -1,0 +1,16 @@
+{
+  "name": "sovereign-demo-cvm-server",
+  "version": "1.0.0",
+  "description": "CVM server for Sovereign Engineering demo — direct nostr-tools implementation (no SDK transport)",
+  "type": "module",
+  "scripts": {
+    "start": "bun src/cvm-server.ts",
+    "dev": "bun --watch src/cvm-server.ts"
+  },
+  "dependencies": {
+    "nostr-tools": "^2.10.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

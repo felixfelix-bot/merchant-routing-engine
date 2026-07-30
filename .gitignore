@@ -18,6 +18,12 @@ config.local.yaml
 # Database files (may contain token data)
 *.db
 *.sqlite
+
+# CVM server private key (never commit)
+demo/cvm-server-key.json
+
+# Node/Bun
+node_modules/
 *.sqlite3
 
 # Logs

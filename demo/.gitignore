@@ -1,0 +1,12 @@
+# Demo runtime state (token-ledger DB, participant data) — never commit
+*.db
+*.db-shm
+*.db-wal
+demo-ledger.db
+
+# Node
+node_modules/
+
+# Local env overrides
+.env
+.env.*

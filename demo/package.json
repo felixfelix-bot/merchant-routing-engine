@@ -1,0 +1,14 @@
+{
+  "name": "sovereign-demo-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sovereign Engineering demo dashboard — Node.js 22 + node:sqlite HTTP+WS server (Task A1). Live Kalman token pricing + demand economics.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/dashboard-server.mjs",
+    "gates": "node tests/verify-a1-gates.mjs",
+    "ledger-gates": "node tests/verify-gates.mjs"
+  },
+  "dependencies": {}
+}
