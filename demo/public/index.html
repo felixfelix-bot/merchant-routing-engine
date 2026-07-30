@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sovereign Routing Engine — Live Dashboard</title>
+<script src="vendor/plotly-2.35.2.min.js"></script>
+<style>
+/* ════════════════════════════════════════════════════════════════════════
+   DARK THEME + RESPONSIVE GRID
+   ════════════════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#0a0e14; --bg2:#0d1117; --card:#131820; --card2:#161b22;
+  --border:#21262d; --border2:#30363d;
+  --txt:#c9d1d9; --txt-dim:#8b949e; --txt-bright:#f0f6fc;
+  --blue:#58a6ff; --green:#3fb950; --red:#f85149; --yellow:#d29922;
+  --purple:#bc8cff; --cyan:#39d2c0; --orange:#f0883e;
+  --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg);color:var(--txt);font-family:var(--sans);
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;
+}
+/* ── top bar ── */
+.topbar{
+  display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  padding:12px 20px;background:var(--bg2);border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:50;backdrop-filter:blur(8px);
+}
+.topbar h1{font-size:16px;font-weight:600;color:var(--txt-bright);letter-spacing:-.2px}
+.topbar h1 .accent{color:var(--cyan)}
+.topbar .spacer{flex:1}
+.badge{
+  font-family:var(--mono);font-size:11px;font-weight:600;padding:3px 8px;
+  border-radius:4px;border:1px solid var(--border2);color:var(--txt-dim);
+  display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
+}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+.badge.demo{border-color:var(--yellow);color:var(--yellow)}
+.badge.demo .dot{background:var(--yellow);animation:pulse 1.5s infinite}
+.badge.live .dot{background:var(--green);animation:pulse 2s infinite}
+.badge.error{border-color:var(--red);color:var(--red)}
+.badge.error .dot{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── responsive grid ── */
+.grid{
+  display:grid;gap:14px;padding:14px 20px 40px;
+  grid-template-columns:repeat(12,1fr);
+  grid-auto-rows:min-content;
+  max-width:1800px;margin:0 auto;
+}
+.card{
+  background:var(--card);border:1px solid var(--border);border-radius:10px;
+  padding:16px;display:flex;flex-direction:column;min-width:0;overflow:hidden;
+}
+.card h2{
+  font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;
+  color:var(--txt-dim);margin-bottom:12px;display:flex;align-items:center;gap:8px;
+}
+.card h2 .num{
+  width:18px;height:18px;border-radius:5px;background:var(--border2);
+  display:inline-flex;align-items:center;justify-content:center;font-size:10px;
+  color:var(--cyan);
+}
+/* spans */
+.col-charts{grid-column:span 7}
+.col-econ  {grid-column:span 5}
+.col-quota {grid-column:span 4}
+.col-flow  {grid-column:span 5}
+.col-cost  {grid-column:span 3}
+.col-donut {grid-column:span 6}
+.col-gate  {grid-column:span 6}
+.full      {grid-column:span 12}
+
+/* ── phone ── */
+@media(max-width:900px){
+  .grid{grid-template-columns:1fr;padding:10px}
+  .col-charts,.col-econ,.col-quota,.col-flow,.col-cost,.col-donut,.col-gate,.full{grid-column:span 1}
+  .topbar{padding:10px 12px}
+  .topbar h1{font-size:14px}
+}
+
+/* ═══ PANEL 1: per-key price charts ═══ */
+.charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:560px){.charts-grid{grid-template-columns:1fr}}
+.mini-chart-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 8px 4px}
+.mini-chart-wrap .mc-head{
+  display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;padding:0 4px;
+}
+.mini-chart-wrap .mc-name{font-size:12px;font-weight:600;color:var(--txt-bright)}
+.mini-chart-wrap .mc-price{font-family:var(--mono);font-size:12px;color:var(--cyan)}
+.mini-chart{width:100%;height:130px}
+.legend-row{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;padding:0 4px}
+.legend-row .lg{font-size:10px;color:var(--txt-dim);display:flex;align-items:center;gap:5px}
+.legend-row .lg .swatch{width:14px;height:3px;border-radius:2px}
+.sw-cost{background:var(--blue)} .sw-price{background:var(--cyan);background-image:repeating-linear-gradient(90deg,var(--cyan) 0 4px,transparent 4px 7px)}
+.sw-margin{background:var(--purple);opacity:.4;border-radius:2px;width:10px;height:10px}
+
+/* ═══ PANEL 2: token economy ═══ */
+.econ-grid{display:grid;grid-template-columns:1fr;gap:14px;flex:1}
+.tok-price-box{
+  background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;
+  display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+}
+.tok-price-box .label{font-size:11px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:.5px}
+.tok-price-box .val{font-family:var(--mono);font-size:22px;font-weight:600;color:var(--cyan)}
+.tok-price-box .sub{font-size:11px;color:var(--yellow);font-family:var(--mono)}
+.balance-box{
+  display:flex;gap:10px;flex-wrap:wrap;
+}
+.balance-box .bb{
+  flex:1;min-width:90px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;
+}
+.balance-box .bb .l{font-size:10px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:.4px}
+.balance-box .bb .v{font-family:var(--mono);font-size:18px;font-weight:600;color:var(--txt-bright);margin-top:2px}
+.form-row{display:flex;gap:8px}
+.form-row input{
+  flex:1;min-width:0;background:var(--bg2);border:1px solid var(--border2);border-radius:7px;
+  color:var(--txt-bright);padding:9px 12px;font-size:13px;font-family:var(--mono);outline:none;
+}
+.form-row input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(88,166,255,.15)}
+.form-row input::placeholder{color:#484f58}
+.btn{
+  border:none;border-radius:7px;padding:9px 16px;font-size:13px;font-weight:600;cursor:pointer;
+  font-family:var(--sans);transition:filter .15s,opacity .15s;white-space:nowrap;
+}
+.btn:hover{filter:brightness(1.15)} .btn:active{transform:translateY(1px)} .btn:disabled{opacity:.4;cursor:default}
+.btn-primary{background:var(--cyan);color:#001b18}
+.btn-send{background:var(--blue);color:#fff}
+.btn-ghost{background:var(--border2);color:var(--txt)}
+.cost-preview{font-size:11px;color:var(--txt-dim);font-family:var(--mono);margin-top:4px;min-height:16px}
+.cost-preview .hl{color:var(--yellow)}
+.leaderboard{max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:8px}
+.lb-row{
+  display:grid;grid-template-columns:24px 1fr auto auto;gap:8px;align-items:center;
+  padding:7px 12px;border-bottom:1px solid var(--border);font-size:12px;
+}
+.lb-row:last-child{border-bottom:none}
+.lb-row .rank{font-family:var(--mono);color:var(--txt-dim);font-size:11px}
+.lb-row .who{font-family:var(--mono);color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lb-row .spent{font-family:var(--mono);color:var(--orange);text-align:right;font-size:11px}
+.lb-row .bal{font-family:var(--mono);color:var(--green);text-align:right;font-size:11px}
+.lb-row.me{background:rgba(88,166,255,.08)}
+.lb-empty{padding:20px;text-align:center;color:var(--txt-dim);font-size:12px}
+.msg{font-size:12px;padding:8px 10px;border-radius:6px;margin-top:8px;display:none}
+.msg.show{display:block} .msg.err{background:rgba(248,81,73,.12);color:var(--red);border:1px solid rgba(248,81,73,.3)}
+.msg.ok{background:rgba(63,185,80,.12);color:var(--green);border:1px solid rgba(63,185,80,.3)}
+
+/* ═══ PANEL 3: quota bars ═══ */
+.quota-bar-wrap{display:flex;flex-direction:column;gap:18px;flex:1;justify-content:center}
+.qb{display:flex;flex-direction:column;gap:6px}
+.qb .qb-top{display:flex;justify-content:space-between;align-items:baseline}
+.qb .qb-name{font-weight:600;font-size:13px;color:var(--txt-bright)}
+.qb .qb-pct{font-family:var(--mono);font-size:18px;font-weight:600}
+.qb-track{height:22px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;overflow:hidden;position:relative}
+.qb-fill{height:100%;border-radius:5px 0 0 5px;transition:width .8s cubic-bezier(.4,0,.2,1),background .4s;position:relative}
+.qb-fill::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.12),transparent);animation:shimmer 2.5s infinite}
+@keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+.qb-fill.green{background:linear-gradient(90deg,#1a7f37,#3fb950)}
+.qb-fill.yellow{background:linear-gradient(90deg,#9e6a03,#d29922)}
+.qb-fill.red{background:linear-gradient(90deg,#da3633,#f85149)}
+.qb-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--txt-dim);font-family:var(--mono)}
+
+/* ═══ PANEL 4: request flow ═══ */
+.flow-list{display:flex;flex-direction:column;gap:7px;max-height:340px;overflow-y:auto;flex:1}
+.flow-list::-webkit-scrollbar{width:6px} .flow-list::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+.flow-card{
+  background:var(--bg2);border:1px solid var(--border);border-radius:7px;padding:9px 12px;
+  display:grid;grid-template-columns:auto 1fr auto;gap:8px 12px;align-items:center;
+  animation:slidein .4s ease;font-size:12px;
+}
+@keyframes slidein{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+.flow-card .fc-time{font-family:var(--mono);font-size:10px;color:var(--txt-dim);white-space:nowrap}
+.flow-card .fc-mid{min-width:0}
+.flow-card .fc-prov{font-weight:600;font-size:12px}
+.flow-card .fc-model{font-family:var(--mono);font-size:10px;color:var(--txt-dim)}
+.flow-card .fc-right{text-align:right;font-family:var(--mono);font-size:11px;white-space:nowrap}
+.flow-card .fc-cost{color:var(--orange)}
+.flow-card .fc-tok{color:var(--txt-dim);font-size:10px}
+.flow-card .fc-who{font-family:var(--mono);font-size:10px;color:var(--purple)}
+.flow-empty{padding:30px;text-align:center;color:var(--txt-dim);font-size:12px}
+.pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:600}
+.pill.ours{background:rgba(88,166,255,.15);color:var(--blue)}
+.pill.friend{background:rgba(188,140,255,.15);color:var(--purple)}
+.pill.ollama{background:rgba(57,210,192,.15);color:var(--cyan)}
+.pill.ppq{background:rgba(240,136,62,.15);color:var(--orange)}
+.pill.openrouter{background:rgba(210,153,34,.15);color:var(--yellow)}
+
+/* ═══ PANEL 5: donut ═══ */
+.donut-wrap{display:flex;align-items:center;gap:16px;flex:1;flex-wrap:wrap}
+.donut-chart{flex:1;min-width:200px;height:200px}
+.donut-legend{display:flex;flex-direction:column;gap:8px;min-width:130px}
+.dl-row{display:flex;align-items:center;gap:8px;font-size:12px}
+.dl-row .dl-sw{width:10px;height:10px;border-radius:3px}
+.dl-row .dl-name{color:var(--txt)}
+.dl-row .dl-val{margin-left:auto;font-family:var(--mono);color:var(--txt-dim);font-size:11px}
+
+/* ═══ PANEL 6: cost meter ═══ */
+.cost-big{font-family:var(--mono);font-size:42px;font-weight:700;color:var(--green);line-height:1;text-align:center;margin:8px 0}
+.cost-big .cents{font-size:24px;color:var(--txt-dim)}
+.cost-sub{text-align:center;font-size:12px;color:var(--txt-dim);font-family:var(--mono)}
+.cost-sub .burn{color:var(--orange)}
+.cost-bar{height:6px;background:var(--bg2);border-radius:3px;margin-top:14px;overflow:hidden}
+.cost-bar .cb-fill{height:100%;background:linear-gradient(90deg,var(--green),var(--yellow));border-radius:3px;transition:width .8s}
+
+/* ═══ PANEL 7: dispatch gate ═══ */
+.gate-wrap{display:flex;align-items:center;gap:18px;flex:1;flex-wrap:wrap}
+.gate-light{
+  width:80px;height:80px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  font-size:32px;transition:all .5s;position:relative;
+}
+.gate-light.go{background:radial-gradient(circle,#3fb950,#1a7f37);box-shadow:0 0 30px rgba(63,185,80,.5)}
+.gate-light.hold{background:radial-gradient(circle,#f85149,#da3633);box-shadow:0 0 30px rgba(248,81,73,.5)}
+.gate-light::after{content:'';position:absolute;inset:-6px;border-radius:50%;border:2px solid currentColor;opacity:.3;animation:ring 2s infinite}
+.gate-light.go::after{color:var(--green)} .gate-light.hold::after{color:var(--red)}
+@keyframes ring{0%{transform:scale(1);opacity:.4}100%{transform:scale(1.25);opacity:0}}
+.gate-info{flex:1;min-width:140px}
+.gate-info .gi-status{font-size:20px;font-weight:700}
+.gate-info .gi-status.go{color:var(--green)} .gate-info .gi-status.hold{color:var(--red)}
+.gate-info .gi-model{font-family:var(--mono);font-size:13px;color:var(--cyan);margin:4px 0}
+.gate-info .gi-reason{font-size:11px;color:var(--txt-dim);line-height:1.4}
+.gate-stats{display:flex;gap:16px;margin-top:8px;flex-wrap:wrap}
+.gate-stats .gs{font-size:11px}
+.gate-stats .gs .gs-l{color:var(--txt-dim);text-transform:uppercase;letter-spacing:.3px;font-size:9px}
+.gate-stats .gs .gs-v{font-family:var(--mono);color:var(--txt-bright);font-size:13px}
+</style>
+</head>
+<body>
+
+<!-- ═══ TOP BAR ═══ -->
+<div class="topbar">
+  <h1>⚡ Sovereign Routing <span class="accent">Engine</span></h1>
+  <span class="spacer"></span>
+  <span class="badge" id="conn-badge"><span class="dot"></span><span id="conn-text">connecting…</span></span>
+  <span class="badge" id="time-badge"><span class="dot" style="background:var(--txt-dim)"></span><span id="time-text">--:--:--</span></span>
+</div>
+
+<div class="grid">
+
+  <!-- ═══ PANEL 1: PER-KEY PRICE CHARTS ═══ -->
+  <div class="card col-charts">
+    <h2><span class="num">1</span> Per-Key Price Economics — cost basis · your price · margin%</h2>
+    <div class="charts-grid" id="charts-grid"></div>
+    <div class="legend-row">
+      <span class="lg"><span class="swatch sw-cost"></span> Cost basis ($/M)</span>
+      <span class="lg"><span class="swatch sw-price"></span> Your price + margin ($/M)</span>
+      <span class="lg"><span class="swatch sw-margin"></span> Margin % (right axis)</span>
+    </div>
+  </div>
+
+  <!-- ═══ PANEL 2: TOKEN ECONOMY ═══ -->
+  <div class="card col-econ">
+    <h2><span class="num">2</span> Token Economy — register · send · watch price respond</h2>
+    <div class="econ-grid">
+      <div class="tok-price-box">
+        <div>
+          <div class="label">Token Price (live)</div>
+          <div class="val" id="tok-price">$0.00 / M</div>
+        </div>
+        <div style="text-align:right">
+          <div class="label">Scarcity</div>
+          <div class="sub" id="tok-scarcity">1.0×</div>
+        </div>
+      </div>
+
+      <div class="balance-box">
+        <div class="bb"><div class="l">Your Balance</div><div class="v" id="my-balance">—</div></div>
+        <div class="bb"><div class="l">Your Spent</div><div class="v" id="my-spent">—</div></div>
+        <div class="bb"><div class="l">Prompts</div><div class="v" id="my-prompts">—</div></div>
+      </div>
+
+      <div>
+        <div class="form-row">
+          <input id="npub-input" placeholder="npub1… (your public key)" autocomplete="off">
+          <button class="btn btn-ghost" id="join-btn">Join</button>
+        </div>
+      </div>
+      <div>
+        <div class="form-row">
+          <input id="prompt-input" placeholder="Type a prompt to send to the router…" autocomplete="off">
+          <button class="btn btn-send" id="send-btn" disabled>Send</button>
+        </div>
+        <div class="cost-preview" id="cost-preview"></div>
+      </div>
+      <div class="msg" id="econ-msg"></div>
+
+      <div>
+        <div style="font-size:11px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Leaderboard · who spent what</div>
+        <div class="leaderboard" id="leaderboard"><div class="lb-empty">No participants yet. Join to start.</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ PANEL 3: QUOTA BARS ═══ -->
+  <div class="card col-quota">
+    <h2><span class="num">3</span> Quota — per key, live</h2>
+    <div class="quota-bar-wrap" id="quota-wrap"></div>
+  </div>
+
+  <!-- ═══ PANEL 4: REQUEST FLOW ═══ -->
+  <div class="card col-flow">
+    <h2><span class="num">4</span> Request Flow — last 20, live</h2>
+    <div class="flow-list" id="flow-list"><div class="flow-empty">Waiting for requests…</div></div>
+  </div>
+
+  <!-- ═══ PANEL 6: COST METER ═══ -->
+  <div class="card col-cost">
+    <h2><span class="num">6</span> Cost Meter — today</h2>
+    <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
+      <div class="cost-big" id="cost-big">$0<span class="cents">.00</span></div>
+      <div class="cost-sub"><span class="burn" id="burn-rate">$0.00</span> / hour burn</div>
+      <div class="cost-bar"><div class="cb-fill" id="cost-bar-fill" style="width:0%"></div></div>
+      <div class="cost-sub" style="margin-top:6px;font-size:10px" id="cost-ticks">0 requests today</div>
+    </div>
+  </div>
+
+  <!-- ═══ PANEL 5: PROVIDER DONUT ═══ -->
+  <div class="card col-donut">
+    <h2><span class="num">5</span> Provider Distribution — last 1h</h2>
+    <div class="donut-wrap">
+      <div class="donut-chart" id="donut-chart"></div>
+      <div class="donut-legend" id="donut-legend"></div>
+    </div>
+  </div>
+
+  <!-- ═══ PANEL 7: DISPATCH GATE ═══ -->
+  <div class="card col-gate">
+    <h2><span class="num">7</span> Dispatch Gate — can we route right now?</h2>
+    <div class="gate-wrap">
+      <div class="gate-light go" id="gate-light">✓</div>
+      <div class="gate-info">
+        <div class="gi-status go" id="gate-status">CLEAR</div>
+        <div class="gi-model" id="gate-model">glm-5.2</div>
+        <div class="gi-reason" id="gate-reason">sufficient headroom</div>
+        <div class="gate-stats">
+          <div class="gs"><div class="gs-l">Effective $/M</div><div class="gs-v" id="gate-price">—</div></div>
+          <div class="gs"><div class="gs-l">Safety Margin</div><div class="gs-v" id="gate-margin">—</div></div>
+          <div class="gs"><div class="gs-l">OURS exhausts</div><div class="gs-v" id="gate-ours">—</div></div>
+          <div class="gs"><div class="gs-l">FRIEND exhausts</div><div class="gs-v" id="gate-friend">—</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════════════
+   CONFIG & STATE
+   ════════════════════════════════════════════════════════════════════════ */
+const API = '';                                  // same origin; dashboard server serves this file
+const KEYS = ['ours','friend','ollama','ppq'];
+const KEY_LABEL = {ours:'OURS',friend:'FRIEND',ollama:'OLLAMA',ppq:'PPQ'};
+const KEY_COLOR = {ours:'#58a6ff',friend:'#bc8cff',ollama:'#39d2c0',ppq:'#f0883e'};
+const POLL_MS = 5000;
+const STARTING_BALANCE = 50000;
+const HIST_MAX = 480;                            // ~40min at 5s polling
+
+let state = {
+  demo: true,                                    // true until first successful fetch
+  myNpub: localStorage.getItem('demo_npub') || '',
+  priceHist: {},                                 // key -> [{t,cost_basis,your_price,margin_pct}]
+  snapshot: null, ledger: null,
+  costToday: 0, costTicks: 0,
+  ws: null,
+};
+KEYS.forEach(k => state.priceHist[k] = []);
+
+/* ════════════════════════════════════════════════════════════════════════
+   UTILITIES
+   ════════════════════════════════════════════════════════════════════════ */
+function fmt$(n, dp=3){
+  if(n==null||isNaN(n)) return '—';
+  if(n>=1) return '$'+n.toFixed(2);
+  return '$'+n.toFixed(dp);
+}
+function fmtTok(n){
+  if(n>=1e6) return (n/1e6).toFixed(2)+'M';
+  if(n>=1e3) return (n/1e3).toFixed(1)+'K';
+  return String(Math.round(n));
+}
+function fmtTime(ts){
+  const d=new Date(ts*1000); return d.toLocaleTimeString('en-GB',{hour12:false});
+}
+function shortNpub(n){ return n ? n.slice(0,10)+'…'+n.slice(-4) : 'anon'; }
+function clampPct(p){ return Math.max(0,Math.min(100,p)); }
+
+async function fetchJSON(url, opts, timeoutMs=4000){
+  const ctrl = new AbortController();
+  const tid = setTimeout(()=>ctrl.abort(), timeoutMs);
+  try{
+    const r = await fetch(url, {...opts, signal:ctrl.signal});
+    clearTimeout(tid);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return await r.json();
+  }catch(e){ clearTimeout(tid); throw e; }
+}
+
+function setConn(mode){
+  const b=document.getElementById('conn-badge'), t=document.getElementById('conn-text');
+  b.className='badge';
+  if(mode==='live'){b.classList.add('live');t.textContent='LIVE';}
+  else if(mode==='demo'){b.classList.add('demo');t.textContent='DEMO MODE';}
+  else{b.classList.add('error');t.textContent='OFFLINE';}
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   DEMO DATA GENERATORS  (used when server unreachable)
+   ════════════════════════════════════════════════════════════════════════ */
+const demo = {
+  t0: Date.now()/1000 - 86400,                   // seed 24h of history
+  participants: [],
+  reqCount: 142 + Math.floor(Math.random()*30),
+  init(){
+    // seed per-key history — flat-rate keys amortise (cost falls as tokens accumulate)
+    const now=Date.now()/1000;
+    for(const k of KEYS){
+      const base={ours:[0.12,0.16,40],friend:[0.14,0.18,28],ollama:[0.08,0.13,42],ppq:[0.14,0.21,33]}[k];
+      for(let i=0;i<120;i++){
+        const t = now - (120-i)*720;
+        const prog=i/120;
+        const amort = k==='ppq'?0:prog*0.30;     // flat-rate cost basis falls over the day
+        const noise=(Math.random()-0.5)*0.004;
+        const cb = base[0]*(1-amort)+noise;
+        const yp = cb*(1+base[2]/100)+noise*0.5;
+        const margin = base[2] + (Math.random()-0.5)*4 - amort*8;
+        state.priceHist[k].push({t, cost_basis:Math.max(0.001,cb), your_price:Math.max(0.001,yp), margin_pct:Math.max(5,margin)});
+      }
+    }
+    // seed some participants
+    const names=['npub1felix2026','npub1satoshi9k','npub1cypherpunk','npub1engineer42','npub1builder77'];
+    this.participants = names.map((n,i)=>({
+      npub:n, balance: STARTING_BALANCE - (i+1)*3200 - Math.floor(Math.random()*4000),
+      spent:(i+1)*3200+Math.floor(Math.random()*4000), prompts: i+2+Math.floor(Math.random()*4)
+    }));
+  },
+  snapshot(){
+    const now=Date.now()/1000;
+    // advance pricing with a live tick
+    for(const k of KEYS){
+      const h=state.priceHist[k]; const last=h[h.length-1]||{cost_basis:0.1,your_price:0.15,margin_pct:33};
+      const drift=(Math.random()-0.5)*0.002;
+      const cb=Math.max(0.001,last.cost_basis+drift);
+      const margin=Math.max(5,last.margin_pct+(Math.random()-0.5)*1.5);
+      const yp=cb/(1-margin/100);
+      h.push({t:now,cost_basis:cb,your_price:yp,margin_pct:margin});
+      if(h.length>HIST_MAX) h.shift();
+    }
+    const pricing={};
+    for(const k of KEYS){const h=state.priceHist[k];const l=h[h.length-1];
+      pricing[k]={cost_basis:l.cost_basis,your_price:l.your_price,margin_pct:l.margin_pct,effective_rate:l.your_price};}
+    // quota drifts up slowly
+    const oursPct = 38 + Math.sin(now/900)*6 + (Math.random()-0.5)*2;
+    const friendPct = 22 + Math.sin(now/1100)*4 + (Math.random()-0.5)*1.5;
+    const TOTAL=2_000_000;
+    return {
+      ts:now, pricing,
+      quota:{
+        ours:{used_pct:clampPct(oursPct),remaining:Math.round(TOTAL*(1-oursPct/100)),total:TOTAL,healthy:true,resets_in_min:Math.round(180+Math.random()*40)},
+        friend:{used_pct:clampPct(friendPct),remaining:Math.round(TOTAL*(1-friendPct/100)),total:TOTAL,healthy:true,resets_in_min:Math.round(160+Math.random()*50)}
+      },
+      requests: this._recentReqs(now),
+      provider_distribution:{ours:0.58,friend:0.22,ollama:0.13,ppq:0.07},
+      dispatch_gate:{
+        can_dispatch: oursPct<82, reason: oursPct<82?'sufficient headroom (ours key) with 2x margin':'quota pressure — holding',
+        recommended_model: oursPct<82?'glm-5.2':null, effective_price_per_m: pricing.ours.your_price*(oursPct>60?1.5:1),
+        scarcity_factor: oursPct<50?1:1+(oursPct-50)/50, safety_margin:2.0,
+        hours_until_exhaustion:{ours:+((100-oursPct)/9).toFixed(1),friend:+((100-friendPct)/6).toFixed(1)}, downgraded:false
+      },
+      cost_today: 2.34 + Math.sin(now/7200)*0.6 + (now%600)/600*0.08,
+      burn_rate_per_hour: 0.11 + Math.random()*0.04,
+      system:{cpu_pct:8+Math.random()*10,mem_pct:42+Math.random()*8}
+    };
+  },
+  _recentReqs(now){
+    const models=['glm-5.2','glm-4.5','glm-4.5-air','glm-4.5-flash'];
+    const provs=['ours','friend','ollama','ppq'];
+    const reasons=['sufficient headroom','scarcity ramp','failover from ours','flat-rate preferred'];
+    const out=[];
+    for(let i=0;i<14;i++){
+      const prov=provs[Math.floor(Math.random()*(i<8?2:4))];
+      const who=this.participants[Math.floor(Math.random()*this.participants.length)];
+      out.push({ts:now-i*(8+Math.random()*22),requester:who?who.npub:'internal',
+        provider:prov,model:models[Math.floor(Math.random()*4)],
+        tokens:200+Math.floor(Math.random()*3800),cost:0.0001+Math.random()*0.004,
+        reason:reasons[Math.floor(Math.random()*reasons.length)]});
+    }
+    return out.sort((a,b)=>b.ts-a.ts);
+  },
+  ledger(){
+    const totalSpent=this.participants.reduce((s,p)=>s+p.spent,0);
+    const totalBudget=this.participants.length*STARTING_BALANCE;
+    const consumedFrac=totalBudget>0?totalSpent/totalBudget:0;
+    let scarcity=1.0;
+    if(consumedFrac>0.8)scarcity=2.0; else if(consumedFrac>0.6)scarcity=1.8;
+    else if(consumedFrac>0.4)scarcity=1.5; else if(consumedFrac>0.2)scarcity=1.2;
+    const basePerTok=pricingPerToken(state.snapshot);
+    return {
+      participants:[...this.participants].sort((a,b)=>b.spent-a.spent),
+      current_price_per_token:basePerTok*scarcity, scarcity_factor:scarcity,
+      starting_balance:STARTING_BALANCE, total_budget:totalBudget, total_consumed:totalSpent
+    };
+  }
+};
+function pricingPerToken(snap){
+  if(!snap) return 0.0000034;
+  const p=snap.pricing.ours||{}; return (p.your_price||0.12)/1e6;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PLOTLY DARK TEMPLATE
+   ════════════════════════════════════════════════════════════════════════ */
+const PLOT_BG='#0d1117', PLOT_GRID='rgba(48,54,61,.4)';
+const axisBase=(title,side)=>({
+  title:{text:title,font:{size:10,color:'#8b949e'}}, side, overlaying:side==='right'?'y':undefined,
+  showgrid:side!=='right', gridcolor:PLOT_GRID, zeroline:false,
+  tickfont:{size:9,color:'#8b949e'}, tickcolor:'transparent', automargin:true,
+});
+
+/* ════════════════════════════════════════════════════════════════════════
+   PANEL 1: PER-KEY PRICE CHARTS
+   ════════════════════════════════════════════════════════════════════════ */
+const miniCharts={};
+function initMiniCharts(){
+  const grid=document.getElementById('charts-grid');
+  grid.innerHTML='';
+  for(const k of KEYS){
+    const wrap=document.createElement('div');wrap.className='mini-chart-wrap';
+    wrap.innerHTML=`<div class="mc-head"><span class="mc-name" style="color:${KEY_COLOR[k]}">${KEY_LABEL[k]}</span><span class="mc-price" id="mc-price-${k}">—</span></div><div class="mini-chart" id="mc-${k}"></div>`;
+    grid.appendChild(wrap);
+    miniCharts[k]=document.getElementById('mc-'+k);
+    const h=state.priceHist[k];
+    Plotly.newPlot('mc-'+k,[
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.cost_basis),name:'Cost basis',mode:'lines',line:{color:'#58a6ff',width:2},yaxis:'y'},
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.your_price),name:'Your price',mode:'lines',line:{color:'#39d2c0',width:2,dash:'dash'},yaxis:'y'},
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),name:'Margin %',mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)',yaxis:'y2'},
+    ],{
+      paper_bgcolor:PLOT_BG,plot_bgcolor:PLOT_BG,margin:{l:38,r:38,t:4,b:20},
+      showlegend:false,
+      xaxis:{...axisBase(''),type:'date',gridcolor:PLOT_GRID,tickfont:{size:8,color:'#6e7681'},tickformat:'%H:%M'},
+      yaxis:{...axisBase('$/M','left'),tickformat:'.2f'},
+      yaxis2:{...axisBase('%','right'),side:'right',overlaying:'y',showgrid:false,tickformat:'d',range:[0,60]},
+      font:{family:'ui-monospace,monospace',size:9},
+    },{displayModeBar:false,staticPlot:false,responsive:true});
+  }
+}
+function updateMiniCharts(){
+  for(const k of KEYS){
+    const h=state.priceHist[k]; if(!h.length) continue;
+    const last=h[h.length-1];
+    Plotly.react('mc-'+k,[
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.cost_basis),mode:'lines',line:{color:'#58a6ff',width:2}},
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.your_price),mode:'lines',line:{color:'#39d2c0',width:2,dash:'dash'}},
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)'},
+    ],document.getElementById('mc-'+k).layout,{displayModeBar:false,responsive:true});
+    const el=document.getElementById('mc-price-'+k);
+    if(el) el.textContent=fmt$(last.your_price,3)+'/M · '+last.margin_pct.toFixed(0)+'%';
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PANEL 2: TOKEN ECONOMY
+   ════════════════════════════════════════════════════════════════════════ */
+function showMsg(txt,type){const m=document.getElementById('econ-msg');m.textContent=txt;m.className='msg show '+(type||'ok');}
+function updateEcon(){
+  const L=state.ledger; if(!L) return;
+  const pM=L.current_price_per_token*1e6;
+  document.getElementById('tok-price').textContent='$'+pM.toFixed(3)+' / M';
+  document.getElementById('tok-scarcity').textContent=L.scarcity_factor.toFixed(1)+'×';
+  // my balance
+  let me=null;
+  if(state.myNpub) me=L.participants.find(p=>p.npub===state.myNpub);
+  document.getElementById('my-balance').textContent = me?fmtTok(me.balance):'—';
+  document.getElementById('my-spent').textContent = me?fmtTok(me.spent):'—';
+  document.getElementById('my-prompts').textContent = me?me.prompts:'—';
+  document.getElementById('send-btn').disabled = !me;
+  // leaderboard
+  const lb=document.getElementById('leaderboard');
+  if(!L.participants.length){lb.innerHTML='<div class="lb-empty">No participants yet. Join to start.</div>';return;}
+  lb.innerHTML=L.participants.map((p,i)=>{
+    const isMe=p.npub===state.myNpub;
+    return `<div class="lb-row${isMe?' me':''}"><span class="rank">${i+1}</span><span class="who">${shortNpub(p.npub)}</span><span class="spent">${fmtTok(p.spent)}</span><span class="bal">${fmtTok(p.balance)}</span></div>`;
+  }).join('');
+  updateCostPreview();
+}
+function updateCostPreview(){
+  const inp=document.getElementById('prompt-input');
+  const el=document.getElementById('cost-preview');
+  const L=state.ledger;
+  if(!L||!inp.value.trim()){el.innerHTML='';return;}
+  const estTok=Math.max(50, inp.value.length*0.75*4);  // rough: ~0.75 words/char, 4 tok/word
+  const cost=estTok*L.current_price_per_token;
+  el.innerHTML=`~${fmtTok(estTok)} tokens → <span class="hl">${fmt$(cost,5)}</span> at current price`;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PANEL 3: QUOTA BARS
+   ════════════════════════════════════════════════════════════════════════ */
+function updateQuota(){
+  const q=(state.snapshot&&state.snapshot.quota)||{};
+  const wrap=document.getElementById('quota-wrap');
+  const keys=Object.keys(q).length?Object.keys(q):['ours','friend'];
+  wrap.innerHTML=keys.map(k=>{
+    const kk=q[k]||{used_pct:0,remaining:0,total:2e6,resets_in_min:0};
+    const pct=clampPct(kk.used_pct);
+    const cls=pct<50?'green':(pct<80?'yellow':'red');
+    return `<div class="qb"><div class="qb-top"><span class="qb-name">${KEY_LABEL[k]||k.toUpperCase()}</span><span class="qb-pct" style="color:var(--${cls==='green'?'green':cls==='yellow'?'yellow':'red'})">${pct.toFixed(1)}%</span></div><div class="qb-track"><div class="qb-fill ${cls}" style="width:${pct}%"></div></div><div class="qb-meta"><span>${fmtTok(kk.remaining)} / ${fmtTok(kk.total||2e6)} tok</span><span>resets in ${kk.resets_in_min||'—'}m</span></div></div>`;
+  }).join('');
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PANEL 4: REQUEST FLOW
+   ════════════════════════════════════════════════════════════════════════ */
+function updateFlow(){
+  const reqs=(state.snapshot&&state.snapshot.requests)||[];
+  const list=document.getElementById('flow-list');
+  if(!reqs.length){list.innerHTML='<div class="flow-empty">Waiting for requests…</div>';return;}
+  list.innerHTML=reqs.slice(0,20).map(r=>{
+    const provClass=r.provider&&r.provider.includes('ollama')?'ollama':(r.provider||'ours');
+    return `<div class="flow-card"><span class="fc-time">${fmtTime(r.ts)}</span><div class="fc-mid"><span class="fc-prov"><span class="pill ${provClass}">${(r.provider||'?').toUpperCase()}</span></span> <span class="fc-model">${r.model||''}</span>${r.requester&&r.requester!=='internal'?`<br><span class="fc-who">${shortNpub(r.requester)}</span>`:''}</div><div class="fc-right"><div class="fc-cost">${fmt$(r.cost||0,5)}</div><div class="fc-tok">${fmtTok(r.tokens||0)} tok</div></div></div>`;
+  }).join('');
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PANEL 5: PROVIDER DONUT
+   ════════════════════════════════════════════════════════════════════════ */
+function updateDonut(){
+  const d=(state.snapshot&&state.snapshot.provider_distribution)||{ours:1};
+  const labels=Object.keys(d), vals=Object.values(d);
+  const colors=labels.map(l=>KEY_COLOR[l.includes('ollama')?'ollama':l]||'#d29922');
+  Plotly.react('donut-chart',[{values:vals,labels:labels,hole:.62,type:'pie',
+    marker:{colors,line:{color:'#0d1117',width:2}},
+    textfont:{size:11,color:'#c9d1d9'},textinfo:'percent',insidetextorientation:'horizontal',
+    sort:false}],
+  {paper_bgcolor:PLOT_BG,plot_bgcolor:PLOT_BG,margin:{l:4,r:4,t:4,b:4},showlegend:false,
+   annotations:[{text:Object.keys(d).length+'<br>providers',showarrow:false,font:{size:10,color:'#8b949e'}}]},
+  {displayModeBar:false,responsive:true});
+  const lg=document.getElementById('donut-legend');
+  const total=vals.reduce((a,b)=>a+b,0)||1;
+  lg.innerHTML=labels.map((l,i)=>`<div class="dl-row"><span class="dl-sw" style="background:${colors[i]}"></span><span class="dl-name">${(l||'').toUpperCase()}</span><span class="dl-val">${((vals[i]/total)*100).toFixed(0)}%</span></div>`).join('');
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PANEL 6: COST METER
+   ════════════════════════════════════════════════════════════════════════ */
+function updateCost(){
+  const s=state.snapshot||{};
+  const cost=s.cost_today||state.costToday;
+  const intp=Math.floor(cost), frac=Math.round((cost-intp)*100);
+  document.getElementById('cost-big').innerHTML='$'+intp+'<span class="cents">.'+String(frac).padStart(2,'0')+'</span>';
+  document.getElementById('burn-rate').textContent=fmt$(s.burn_rate_per_hour||0,2);
+  const reqs=(s.requests||[]).length;
+  document.getElementById('cost-ticks').textContent=reqs+' requests · '+new Date().toLocaleDateString();
+  // bar shows progress toward a nominal $10 daily cap
+  const cap=10;
+  document.getElementById('cost-bar-fill').style.width=clampPct(cost/cap*100)+'%';
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PANEL 7: DISPATCH GATE
+   ════════════════════════════════════════════════════════════════════════ */
+function updateGate(){
+  const g=(state.snapshot&&state.snapshot.dispatch_gate)||{can_dispatch:true};
+  const light=document.getElementById('gate-light');
+  const status=document.getElementById('gate-status');
+  if(g.can_dispatch){
+    light.className='gate-light go'; light.textContent='✓';
+    status.className='gi-status go'; status.textContent='CLEAR';
+  }else{
+    light.className='gate-light hold'; light.textContent='✕';
+    status.className='gi-status hold'; status.textContent='HOLD';
+  }
+  document.getElementById('gate-model').textContent=g.recommended_model||'—';
+  document.getElementById('gate-reason').textContent=g.reason||'';
+  document.getElementById('gate-price').textContent=fmt$(g.effective_price_per_m,4)+'/M';
+  document.getElementById('gate-margin').textContent=(g.safety_margin||2)+'×';
+  const he=g.hours_until_exhaustion||{};
+  document.getElementById('gate-ours').textContent=he.ours!=null?he.ours+'h':'∞';
+  document.getElementById('gate-friend').textContent=he.friend!=null?he.friend+'h':'∞';
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   RENDER ALL
+   ════════════════════════════════════════════════════════════════════════ */
+function renderAll(){
+  // merge pricing into history (whether from real API or demo)
+  if(state.snapshot&&state.snapshot.pricing){
+    const now=Date.now()/1000;
+    for(const k of KEYS){
+      const p=state.snapshot.pricing[k]; if(!p) continue;
+      const h=state.priceHist[k];
+      // avoid dup if pricing_history already supplied full data
+      const needAppend = !state.snapshot.pricing_history;
+      if(needAppend){
+        h.push({t:now,cost_basis:p.cost_basis,your_price:p.your_price,margin_pct:p.margin_pct});
+        if(h.length>HIST_MAX) h.shift();
+      }
+    }
+    if(state.snapshot.pricing_history){
+      for(const k of KEYS){
+        if(state.snapshot.pricing_history[k]) state.priceHist[k]=state.snapshot.pricing_history[k].slice(-HIST_MAX);
+      }
+    }
+  }
+  updateMiniCharts();
+  updateEcon();
+  updateQuota();
+  updateFlow();
+  updateDonut();
+  updateCost();
+  updateGate();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   POLL LOOP
+   ════════════════════════════════════════════════════════════════════════ */
+async function poll(){
+  try{
+    const snap=await fetchJSON(API+'/api/snapshot');
+    state.snapshot=snap; state.demo=false; setConn('live');
+    // update cost meter ticker
+    if(snap.cost_today!=null) state.costToday=snap.cost_today;
+  }catch(e){
+    // DEMO MODE
+    if(state.demo){
+      state.snapshot=demo.snapshot(); setConn('demo');
+    }else{
+      setConn('offline');
+    }
+  }
+  try{
+    state.ledger = state.demo ? demo.ledger() : await fetchJSON(API+'/ledger');
+  }catch(e){
+    if(state.demo) state.ledger=demo.ledger();
+  }
+  renderAll();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   WEBSOCKET (optional live push for Panel 4)
+   ════════════════════════════════════════════════════════════════════════ */
+function connectWS(){
+  try{
+    const proto=location.protocol==='https:'?'wss:':'ws:';
+    state.ws=new WebSocket(proto+'//'+location.host+'/stream');
+    state.ws.onmessage=(ev)=>{
+      try{
+        const msg=JSON.parse(ev.data);
+        if(msg.type==='request'&&msg.data&&state.snapshot){
+          state.snapshot.requests=[msg.data,...(state.snapshot.requests||[])].slice(0,50);
+          updateFlow();
+        }
+      }catch(_){}
+    };
+    state.ws.onclose=()=>{state.ws=null;setTimeout(connectWS,5000);};
+    state.ws.onerror=()=>{try{state.ws.close();}catch(_){}};
+  }catch(_){/* WS optional */}
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   EVENT HANDLERS (token economy)
+   ════════════════════════════════════════════════════════════════════════ */
+async function doJoin(){
+  const npub=document.getElementById('npub-input').value.trim();
+  if(!npub){showMsg('Enter your npub first','err');return;}
+  const btn=document.getElementById('join-btn');btn.disabled=true;
+  try{
+    if(state.demo){
+      // demo: simulate registration
+      let p=demo.participants.find(x=>x.npub===npub);
+      if(!p){p={npub,balance:STARTING_BALANCE,spent:0,prompts:0};demo.participants.push(p);}
+      state.myNpub=npub;localStorage.setItem('demo_npub',npub);
+      showMsg('Joined demo! You have '+fmtTok(STARTING_BALANCE)+' tokens.','ok');
+      state.ledger=demo.ledger(); updateEcon();
+    }else{
+      const r=await fetchJSON(API+'/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({npub})});
+      if(r.ok){state.myNpub=npub;localStorage.setItem('demo_npub',npub);showMsg('Joined! Balance: '+fmtTok(r.balance)+' tokens','ok');}
+      else throw new Error(r.error||'rejected');
+    }
+    if(state.myNpub)document.getElementById('npub-input').value=state.myNpub;
+  }catch(e){
+    showMsg(e.message,'err');
+  }finally{btn.disabled=false;}
+}
+async function doSend(){
+  const prompt=document.getElementById('prompt-input').value.trim();
+  if(!prompt||!state.myNpub)return;
+  const btn=document.getElementById('send-btn');btn.disabled=true;const orig=btn.textContent;btn.textContent='Routing…';
+  try{
+    if(state.demo){
+      // simulate a routed request
+      const L=demo.ledger();const price=L.current_price_per_token;
+      const estTok=Math.max(50,prompt.length*0.75*4);const cost=estTok*price;
+      let me=demo.participants.find(p=>p.npub===state.myNpub);
+      if(me){me.balance=Math.max(0,me.balance-estTok);me.spent+=estTok;me.prompts++;}
+      const req={ts:Date.now()/1000,requester:state.myNpub,provider:'ours',model:'glm-5.2',tokens:Math.round(estTok),cost,reason:'demo route'};
+      if(state.snapshot)state.snapshot.requests=[req,...(state.snapshot.requests||[])].slice(0,50);
+      updateFlow();
+      state.ledger=demo.ledger(); updateEcon();
+      showMsg('Routed via OURS · '+fmtTok(Math.round(estTok))+' tok · '+fmt$(cost,5),'ok');
+      document.getElementById('prompt-input').value='';updateCostPreview();
+    }else{
+      const r=await fetchJSON(API+'/prompt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt,requester_npub:state.myNpub})},10000);
+      if(r.ok){
+        showMsg('Routed via '+(r.provider||'?').toUpperCase()+' · '+fmtTok(r.tokens||0)+' tok · '+fmt$(r.cost||0,5)+' · balance '+fmtTok(r.balance_after||0),'ok');
+        document.getElementById('prompt-input').value='';updateCostPreview();
+      }else throw new Error(r.error||'failed');
+    }
+  }catch(e){showMsg(e.message,'err');}
+  finally{btn.disabled=false;btn.textContent=orig;}
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   CLOCK
+   ════════════════════════════════════════════════════════════════════════ */
+function tickClock(){document.getElementById('time-text').textContent=new Date().toLocaleTimeString('en-GB',{hour12:false});}
+
+/* ════════════════════════════════════════════════════════════════════════
+   INIT
+   ════════════════════════════════════════════════════════════════════════ */
+function init(){
+  demo.init();
+  initMiniCharts();
+  // wire events
+  document.getElementById('join-btn').addEventListener('click',doJoin);
+  document.getElementById('send-btn').addEventListener('click',doSend);
+  document.getElementById('prompt-input').addEventListener('input',updateCostPreview);
+  document.getElementById('prompt-input').addEventListener('keydown',e=>{if(e.key==='Enter')doSend();});
+  document.getElementById('npub-input').addEventListener('keydown',e=>{if(e.key==='Enter')doJoin();});
+  if(state.myNpub)document.getElementById('npub-input').value=state.myNpub;
+  // clock
+  tickClock();setInterval(tickClock,1000);
+  // poll
+  poll();setInterval(poll,POLL_MS);
+  // ws (non-blocking)
+  connectWS();
+}
+init();
+</script>
+</body>
+</html>

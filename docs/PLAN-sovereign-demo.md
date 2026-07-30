@@ -1,259 +1,326 @@
-# PLAN: Sovereign Engineering Demo Dashboard (v2)
+# PLAN: Sovereign Engineering Demo — CVM-Only Architecture (v3)
 
-**Created:** 2026-07-30 (v2: incorporates Felix's feedback)
+**Created:** 2026-07-30 (v3: all-CVM, no direct DB access)
 **Demo:** Sovereign Engineering (tomorrow)
-**Goal:** Interactive live demo showing Kalman token pricing + demand economics
+**Goal:** Interactive live demo where audience participates via Nostr-addressed infrastructure
 
 ---
 
-## WHAT THE AUDIENCE SEES
+## CORE PRINCIPLE: EVERYTHING VIA CONTEXTVM
 
-A web dashboard (big screen + accessible on phones). They register with their npub, get a token budget, send prompts, watch the price respond to demand in real-time. CVM/Nostr runs underneath but is invisible — mentioned verbally only.
+DQ05 (Kalman machine) is remote — different network, only reachable via Nostr. No direct SQLite, no HTTP, no Tailscale fallback. All data flows as CVM tool calls over Nostr relays. Browser JS maintains persistent relay connections for speed.
 
 ---
 
 ## ARCHITECTURE
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    DEMO BROWSER                          │
-│  (Big screen + audience phones via shared URL)           │
-│                                                          │
-│  ┌───────────────┐  ┌─────────────────────────────────┐ │
-│  │ PER-KEY       │  │ TOKEN ECONOMY (main demo focus) │ │
-│  │ PRICE CHARTS  │  │                                 │ │
-│  │ (one per key) │  │ Register (npub) → get budget    │ │
-│  │               │  │ Send prompt → spend tokens      │ │
-│  │ Shows:        │  │ Watch price tick up with demand │ │
-│  │ - cost basis  │  │ See your balance drain          │ │
-│  │ - your price  │  │ Leaderboard: who spent what     │ │
-│  │ - margin %    │  │                                 │ │
-│  └───────────────┘  └─────────────────────────────────┘ │
-│  ┌───────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │ QUOTA BARS    │  │ REQUEST FLOW │  │ COST METER   │ │
-│  │ (per key)     │  │ (live cards) │  │ ($ today)    │ │
-│  └───────────────┘  └──────────────┘  └──────────────┘ │
-│  ┌───────────────┐  ┌──────────────┐                   │
-│  │ DISPATCH GATE │  │ PROVIDER     │                   │
-│  │ (green/red)   │  │ DISTRIBUTION │                   │
-│  └───────────────┘  └──────────────┘                   │
-└──────────────────────┬──────────────────────────────────┘
-                       │ HTTP/WebSocket (direct, <50ms)
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│              DASHBOARD SERVER (:3001)                     │
-│  Node.js 22 + node:sqlite (reads DB file directly)       │
-│  No Nostr round-trips for dashboard data                 │
-│                                                          │
-│  Reads directly from:                                    │
-│  ├── zai_usage.db (routing, telemetry, cost)            │
-│  ├── /proc (live system stats)                          │
-│  ├── proxy /quota (live key status, every 2s)           │
-│  ├── proxy /v1/dispatch_gate (gate decisions)           │
-│  └── kalman_price_state.json (converged rates)          │
-│                                                          │
-│  Serves:                                                 │
-│  ├── GET / → dashboard HTML                             │
-│  ├── GET /api/snapshot → all data in one JSON (<50ms)   │
-│  ├── WS /stream → live request events (2s poll)         │
-│  ├── POST /register → whitelist + create participant    │
-│  └── POST /prompt → route prompt, deduct tokens         │
-└──────────────────────┬──────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────┐
-│                 Z.AI PROXY (:9099)                       │
-│  (already running — no changes needed)                   │
-│  LiveRouter + ShadowHook + PriceKalman                   │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│ DISPLAY LAPTOP (big screen, at venue)                        │
+│                                                              │
+│  DISPLAY NSITE (static HTML, deployed via nsyte)             │
+│                                                              │
+│  ┌──────────────┐  ┌─────────────────────────────────────┐  │
+│  │ QR CODE      │  │ SYSTEM DIAGRAM                      │  │
+│  │ (scan to     │  │ (live boxes: DQ05, proxy, relays,   │  │
+│  │  join demo)  │  │  participant phones — pulsing)      │  │
+│  └──────────────┘  └─────────────────────────────────────┘  │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ PER-KEY PRICE CHARTS (4 charts, one per key)          │  │
+│  │ Each: cost basis (solid), your price (dashed),        │  │
+│  │       margin % (filled area, right axis)              │  │
+│  └───────────────────────────────────────────────────────┘  │
+│  ┌──────────────┐ ┌──────────────┐ ┌────────────────────┐  │
+│  │ QUOTA BARS   │ │ COST METER   │ │ REQUEST FLOW       │  │
+│  │ (per key,    │ │ ($ today,    │ │ (live scrolling    │  │
+│  │  live)       │ │  ticks up)   │ │  cards, last 20)   │  │
+│  └──────────────┘ └──────────────┘ └────────────────────┘  │
+│  ┌──────────────┐ ┌──────────────────────────────────────┐ │
+│  │ DISPATCH     │ │ TOKEN ECONOMY SUMMARY               │ │
+│  │ GATE STATUS  │ │ (total participants, total prompts,  │ │
+│  │ (green/red)  │ │  average price, scarcity level)      │ │
+│  └──────────────┘ └──────────────────────────────────────┘ │
+│                                                              │
+│  JS ENGINE: nostr-tools, persistent relay connections       │
+│  POLLING: get_snapshot via CVM every 5s (reuses open WS)    │
+└───────────────────────┬─────────────────────────────────────┘
+                        │
+                        │ CVM tool calls (kind 25910 + gift wrap)
+                        │ Persistent relay WebSockets to:
+                        │   wss://nostr.mom
+                        │   wss://relay.primal.net
+                        │   wss://nos.lol
+                        │
+           ┌────────────┴────────────────────────────────────┐
+           │                                                 │
+           ▼                                                 ▼
+┌──────────────────────────────┐    ┌──────────────────────────────────┐
+│ DQ05 (Kalman machine, remote) │    │ PARTICIPANT PHONE                │
+│                               │    │ (via QR code → participant nsite) │
+│ CVM SERVER (bun + nostr-tools)│    │                                   │
+│                               │    │ PARTICIPANT NSITE                 │
+│ Tools:                        │    │                                   │
+│ • get_snapshot → all data     │    │ ┌─────────────┐ ┌──────────────┐ │
+│ • send_prompt → route prompt  │◄───┼─│ NIP07/nsec  │ │ TOKEN        │ │
+│ • register_participant        │    │ │ bunker login│ │ BALANCE      │ │
+│ • get_ledger                  │    │ └─────────────┘ └──────────────┘ │
+│ • get_price_history           │    │ ┌──────────────────────────────┐ │
+│ • get_whitelist               │    │ │ PROMPT INPUT                 │ │
+│                               │    │ │ "Type a prompt..."           │ │
+│ Reads from:                   │    │ │ [Send] → CVM send_prompt     │ │
+│ • zai_usage.db (direct local) │    │ └──────────────────────────────┘ │
+│ • /proc                       │    │ ┌──────────────────────────────┐ │
+│ • proxy /quota                │    │ │ YOUR SPEND                   │ │
+│ • proxy /dispatch_gate        │    │ │ (tokens used, cost, prompts) │ │
+│ • kalman_price_state.json     │    │ └──────────────────────────────┘ │
+│                               │    │                                   │
+│ Manages:                      │    │ JS: nostr-tools, persistent       │
+│ • demo_ledger table           │    │ relay connection                  │
+│ • demo-whitelist.json         │    │ CVM calls reuse open WebSocket    │
+│ • Scarcity factor calc        │    │                                   │
+│                               │    │                                   │
+│ PROXY (:9099)                 │    │                                   │
+│ Kalman + LiveRouter + z.ai    │    │                                   │
+└───────────────────────────────┘    └──────────────────────────────────┘
 ```
 
 ---
 
-## OPTION A: LOCAL DASHBOARD (MUST-HAVE)
+## DATA FLOW — ALL VIA CVM
 
-### Task A1: Dashboard Server (worker-merchant, glm-5.2)
+### Display Dashboard Refresh (every 5s)
+1. Display nsite JS calls CVM `get_snapshot` tool
+2. DQ05 CVM server reads DB locally, returns JSON snapshot
+3. Browser receives response on persistent relay WebSocket
+4. With persistent connections: ~2-3s per call (vs 5-10s cold)
 
-**Scope:** Node.js HTTP + WebSocket server on localhost:3001
+### Participant Sends Prompt
+1. Participant nsite JS calls CVM `send_prompt` with {prompt, npub}
+2. DQ05 CVM server:
+   a. Checks whitelist
+   b. Checks token balance
+   c. Routes through proxy localhost:9099
+   d. Deducts tokens at current scarcity-adjusted price
+   e. Returns {response, provider, model, cost, tokens, new_balance}
+3. Browser receives response, shows it + updates balance
+4. Next display dashboard refresh picks up the new routing decision
 
-**Deliverables:**
-- `src/dashboard-server.mjs` — serves HTML + API + WebSocket
-- `GET /api/snapshot` returns single JSON with:
-  - Live quota status per key (from proxy /quota)
-  - Recent routing decisions (last 50 from zai_usage.db)
-  - Provider distribution (last 1h aggregate)
-  - Kalman converged rates per provider (from kalman_price_state.json)
-  - Per-key pricing: cost_basis, your_price, margin_pct, effective_rate
-  - System stats (from /proc)
-  - Scarcity factor (from dispatch gate endpoint)
-  - Cost today / total (from daily_spend table)
-- `POST /prompt` — accepts {prompt, requester_npub}, routes through proxy, returns {provider, model, cost, tokens, price_per_m}
-- `WS /stream` — pushes new routing events as they arrive (poll DB every 2s)
-- Demo ledger stored in new SQLite table `demo_ledger`
+### Participant Registration
+1. Participant nsite JS calls CVM `register_participant` with {npub}
+2. DQ05 CVM server checks whitelist, creates participant with 50K tokens
+3. Returns {balance, welcome message}
 
-**Quality Gates:**
-- [ ] Server starts without errors on localhost:3001
-- [ ] /api/snapshot returns valid JSON in <50ms
-- [ ] POST /prompt routes through proxy and returns provider/model/cost
-- [ ] WS /stream pushes events within 3s of DB insert
-- [ ] Cold review (Gate 2.5)
-
-### Task A2: Dashboard HTML + Charts (worker-merchant, glm-5.2)
-
-**Scope:** Single-page dark-themed dashboard with live charts
-
-**Deliverables:**
-- `public/index.html` — self-contained, local Plotly.js (downloaded, not CDN — works offline), dark theme
-- Layout: responsive grid, works on phone (Bootstrap or simple CSS grid)
-
-**Panels:**
-
-**Panel 1: Per-Key Price Charts (PRIORITY)**
-- ONE separate chart per key (ours, friend, ollama_cloud, ppq)
-- Each chart shows 3 lines over time:
-  - Cost basis (what Felix pays upstream): solid line
-  - Your price (what you charge, with margin): dashed line
-  - Margin % (right axis): filled area
-- X-axis: last 24h (historical) + live updates
-- Y-axis: $/M tokens
-- This makes the economic story visible: "Here's what I pay, here's what I charge, here's my margin"
-
-**Panel 2: Token Economy (MAIN DEMO FOCUS)**
-- Registration form: npub input + "Join" button
-- Current participant list with balances
-- Prompt input: text field + "Send" button (shows cost preview at current price)
-- Leaderboard: who sent most prompts, who spent most tokens
-- Live balance display for logged-in participant
-- "Token price" indicator: current $/M tokens, updated live as demand shifts
-
-**Panel 3: Quota Bars**
-- Two bars (ours + friend key), animated fill
-- Color: green (<50%) → yellow (50-80%) → red (>80%)
-- Shows: exact %, tokens remaining, time to reset
-
-**Panel 4: Request Flow (live stream)**
-- Vertical scrolling cards, newest on top
-- Each card: timestamp, requester (if demo), provider, model, tokens, cost, reason
-- Last 20 visible, older scroll away
-
-**Panel 5: Provider Distribution**
-- Donut chart, last 1h
-- ours vs friend vs ollama vs ppq vs openrouter
-- Updates every 10s
-
-**Panel 6: Cost Meter**
-- Big number: total $ spent today
-- Subtext: $/hour burn rate
-- Ticks up live with each request
-
-**Panel 7: Dispatch Gate Status**
-- Visual indicator: green light (can dispatch) or red light (hold)
-- Shows: safety_margin, recommended_model, reason
-
-**Quality Gates:**
-- [ ] All 7 panels render correctly on first load
-- [ ] Per-key price charts show correct 3 lines (cost/price/margin)
-- [ ] Token economy: register → send prompt → balance updates → price responds
-- [ ] Data refreshes every 5s without page reload
-- [ ] Works on phone screen (responsive)
-- [ ] Plotly.js loaded locally (offline-capable)
-- [ ] Cold review (Gate 2.5)
-
-### Task A3: Token Economy + Access Control (worker-merchant, glm-5.2)
-
-**Scope:** The core demo mechanic — npub-gated participants with token budgets
-
-**Deliverables:**
-- `src/token-ledger.mjs` — participant management
-
-**Access control:**
-- `POST /register` — accepts {npub}
-  - Checks npub against whitelist file (`demo-whitelist.json`)
-  - If whitelisted: creates participant with starting balance (configurable, default 50,000 tokens)
-  - If not whitelisted: returns error "not authorized for this demo"
-  - Prevents re-registration (one balance per npub)
-
-- Whitelist management:
-  - `demo-whitelist.json` — array of npubs allowed to participate
-  - `POST /admin/whitelist` — add npub to whitelist (password protected)
-  - Felix pre-loads whitelist before demo or adds people live during demo
-
-**Token economy:**
-- Each prompt deducts: `token_cost = estimated_tokens × current_price_per_token`
-- Current price derived from: Kalman base rate × scarcity_factor
-- Scarcity factor ramps as aggregate demo consumption increases:
-  - <20% of total demo budget consumed: scarcity = 1.0x
-  - 20-40%: scarcity = 1.2x
-  - 40-60%: scarcity = 1.5x
-  - 60-80%: scarcity = 1.8x
-  - >80%: scarcity = 2.0x
-- Insufficient balance → returns error "insufficient tokens"
-- `GET /ledger` — returns all participants sorted by spend
-- `POST /reset` — clears all participants (demo restart)
-
-**Quality Gates:**
-- [ ] Whitelist correctly rejects non-whitelisted npubs
-- [ ] Register creates participant with correct starting balance
-- [ ] Prompt deducts correct token amount at current scarcity-adjusted price
-- [ ] Scarcity factor visibly increases as more prompts sent (chart shows this)
-- [ ] Insufficient balance correctly refused
-- [ ] Cold review (Gate 2.5)
-
-### Task A4: Integration Test + Demo Polish (worker-inspector, glm-5.2)
-
-**Scope:** End-to-end verification + demo readiness
-
-**Deliverables:**
-- Verify full flow: whitelist npub → register → send prompt → see in request flow → see cost → see quota drop → see price tick up → see balance drain
-- Test from phone (shared URL via local network or Tailscale)
-- Performance test: ensure <100ms API response, <5s prompt round-trip
-- Edge cases:
-  - What if proxy down? (graceful error in UI)
-  - What if quota exhausted mid-demo? (price maxes out, prompts still route to flat-rate)
-  - What if someone spams prompts? (rate limit: 1 prompt per 5s per npub)
-- Demo script: 2-minute talking points for Felix
-- Plotly.js downloaded locally for offline reliability
-
-**Quality Gates:**
-- [ ] Full demo flow works end-to-end from phone
-- [ ] Per-key price charts show correct data
-- [ ] Scarcity ramp visible when sending multiple prompts in sequence
-- [ ] Rate limiting works
-- [ ] Graceful error handling for proxy down
-- [ ] Demo script written
-- [ ] Cold review (Gate 2.5)
+### Whitelist Management
+1. Felix calls CVM `add_to_whitelist` with {npub, admin_sig} (or edits file directly on DQ05)
+2. Or: whitelist published as NIP-78 event from DQ05, participant nsite checks before showing form
 
 ---
 
-## OPTION B: VPS ROUTER NODE (STRETCH — ONLY AFTER FELIX APPROVES A)
+## CVM TOOL SPECIFICATION
 
-**Gate:** Option A must be demo-ready AND Felix has personally tested it and deemed it ready. Only then start B.
+All tools on DQ05 CVM server, addressed by Nostr npub:
 
-### Task B1: VPS Provisioning (worker-admin, glm-5.2)
-- Provision VPS
-- Install Node.js 22
-- Setup Tailscale for access
-- Copy dashboard server
+### get_snapshot
+Returns everything the display dashboard needs in one call:
+```
+{
+  quota: { ours: {used_pct, locked, resets_at}, friend: {...} },
+  pricing: { ours: {cost_basis, your_price, margin_pct}, friend: {...}, ollama: {...} },
+  cost_today: 12.34,
+  cost_hour: 0.56,
+  routing_decisions: [last 20: {ts, provider, model, tokens, cost, reason}],
+  provider_dist: { ours: 45, friend: 30, ollama: 25 },
+  dispatch_gate: { can_dispatch: true, safety_margin: 4.0, reason: "ok" },
+  scarcity: { factor: 1.5, level: "moderate", budget_used_pct: 55 },
+  system: { cpu: 12, mem: 34, uptime: "5d" },
+  participants: { count: 8, total_prompts: 42, total_tokens: 125000 },
+  ledger: [top 10: {npub_short, balance, prompts_sent, tokens_spent}]
+}
+```
 
-### Task B2: Cashu Mint + Token Gateway (worker-merchant, glm-5.2)
-- Setup Cashu mint on VPS
-- Wrap proxy endpoint with Cashu verification
-- Each API request requires valid ecash token
-- Token amount = current Kalman price × estimated tokens
-- Mint verifies + burns token, forwards request, returns response
-- Dashboard shows Cashu payments in the ledger
+### send_prompt
+Input: { prompt: string, npub: string }
+Output:
+```
+{
+  response: "generated text...",
+  provider: "ours",
+  model: "glm-5.2",
+  tokens_used: 150,
+  cost_usd: 0.002,
+  price_per_m: 14.50,
+  token_cost: 150,
+  new_balance: 48500,
+  scarcity_factor: 1.5
+}
+```
 
-### Task B3: Public Dashboard + Pricing Feed (worker-merchant, glm-5.2)
-- Deploy dashboard on VPS (accessible URL)
-- NIP-78 events publishing live pricing data (public,任何人 can subscribe)
-- Historic price chart from NIP-78 data
-- CVM server running underneath (invisible, mentioned verbally)
+### register_participant
+Input: { npub: string }
+Output: { success: true, balance: 50000, message: "Welcome to the demo!" }
+Error: { success: false, error: "npub not whitelisted" }
 
-### Task B4: Integration + Demo (worker-inspector, glm-5.2)
-- End-to-end: pay Cashu → get tokens → send prompt → see response
-- Verify from separate machine
-- Performance test
-- Fallback: if B fails, use A
+### get_price_history
+Input: { hours: 24 }
+Output: [ { ts, key, cost_basis, your_price, margin_pct } ]
+
+### get_ledger
+Output: [ { npub_short, balance, prompts_sent, tokens_spent, joined_at } ]
+
+---
+
+## NSITE PAGES
+
+### 1. Display Nsite (display.nsite.lol/...)
+The big screen page. Shows:
+- QR code (encodes participant nsite URL)
+- System diagram (live, animated)
+- Per-key price charts (4 Plotly charts)
+- Quota bars
+- Cost meter
+- Request flow stream
+- Dispatch gate status
+- Token economy summary
+
+Refresh: polls `get_snapshot` via CVM every 5s. Persistent relay connection.
+
+### 2. Participant Nsite (participant.nsite.lol/...)
+The phone page. Shows:
+- Login (NIP07 browser extension or nsec bunker scan)
+- Token balance (live)
+- Prompt input + send button
+- Your spend stats (prompts sent, tokens used, avg cost)
+- Current token price
+
+Refresh: polls `get_snapshot` for balance/price every 5s. Sends prompts via `send_prompt`.
+
+### QR Code Flow
+1. Display page shows QR encoding participant nsite URL
+2. Participant scans → opens browser → loads participant nsite
+3. Nsite asks for Nostr login (NIP07 or nsec bunker)
+4. Nsite calls `register_participant` via CVM
+5. If whitelisted → shows token balance + prompt form
+6. If not whitelisted → "contact Felix to join"
+
+---
+
+## TASKS
+
+### Task A1: CVM Server on DQ05 (worker-merchant, glm-5.2)
+
+**Scope:** bun + nostr-tools CVM server exposing 5 tools
+**Location:** ~/merchant-routing-engine/demo/cvm-server/ on DQ05
+
+**Deliverables:**
+- `src/cvm-server.ts` — direct nostr-tools implementation (NOT @contextvm/sdk — it hangs per skill pitfalls)
+- 5 tools: get_snapshot, send_prompt, register_participant, get_price_history, get_ledger
+- get_snapshot reads zai_usage.db directly (server-side, local on DQ05)
+- send_prompt routes through proxy localhost:9099, deducts tokens
+- Token ledger in demo/demo_ledger.db (SQLite)
+- Whitelist in demo/demo-whitelist.json
+- Scarcity factor calculation
+- Rate limiting: 1 prompt per 5s per npub
+- Persistent Nostr key for server (generate once, store in demo/cvm-server-key.json)
+- Relays: nostr.mom, relay.primal.net, nos.lol
+
+**Critical pitfalls (from contextvm skill):**
+- Use `bun src/cvm-server.ts` NOT `bun run src/cvm-server.ts`
+- Client and server MUST use different Nostr keys
+- `#p` tag filter doesn't work on some relays for kind 1059 — use broad filter + client-side filtering
+- Key file truncation: verify 64 hex chars + newline
+- nostr-tools direct implementation, NOT SDK transport
+
+**Quality Gates:**
+- [ ] Server starts and subscribes on 3 relays
+- [ ] `cvmi call <npub> tool:get_snapshot` returns valid JSON
+- [ ] `cvmi call <npub> tool:send_prompt prompt="hi"` routes and returns
+- [ ] `cvmi call <npub> tool:register_participant` creates participant
+- [ ] Whitelist correctly rejects non-whitelisted npubs
+- [ ] Rate limiting works
+- [ ] Atomic commit + push
+- [ ] Cold review (Gate 2.5)
+
+### Task A2: Display Nsite HTML (worker-merchant, glm-5.2)
+
+**Scope:** Static HTML page deployed via nsyte, CVM browser client
+
+**Deliverables:**
+- `display/index.html` — self-contained, dark theme
+- Plotly.js downloaded locally (bundled in nsite)
+- nostr-tools bundled (minified, in-page or separate JS file)
+- CVM browser client (direct nostr-tools, per references/browser-cvm-client.md):
+  - Generate/derive client Nostr key (ephemeral per session)
+  - Connect to 3 relays with persistent WebSocket
+  - Gift-wrap requests, subscribe for responses
+  - Correlate request/response
+- Polls get_snapshot every 5s via CVM
+- **Panel 1: QR Code** — generates QR for participant nsite URL
+- **Panel 2: System Diagram** — animated boxes showing DQ05, proxy, relays, participants. Pulsing when active.
+- **Panel 3: Per-Key Price Charts** — 4 Plotly charts (ours, friend, ollama, ppq), each 3 lines (cost, price, margin)
+- **Panel 4: Quota Bars** — animated, green→red
+- **Panel 5: Cost Meter** — big number, ticks up
+- **Panel 6: Request Flow** — scrolling cards, last 20
+- **Panel 7: Dispatch Gate** — green/red indicator
+- **Panel 8: Token Economy Summary** — participant count, total prompts, avg price, scarcity
+
+**Quality Gates:**
+- [ ] All 8 panels render on first load
+- [ ] CVM get_snapshot call works from browser (persistent relay connection)
+- [ ] Per-key charts show correct 3 lines
+- [ ] QR code generates correctly
+- [ ] Data refreshes every 5s
+- [ ] Works offline (Plotly bundled, nostr-tools bundled)
+- [ ] Cold review (Gate 2.5)
+
+### Task A3: Participant Nsite HTML (worker-merchant, glm-5.2)
+
+**Scope:** Phone-optimized static HTML page for audience participation
+
+**Deliverables:**
+- `participant/index.html` — phone-first, dark theme
+- Same CVM browser client as A2 (shared JS)
+- **NIP07 login** — checks window.nostr object (Alby, etc)
+- **nsec bunker fallback** — QR code scan or manual npub entry
+- **Token Balance** — live, updates after each prompt
+- **Prompt Input** — text field + Send button, shows cost preview at current price
+- **Your Spend** — prompts sent, tokens used, avg cost, member since
+- **Current Price** — $/M tokens indicator, updates live
+- Calls send_prompt via CVM, shows response inline
+- Calls get_snapshot for balance/price refresh (every 5s)
+
+**Quality Gates:**
+- [ ] NIP07 login works (or npub manual entry)
+- [ ] register_participant creates account
+- [ ] send_prompt routes and shows response
+- [ ] Balance updates after prompt
+- [ ] Cost preview shows before sending
+- [ ] Phone-responsive
+- [ ] Cold review (Gate 2.5)
+
+### Task A4: Integration + Nsite Deploy + Polish (worker-inspector, glm-5.2)
+
+**Depends on:** A1+A2+A3
+
+**Scope:** Deploy nsites, test E2E, write demo script
+
+**Deliverables:**
+- Deploy display + participant nsites via nsyte
+- Test full flow: scan QR → login → register → send prompt → see on display
+- Test from phone (real device)
+- Performance: measure CVM round-trip with persistent connections
+- Edge cases: relay down (retry), DQ05 unreachable (error message), spam (rate limit)
+- Demo script: 2-minute talking points
+- Whitelist pre-loaded with test npubs
+
+**Quality Gates:**
+- [ ] Full demo flow works E2E (phone → QR → login → prompt → display)
+- [ ] Display dashboard updates within 10s of prompt
+- [ ] Participant balance updates within 10s
+- [ ] Per-key charts show correct data
+- [ ] Scarcity ramp visible
+- [ ] Graceful errors
+- [ ] Demo script written
+- [ ] Cold review (Gate 2.5)
 
 ---
 
@@ -261,46 +328,43 @@ A web dashboard (big screen + accessible on phones). They register with their np
 
 ```
 Phase 1 (Option A — parallel):
-  A1 (server)  ──┐
-  A2 (html+charts) ──┤
-  A3 (token econ) ──┼── A4 (integration + polish) ── FELIX APPROVAL GATE
-  A4 depends on A1+A2+A3          ↑
-                         Option A demo-ready
+  A1 (CVM server on DQ05)  ──┐
+  A2 (display nsite HTML)  ──┼── A4 (integration + deploy) ── FELIX APPROVAL
+  A3 (participant nsite)   ──┘
 
-Phase 2 (Option B — sequential, ONLY after Felix approves A):
-  B1 → B2 → B3 → B4
+A1+A2+A3 dispatched in parallel.
+A2+A3 can mock CVM calls during development (A1 provides real endpoint).
+A4 waits for all three.
 ```
 
-A1+A2+A3 dispatched in parallel. A4 waits for all three.
-
-**Estimated time:**
-- Phase 1: 3-4 hours (parallel dispatch)
-- Phase 2: 3-4 hours (sequential, only if approved)
+**Estimated time:** 4-6 hours
 
 ---
 
-## TECH DECISIONS
+## OPTION B: VPS ROUTER NODE (STRETCH)
 
-1. **Node.js 22 + node:sqlite** — standard runtime, built-in SQLite, no compile issues
-2. **Plotly.js downloaded locally** — works offline at venue (no CDN dependency)
-3. **Direct SQLite read for dashboard** — dashboard server on same machine as DB, reads file directly (<50ms). No Nostr round-trips needed for dashboard data. CVM runs underneath but is invisible to audience.
-4. **Access via npub whitelist** — only authorized npubs can participate. Prevents resource waste.
-5. **Rate limiting** — 1 prompt per 5s per npub to prevent spam
-6. **CVM invisible** — audience never sees cvmi or CVM internals. Felix mentions ContextVM/Nostr verbally as the transport layer if asked.
+**Gate:** Option A demo-ready AND Felix personally tested + approved.
+
+Same as v2 plan — Cashu mint on VPS, real ecash payments for API access.
+
+---
 
 ## DEMO NARRATIVE (for Felix)
 
-1. "This is my API gateway. Every request routes through it." → show request flow
-2. "The Kalman filter learns real costs per provider and prices accordingly." → show per-key price charts
-3. "Here's my cost basis, my price, and my margin per key." → point to the 3 lines on each chart
-4. "You can participate — register your npub and send a prompt." → audience joins, sends prompts
-5. "Watch what happens to the price as demand increases." → scarcity factor ramps, price ticks up
-6. "This isn't slides. These are real API calls, real money, real routing decisions." → cost meter climbing
-7. (If asked about architecture): "The whole thing runs over Nostr. My infrastructure is addressable by public key, not IP."
+1. "This is my infrastructure. It runs in a different location, reachable only via Nostr." → show system diagram, point to DQ05 box
+2. "Scan this QR code to join." → audience scans, opens participant page on phone
+3. "Log in with your Nostr identity." → NIP07/nsec bunker
+4. "You now have 50,000 tokens. Send a prompt." → audience types, hits send
+5. "Watch the request flow through the system." → display shows routing decision
+6. "Watch the price respond to demand." → as more people send prompts, scarcity ramps, price ticks up
+7. "Here's my cost basis, my price, and my margin per provider." → per-key charts
+8. "This isn't slides. These are real API calls, real money, routing through Nostr-addressed infrastructure." → cost meter climbing
 
 ## RISKS
 
-1. **z.ai quota exhaustion mid-demo** — mitigated: npub whitelist + limited budget + rate limiting
-2. **Proxy crash** — mitigated: restart script ready, dashboard shows graceful error
-3. **Venue network down** — mitigated: Plotly local, phone hotspot backup, dashboard works on LAN
-4. **Random strangers** — mitigated: npub whitelist, no open registration
+1. **Relay latency** — mitigated: 3 relays, persistent connections, measure during A4
+2. **DQ05 unreachable** — mitigated: graceful error, mention this is why decentralization matters
+3. **Venue network** — mitigated: everything over Nostr relays (public internet), phone hotspot backup
+4. **NIP07 not available** — mitigated: npub manual entry fallback
+5. **Quota exhaustion** — mitigated: whitelist + budget + rate limiting
+6. **CVM protocol bugs** — mitigated: direct nostr-tools (proven pattern from skill), A4 cold review
