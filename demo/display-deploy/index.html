@@ -7,6 +7,7 @@
 <!-- Offline-bundled vendor libs (no CDN) -->
 <script src="vendor/plotly-2.35.2.min.js"></script>
 <script src="vendor/qrcode.min.js"></script>
+<script src="vendor/nostr-tools.min.js"></script>
 <style>
 /* ════════════════════════════════════════════════════════════════════════
    DARK THEME + RESPONSIVE GRID
@@ -372,8 +373,15 @@ body{
 /* ════════════════════════════════════════════════════════════════════════
    CONFIG — all data fetched from CVM server HTTP endpoint (real proxy data)
    ════════════════════════════════════════════════════════════════════════ */
-// CVM server HTTP API — same host as the display, port 3000
+// CVM server HTTP API — only used when ?api=<url> is given (local testing).
+// In production (nsite) the display reads snapshots over Nostr instead.
 const API_BASE = (param('api') || `http://${location.hostname}:3000`).replace(/\/$/,'');
+// Nostr-native transport: the CVM broadcasts its current snapshot as a
+// replaceable kind-30315 event. With no ?api= override the display reads it
+// straight from the relays — works from any nsite gateway, no localhost.
+const CVM_NPUB_HEX = '10814a5dc07e3e876867ffb9e8781af47fa599b677fb27e051f6b5261c1d4f35';
+const CVM_RELAYS = ['wss://relay.primal.net','wss://nos.lol','wss://nostr.mom'];
+const USE_NOSTR = !param('api');   // ?api=<url> forces the local HTTP-testing path
 // Participant nsite URL for the QR code
 const DEFAULT_PARTICIPANT_URL = 'https://npub13h0eushvdzdrygm545zr5zxr3qvk7zaqhrzyyepprflcjdu3u0yskxz53m.nsite.lol';
 
@@ -497,7 +505,7 @@ function updateMiniCharts(){
     Plotly.react('mc-'+k,[
       {x:h.map(p=>p.t*1000),y:h.map(p=>p.cost_basis),mode:'lines',line:{color:'#58a6ff',width:2}},
       {x:h.map(p=>p.t*1000),y:h.map(p=>p.your_price),mode:'lines',line:{color:'#39d2c0',width:2,dash:'dash'}},
-      {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)'}},
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)'},
     ],document.getElementById('mc-'+k).layout,{displayModeBar:false,responsive:true});
     const el=document.getElementById('mc-price-'+k);
     if(el) el.textContent=fmt$(last.your_price,3)+'/M · '+last.margin_pct.toFixed(0)+'%';
@@ -671,14 +679,41 @@ function renderAll(){
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   POLL LOOP — fetches real data from CVM server HTTP endpoint
+   SNAPSHOT FETCH — Nostr-native (production) with HTTP fallback (?api=)
    ════════════════════════════════════════════════════════════════════════ */
+let nostrPool = null;
+
+/* Reads the CVM's latest snapshot from its public kind-30315 replaceable
+   broadcast over Nostr relays. Same transport the participant app uses, so the
+   display works from any nsite gateway with no localhost dependency. */
+async function fetchSnapshotNostr(){
+  const N = window.NostrTools;
+  if(!N || !N.SimplePool) throw new Error('nostr-tools not loaded');
+  if(!nostrPool) nostrPool = new N.SimplePool();
+  // querySync resolves at EOSE; race against a timeout so a slow/unreachable
+  // relay set can never hang the poll loop indefinitely.
+  const events = await Promise.race([
+    nostrPool.querySync(CVM_RELAYS, { kinds:[30315], authors:[CVM_NPUB_HEX], limit:1 }),
+    new Promise<never>((_, rej) => setTimeout(() => rej(new Error('nostr query timeout')), 8000)),
+  ]);
+  if(!events || !events.length) return null;
+  // Most recent by created_at (defensive — limit:1 normally suffices).
+  const evt = events.reduce((a, b) => (a.created_at >= b.created_at ? a : b));
+  return JSON.parse(evt.content);
+}
+
 async function poll(){
   try{
     setConn('connecting');
-    const resp = await fetch(`${API_BASE}/snapshot`, {signal: AbortSignal.timeout(8000)});
-    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const raw = await resp.json();
+    let raw;
+    if(USE_NOSTR){
+      raw = await fetchSnapshotNostr();
+    } else {
+      const resp = await fetch(`${API_BASE}/snapshot`, {signal: AbortSignal.timeout(8000)});
+      if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      raw = await resp.json();
+    }
+    if(!raw) throw new Error('no snapshot data');
     const snap = normalizeSnapshot(raw);
     if(!snap) throw new Error('invalid snapshot');
     state.snapshot = snap;
@@ -704,24 +739,27 @@ async function init(){
   initMiniCharts();               // Panel 3 charts
   tickClock(); setInterval(tickClock,1000);
   setConn('connecting');
-  // Fetch price history for chart seeding, then start polling
-  try {
-    const phResp = await fetch(`${API_BASE}/price-history?hours=24`);
-    if (phResp.ok) {
-      const ph = await phResp.json();
-      if (ph && ph.points) {
-        // Group by key
-        const byKey = {};
-        for (const pt of ph.points) {
-          if (!byKey[pt.key]) byKey[pt.key] = [];
-          byKey[pt.key].push({t: pt.ts, cost_basis: pt.cost_basis, your_price: pt.your_price, margin_pct: pt.margin_pct});
-        }
-        for (const k of KEYS) {
-          if (byKey[k]) state.priceHist[k] = byKey[k].slice(-HIST_MAX);
+  // Seed price-history charts (HTTP-testing path only; in Nostr mode history
+  // accrues live from snapshots, so no localhost fetch is made).
+  if(!USE_NOSTR){
+    try {
+      const phResp = await fetch(`${API_BASE}/price-history?hours=24`);
+      if (phResp.ok) {
+        const ph = await phResp.json();
+        if (ph && ph.points) {
+          // Group by key
+          const byKey = {};
+          for (const pt of ph.points) {
+            if (!byKey[pt.key]) byKey[pt.key] = [];
+            byKey[pt.key].push({t: pt.ts, cost_basis: pt.cost_basis, your_price: pt.your_price, margin_pct: pt.margin_pct});
+          }
+          for (const k of KEYS) {
+            if (byKey[k]) state.priceHist[k] = byKey[k].slice(-HIST_MAX);
+          }
         }
       }
-    }
-  } catch(e) { console.warn('Price history fetch failed (non-fatal):', e.message); }
+    } catch(e) { console.warn('Price history fetch failed (non-fatal):', e.message); }
+  }
   await poll();
   setInterval(poll, POLL_MS);
 }
