@@ -1,0 +1,1290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kalman Routing Engine — Architecture</title>
+<script src="vendor/plotly-2.35.2.min.js"></script>
+<style>
+/* ════════════════════════════════════════════════════════════════════════
+   DARK THEME — matches display-deploy dashboard
+   ════════════════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#0a0e14; --bg2:#0d1117; --card:#131820; --card2:#161b22;
+  --border:#21262d; --border2:#30363d;
+  --txt:#c9d1d9; --txt-dim:#8b949e; --txt-bright:#f0f6fc;
+  --blue:#58a6ff; --green:#3fb950; --red:#f85149; --yellow:#d29922;
+  --purple:#bc8cff; --cyan:#39d2c0; --orange:#f0883e;
+  --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  background:var(--bg);color:var(--txt);font-family:var(--sans);
+  font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased;
+}
+
+/* ── hero ── */
+.hero{
+  padding:60px 24px 48px;text-align:center;
+  background:radial-gradient(ellipse at 50% 0%,rgba(57,210,192,.08),transparent 60%),
+             radial-gradient(ellipse at 80% 30%,rgba(88,166,255,.06),transparent 50%);
+  border-bottom:1px solid var(--border);
+}
+.hero .kicker{
+  font-family:var(--mono);font-size:12px;color:var(--cyan);letter-spacing:2px;
+  text-transform:uppercase;margin-bottom:14px;
+}
+.hero h1{
+  font-size:clamp(28px,5vw,46px);font-weight:700;color:var(--txt-bright);
+  letter-spacing:-1px;line-height:1.15;margin-bottom:16px;
+}
+.hero h1 .grad{
+  background:linear-gradient(135deg,var(--cyan),var(--blue));
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+}
+.hero .lede{
+  max-width:680px;margin:0 auto;font-size:16px;color:var(--txt-dim);line-height:1.7;
+}
+.hero .stats{
+  display:flex;justify-content:center;gap:32px;margin-top:36px;flex-wrap:wrap;
+}
+.hero .stat{text-align:center}
+.hero .stat .v{font-family:var(--mono);font-size:28px;font-weight:700;color:var(--cyan)}
+.hero .stat .l{font-size:11px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:.8px;margin-top:4px}
+
+/* ── nav ── */
+.nav{
+  position:sticky;top:0;z-index:50;background:rgba(13,17,23,.92);backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--border);display:flex;justify-content:center;
+  gap:4px;padding:0 16px;flex-wrap:wrap;
+}
+.nav a{
+  font-family:var(--mono);font-size:12px;color:var(--txt-dim);text-decoration:none;
+  padding:12px 14px;border-bottom:2px solid transparent;transition:color .2s,border-color .2s;
+  white-space:nowrap;
+}
+.nav a:hover{color:var(--cyan)}
+.nav a.active{color:var(--cyan);border-bottom-color:var(--cyan)}
+
+/* ── sections ── */
+.section{
+  max-width:1200px;margin:0 auto;padding:56px 24px;
+}
+.section-header{margin-bottom:32px}
+.section-num{
+  font-family:var(--mono);font-size:12px;color:var(--cyan);letter-spacing:1px;
+  display:block;margin-bottom:8px;
+}
+.section-title{
+  font-size:clamp(22px,3.5vw,30px);font-weight:700;color:var(--txt-bright);
+  letter-spacing:-.5px;margin-bottom:10px;
+}
+.section-desc{font-size:15px;color:var(--txt-dim);max-width:720px}
+
+/* ── cards / panels ── */
+.panel{
+  background:var(--card);border:1px solid var(--border);border-radius:12px;
+  padding:24px;margin-bottom:20px;
+}
+.panel-title{
+  font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;
+  color:var(--txt-dim);margin-bottom:16px;display:flex;align-items:center;gap:8px;
+}
+.panel-title .tag{
+  font-family:var(--mono);font-size:10px;padding:2px 7px;border-radius:4px;
+  background:var(--border);color:var(--cyan);text-transform:none;letter-spacing:0;
+}
+
+/* ── svg containers ── */
+.svg-wrap{
+  width:100%;overflow-x:auto;overflow-y:hidden;border-radius:8px;
+  background:var(--bg2);border:1px solid var(--border);padding:8px;
+}
+.svg-wrap svg{display:block;margin:0 auto;max-width:100%;height:auto}
+
+/* ── grid layouts ── */
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}
+@media(max-width:900px){
+  .grid-2,.grid-3{grid-template-columns:1fr}
+}
+
+/* ── data tables ── */
+.dtable{width:100%;border-collapse:collapse;font-size:13px}
+.dtable th{
+  text-align:left;font-family:var(--mono);font-size:11px;text-transform:uppercase;
+  letter-spacing:.5px;color:var(--txt-dim);padding:10px 12px;
+  border-bottom:1px solid var(--border2);
+}
+.dtable td{padding:10px 12px;border-bottom:1px solid var(--border);font-family:var(--mono)}
+.dtable tr:last-child td{border-bottom:none}
+.dtable .num{text-align:right}
+.dtable .hi{color:var(--cyan);font-weight:600}
+.dtable .pos{color:var(--green)}
+.dtable .neg{color:var(--red)}
+
+/* ── formula box ── */
+.formula{
+  font-family:var(--mono);font-size:16px;text-align:center;
+  padding:24px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;
+  margin:16px 0;line-height:2;
+}
+.formula .var{font-weight:700}
+.formula .v-base{color:var(--cyan)}
+.formula .v-peak{color:var(--orange)}
+.formula .v-scar{color:var(--yellow)}
+.formula .v-health{color:var(--red)}
+.formula .v-pace{color:var(--purple)}
+.formula .op{color:var(--txt-dim);margin:0 4px}
+
+/* ── multiplier cards ── */
+.mult-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-top:16px}
+.mult-card{
+  background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:16px;
+  border-left:3px solid var(--border2);
+}
+.mult-card.base{border-left-color:var(--cyan)}
+.mult-card.peak{border-left-color:var(--orange)}
+.mult-card.scar{border-left-color:var(--yellow)}
+.mult-card.health{border-left-color:var(--red)}
+.mult-card.pace{border-left-color:var(--purple)}
+.mult-card .mc-name{font-family:var(--mono);font-size:13px;font-weight:600;margin-bottom:4px}
+.mult-card.base .mc-name{color:var(--cyan)}
+.mult-card.peak .mc-name{color:var(--orange)}
+.mult-card.scar .mc-name{color:var(--yellow)}
+.mult-card.health .mc-name{color:var(--red)}
+.mult-card.pace .mc-name{color:var(--purple)}
+.mult-card .mc-range{font-family:var(--mono);font-size:11px;color:var(--txt-dim);margin-bottom:8px}
+.mult-card .mc-desc{font-size:12px;color:var(--txt-dim);line-height:1.5}
+
+/* ── health scale ── */
+.health-scale{display:flex;gap:2px;margin:16px 0}
+.health-seg{
+  flex:1;padding:14px 8px;text-align:center;border-radius:6px;font-size:12px;
+}
+.hs-0{background:rgba(63,185,80,.15);color:var(--green)}
+.hs-1{background:rgba(210,153,34,.12);color:var(--yellow)}
+.hs-2{background:rgba(240,136,62,.15);color:var(--orange)}
+.hs-3{background:rgba(248,81,73,.12);color:var(--red)}
+.hs-4{background:rgba(248,81,73,.25);color:var(--red);font-weight:700}
+.health-seg .hs-mult{font-family:var(--mono);font-size:18px;font-weight:700;display:block}
+.health-seg .hs-fail{font-size:10px;color:var(--txt-dim);margin-top:2px}
+
+/* ── badges ── */
+.badge-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}
+.pill{
+  font-family:var(--mono);font-size:11px;padding:3px 9px;border-radius:12px;
+  border:1px solid var(--border2);
+}
+.pill.ours{border-color:var(--green);color:var(--green)}
+.pill.friend{border-color:var(--blue);color:var(--blue)}
+.pill.ollama{border-color:var(--purple);color:var(--purple)}
+.pill.ppq{border-color:var(--orange);color:var(--orange)}
+.pill.external{border-color:var(--red);color:var(--red)}
+
+/* ── callout ── */
+.callout{
+  background:rgba(57,210,192,.06);border:1px solid rgba(57,210,192,.25);border-radius:10px;
+  padding:16px 20px;margin:16px 0;font-size:14px;
+}
+.callout .co-label{font-family:var(--mono);font-size:11px;color:var(--cyan);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+
+/* ── ADR grid ── */
+.adr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.adr{
+  background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px 16px;
+}
+.adr .adr-id{font-family:var(--mono);font-size:11px;color:var(--cyan);font-weight:600;margin-bottom:4px}
+.adr .adr-title{font-size:13px;font-weight:600;color:var(--txt-bright);margin-bottom:4px}
+.adr .adr-body{font-size:12px;color:var(--txt-dim);line-height:1.5}
+
+/* ── footer ── */
+.footer{
+  border-top:1px solid var(--border);padding:40px 24px;text-align:center;
+  color:var(--txt-dim);font-size:13px;
+}
+.footer .mono{font-family:var(--mono);font-size:11px;color:var(--cyan)}
+
+/* ── animated flow dots ── */
+@keyframes dashflow{to{stroke-dashoffset:-20}}
+.flow-line{stroke-dasharray:6 4;animation:dashflow 1s linear infinite}
+@keyframes pulse-glow{0%,100%{opacity:.4}50%{opacity:1}}
+.glow-node{animation:pulse-glow 2.5s ease-in-out infinite}
+
+/* ── mobile ── */
+@media(max-width:700px){
+  .section{padding:36px 16px}
+  .hero{padding:40px 16px 32px}
+  .hero .stats{gap:20px}
+  .nav{gap:0}
+  .nav a{padding:10px 8px;font-size:11px}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ HERO ═══ -->
+<header class="hero">
+  <div class="kicker">Merchant Routing Engine · Architecture</div>
+  <h1>Kalman Filter-Based<br><span class="grad">LLM Request Router</span></h1>
+  <p class="lede">
+    A cost-minimizing reverse proxy that predicts token prices and quota exhaustion
+    using dual Kalman filter families, then routes every request to the cheapest
+    viable provider in real time. Price is the primary signal — <strong>argmin(effective_price)</strong>.
+  </p>
+  <div class="stats">
+    <div class="stat"><div class="v">$0.001</div><div class="l">Cheapest Rate /M</div></div>
+    <div class="stat"><div class="v">99.7%</div><div class="l">Savings vs Seed</div></div>
+    <div class="stat"><div class="v">527M</div><div class="l">Tokens Replayed</div></div>
+    <div class="stat"><div class="v">50,354</div><div class="l">Decisions</div></div>
+  </div>
+</header>
+
+<!-- ═══ NAV ═══ -->
+<nav class="nav" id="nav">
+  <a href="#arch">01 · System</a>
+  <a href="#kalman">02 · Kalman Filters</a>
+  <a href="#formula">03 · Effective Price</a>
+  <a href="#lifecycle">04 · Request Lifecycle</a>
+  <a href="#economics">05 · Provider Economics</a>
+  <a href="#gate">06 · Dispatch Gate</a>
+  <a href="#replay">07 · Converged Replay</a>
+  <a href="#adrs">08 · ADRs</a>
+</nav>
+
+<!-- ═══ 01: SYSTEM ARCHITECTURE ═══ -->
+<section class="section" id="arch">
+  <div class="section-header">
+    <span class="section-num">01 — SYSTEM ARCHITECTURE</span>
+    <h2 class="section-title">End-to-End Routing Pipeline</h2>
+    <p class="section-desc">
+      Every request flows from the client through a gateway into the orchestrator
+      proxy (<code>zai_proxy.py</code> at <code>localhost:9099</code>), which runs
+      a four-phase key selection, optional failover routing, pricing, and dispatch
+      gating before forwarding to the chosen provider.
+    </p>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Full Pipeline <span class="tag">client → provider → log</span></div>
+    <div class="svg-wrap">
+<svg viewBox="0 0 940 1180" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace,monospace" font-size="11">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#39d2c0"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#58a6ff"/>
+    </marker>
+    <marker id="arrow-dim" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#8b949e"/>
+    </marker>
+    <linearGradient id="grad-cyan" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/><stop offset="100%" stop-color="#131820"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Layer labels (left margin) -->
+  <text x="10" y="40" fill="#8b949e" font-size="9" letter-spacing="1">CLIENT</text>
+  <text x="10" y="120" fill="#8b949e" font-size="9" letter-spacing="1">GATEWAY</text>
+  <text x="10" y="230" fill="#8b949e" font-size="9" letter-spacing="1">PROXY</text>
+  <text x="10" y="380" fill="#8b949e" font-size="9" letter-spacing="1">KEY SELECT</text>
+  <text x="10" y="560" fill="#8b949e" font-size="9" letter-spacing="1">FAILOVER</text>
+  <text x="10" y="710" fill="#8b949e" font-size="9" letter-spacing="1">PRICING</text>
+  <text x="10" y="830" fill="#8b949e" font-size="9" letter-spacing="1">DISPATCH</text>
+  <text x="10" y="950" fill="#8b949e" font-size="9" letter-spacing="1">PROVIDERS</text>
+  <text x="10" y="1090" fill="#8b949e" font-size="9" letter-spacing="1">LOGGING</text>
+
+  <!-- ── Client ── -->
+  <rect x="360" y="20" width="220" height="50" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
+  <text x="470" y="42" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">Signal / Matrix Message</text>
+  <text x="470" y="58" text-anchor="middle" fill="#8b949e" font-size="10">client request</text>
+
+  <line x1="470" y1="70" x2="470" y2="105" stroke="#8b949e" stroke-width="1.5" class="flow-line" marker-end="url(#arrow-dim)"/>
+
+  <!-- ── Hermes Gateway ── -->
+  <rect x="330" y="105" width="280" height="55" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="470" y="128" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="600">hermes-gateway</text>
+  <text x="470" y="144" text-anchor="middle" fill="#8b949e" font-size="10">port 9098 · POST /v1/chat/completions</text>
+
+  <line x1="470" y1="160" x2="470" y2="195" stroke="#8b949e" stroke-width="1.5" class="flow-line" marker-end="url(#arrow-dim)"/>
+
+  <!-- ── zai_proxy orchestrator ── -->
+  <rect x="280" y="195" width="380" height="60" rx="8" fill="url(#grad-cyan)" stroke="#39d2c0" stroke-width="2"/>
+  <text x="470" y="220" text-anchor="middle" fill="#39d2c0" font-size="13" font-weight="700">zai_proxy.py — THE ORCHESTRATOR</text>
+  <text x="470" y="238" text-anchor="middle" fill="#8b949e" font-size="10">port 9099 · DQ05 primary, T470 secondary</text>
+
+  <!-- Side inputs to proxy -->
+  <rect x="80" y="200" width="160" height="22" rx="4" fill="#161b22" stroke="#30363d"/>
+  <text x="160" y="215" text-anchor="middle" fill="#c9d1d9" font-size="9">KEYS LOADER (ours, friend)</text>
+  <line x1="240" y1="211" x2="280" y2="218" stroke="#30363d" stroke-width="1" marker-end="url(#arrow-dim)"/>
+
+  <rect x="80" y="228" width="160" height="22" rx="4" fill="#161b22" stroke="#30363d"/>
+  <text x="160" y="243" text-anchor="middle" fill="#c9d1d9" font-size="9">HARDWARE PROBE (udevadm/ssh)</text>
+  <line x1="240" y1="239" x2="280" y2="234" stroke="#30363d" stroke-width="1" marker-end="url(#arrow-dim)"/>
+
+  <rect x="700" y="200" width="160" height="22" rx="4" fill="#161b22" stroke="#30363d"/>
+  <text x="780" y="215" text-anchor="middle" fill="#c9d1d9" font-size="9">QUOTA FETCHER (5min TTL)</text>
+  <line x1="700" y1="218" x2="660" y2="218" stroke="#30363d" stroke-width="1" marker-end="url(#arrow-dim)"/>
+
+  <rect x="700" y="228" width="160" height="22" rx="4" fill="#161b22" stroke="#30363d"/>
+  <text x="780" y="243" text-anchor="middle" fill="#c9d1d9" font-size="9">SQLite (zai_usage.db)</text>
+  <line x1="700" y1="234" x2="660" y2="234" stroke="#30363d" stroke-width="1" marker-end="url(#arrow-dim)"/>
+
+  <line x1="470" y1="255" x2="470" y2="300" stroke="#39d2c0" stroke-width="2" class="flow-line" marker-end="url(#arrow)"/>
+
+  <!-- ── best_key() 4 phases ── -->
+  <rect x="200" y="300" width="540" height="160" rx="10" fill="#131820" stroke="#30363d" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="470" y="322" text-anchor="middle" fill="#39d2c0" font-size="12" font-weight="700">STEP 1: best_key() — 4 Phases</text>
+
+  <rect x="220" y="332" width="240" height="28" rx="5" fill="#0d1117" stroke="#39d2c0" stroke-width="1"/>
+  <text x="340" y="350" text-anchor="middle" fill="#c9d1d9" font-size="10">Phase 1: Kalman burn prediction</text>
+
+  <rect x="480" y="332" width="240" height="28" rx="5" fill="#0d1117" stroke="#58a6ff" stroke-width="1"/>
+  <text x="600" y="350" text-anchor="middle" fill="#c9d1d9" font-size="10">Phase 2: Reactive lock thresholds</text>
+
+  <rect x="220" y="368" width="240" height="28" rx="5" fill="#0d1117" stroke="#3fb950" stroke-width="1"/>
+  <text x="340" y="386" text-anchor="middle" fill="#c9d1d9" font-size="10">Phase 3: Recovery of locked keys</text>
+
+  <rect x="480" y="368" width="240" height="28" rx="5" fill="#0d1117" stroke="#d29922" stroke-width="1"/>
+  <text x="600" y="386" text-anchor="middle" fill="#c9d1d9" font-size="10">Phase 4: Health + cost tie-break</text>
+
+  <rect x="350" y="410" width="240" height="34" rx="6" fill="#0a0e14" stroke="#39d2c0" stroke-width="1.5"/>
+  <text x="470" y="431" text-anchor="middle" fill="#39d2c0" font-size="11" font-weight="600">→ "ours" | "friend" | None</text>
+
+  <!-- If None branch -->
+  <line x1="470" y1="460" x2="470" y2="500" stroke="#f0883e" stroke-width="2" class="flow-line" marker-end="url(#arrow)"/>
+  <text x="480" y="482" fill="#f0883e" font-size="9">if None</text>
+
+  <!-- ── LiveRouter ── -->
+  <rect x="160" y="500" width="620" height="160" rx="10" fill="#131820" stroke="#f0883e" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="470" y="522" text-anchor="middle" fill="#f0883e" font-size="12" font-weight="700">STEP 2: LiveRouter.select_failover()</text>
+  <text x="470" y="536" text-anchor="middle" fill="#8b949e" font-size="9">kill switch: ~/.hermes/bot/.enable_live_routing</text>
+
+  <!-- Three sub-engines -->
+  <rect x="185" y="548" width="170" height="50" rx="6" fill="#0d1117" stroke="#39d2c0"/>
+  <text x="270" y="568" text-anchor="middle" fill="#39d2c0" font-size="10" font-weight="600">PriceKalman</text>
+  <text x="270" y="584" text-anchor="middle" fill="#8b949e" font-size="9">2-state · per provider</text>
+
+  <rect x="385" y="548" width="170" height="50" rx="6" fill="#0d1117" stroke="#bc8cff"/>
+  <text x="470" y="568" text-anchor="middle" fill="#bc8cff" font-size="10" font-weight="600">ConsumptionKalman</text>
+  <text x="470" y="584" text-anchor="middle" fill="#8b949e" font-size="9">3-state · per provider</text>
+
+  <rect x="585" y="548" width="170" height="50" rx="6" fill="#0d1117" stroke="#58a6ff"/>
+  <text x="670" y="568" text-anchor="middle" fill="#58a6ff" font-size="10" font-weight="600">CPVO Calculator</text>
+  <text x="670" y="584" text-anchor="middle" fill="#8b949e" font-size="9">effective rate from DB</text>
+
+  <rect x="260" y="612" width="420" height="34" rx="6" fill="#0a0e14" stroke="#f0883e" stroke-width="1.5"/>
+  <text x="470" y="633" text-anchor="middle" fill="#f0883e" font-size="11" font-weight="600">→ RoutingOptimizer.route() → cheapest viable</text>
+
+  <line x1="470" y1="660" x2="470" y2="700" stroke="#39d2c0" stroke-width="2" class="flow-line" marker-end="url(#arrow)"/>
+
+  <!-- ── Pricing Engine ── -->
+  <rect x="200" y="700" width="540" height="80" rx="10" fill="#131820" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="470" y="722" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="700">STEP 3: PRICING ENGINE (pure functions)</text>
+  <text x="470" y="748" text-anchor="middle" fill="#c9d1d9" font-size="10" font-family="ui-monospace">effective = base × peak(3×) × scarcity × health × pace</text>
+  <text x="470" y="766" text-anchor="middle" fill="#8b949e" font-size="9">MIN_EFFECTIVE_PRICE = $0.001/M floor (ADR-004)</text>
+
+  <line x1="470" y1="780" x2="470" y2="820" stroke="#39d2c0" stroke-width="2" class="flow-line" marker-end="url(#arrow)"/>
+
+  <!-- ── Dispatch Gate ── -->
+  <rect x="250" y="820" width="440" height="80" rx="10" fill="#131820" stroke="#d29922" stroke-width="1.5"/>
+  <text x="470" y="842" text-anchor="middle" fill="#d29922" font-size="12" font-weight="700">STEP 4: DISPATCH GATE (/v1/dispatch_gate)</text>
+  <text x="470" y="862" text-anchor="middle" fill="#c9d1d9" font-size="10">Dim 1: Hardware → Dim 2: Quota → Dim 3: Price</text>
+  <text x="470" y="880" text-anchor="middle" fill="#8b949e" font-size="9">→ can_dispatch: true/false + recommended_model</text>
+
+  <line x1="470" y1="900" x2="470" y2="940" stroke="#39d2c0" stroke-width="2" class="flow-line" marker-end="url(#arrow)"/>
+
+  <!-- ── Providers row ── -->
+  <rect x="70" y="940" width="160" height="70" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="150" y="962" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="600">z.ai "ours"</text>
+  <text x="150" y="978" text-anchor="middle" fill="#8b949e" font-size="9">glm-5.2 · api.z.ai</text>
+  <text x="150" y="996" text-anchor="middle" fill="#3fb950" font-size="10" font-weight="600">$0.001/M</text>
+
+  <rect x="260" y="940" width="160" height="70" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="340" y="962" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="600">z.ai "friend"</text>
+  <text x="340" y="978" text-anchor="middle" fill="#8b949e" font-size="9">glm-5.2 · shared key</text>
+  <text x="340" y="996" text-anchor="middle" fill="#58a6ff" font-size="10" font-weight="600">$0.029/M</text>
+
+  <rect x="450" y="940" width="160" height="70" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
+  <text x="530" y="962" text-anchor="middle" fill="#bc8cff" font-size="11" font-weight="600">Ollama Cloud</text>
+  <text x="530" y="978" text-anchor="middle" fill="#8b949e" font-size="9">local · $100/mo flat</text>
+  <text x="530" y="996" text-anchor="middle" fill="#bc8cff" font-size="10" font-weight="600">$0.024/M</text>
+
+  <rect x="640" y="940" width="160" height="70" rx="8" fill="#161b22" stroke="#f0883e" stroke-width="1.5"/>
+  <text x="720" y="962" text-anchor="middle" fill="#f0883e" font-size="11" font-weight="600">PPQ / OpenRouter</text>
+  <text x="720" y="978" text-anchor="middle" fill="#8b949e" font-size="9">per-token · deepseek-v4</text>
+  <text x="720" y="996" text-anchor="middle" fill="#f0883e" font-size="10" font-weight="600">$0.14/M</text>
+
+  <rect x="830" y="940" width="80" height="70" rx="8" fill="#161b22" stroke="#f85149" stroke-width="1.5"/>
+  <text x="870" y="962" text-anchor="middle" fill="#f85149" font-size="10" font-weight="600">DeepInfra</text>
+  <text x="870" y="978" text-anchor="middle" fill="#8b949e" font-size="9">last resort</text>
+  <text x="870" y="996" text-anchor="middle" fill="#f85149" font-size="10" font-weight="600">$1.30/M</text>
+
+  <!-- Fan-out lines from gate to providers -->
+  <line x1="470" y1="940" x2="150" y2="940" stroke="#30363d" stroke-width="1"/>
+  <line x1="470" y1="940" x2="340" y2="940" stroke="#30363d" stroke-width="1"/>
+  <line x1="470" y1="940" x2="530" y2="940" stroke="#30363d" stroke-width="1"/>
+  <line x1="470" y1="940" x2="720" y2="940" stroke="#30363d" stroke-width="1"/>
+  <line x1="470" y1="940" x2="870" y2="940" stroke="#30363d" stroke-width="1"/>
+
+  <line x1="470" y1="1010" x2="470" y2="1050" stroke="#8b949e" stroke-width="1.5" class="flow-line" marker-end="url(#arrow-dim)"/>
+
+  <!-- ── Post-request Logging ── -->
+  <rect x="120" y="1050" width="700" height="100" rx="10" fill="#131820" stroke="#30363d" stroke-width="1.5"/>
+  <text x="470" y="1072" text-anchor="middle" fill="#8b949e" font-size="12" font-weight="600">POST-REQUEST LOGGING</text>
+
+  <rect x="145" y="1085" width="150" height="50" rx="6" fill="#0d1117" stroke="#39d2c0"/>
+  <text x="220" y="1104" text-anchor="middle" fill="#39d2c0" font-size="10" font-weight="600">ShadowLogger</text>
+  <text x="220" y="1120" text-anchor="middle" fill="#8b949e" font-size="8">live vs shadow</text>
+
+  <rect x="315" y="1085" width="150" height="50" rx="6" fill="#0d1117" stroke="#3fb950"/>
+  <text x="390" y="1104" text-anchor="middle" fill="#3fb950" font-size="10" font-weight="600">ProfitTracker</text>
+  <text x="390" y="1120" text-anchor="middle" fill="#8b949e" font-size="8">savings vs next-best</text>
+
+  <rect x="485" y="1085" width="150" height="50" rx="6" fill="#0d1117" stroke="#bc8cff"/>
+  <text x="560" y="1104" text-anchor="middle" fill="#bc8cff" font-size="10" font-weight="600">ConsumptionKalman</text>
+  <text x="560" y="1120" text-anchor="middle" fill="#8b949e" font-size="8">.update(tokens)</text>
+
+  <rect x="655" y="1085" width="150" height="50" rx="6" fill="#0d1117" stroke="#58a6ff"/>
+  <text x="730" y="1104" text-anchor="middle" fill="#58a6ff" font-size="10" font-weight="600">token_audit</text>
+  <text x="730" y="1120" text-anchor="middle" fill="#8b949e" font-size="8">billed vs actual</text>
+
+  <!-- Feedback loop arrow (Kalman update feeds back to next prediction) -->
+  <path d="M 560 1135 Q 560 1160 780 1160 Q 880 1160 880 573 L 755 573" fill="none" stroke="#bc8cff" stroke-width="1.5" stroke-dasharray="5 3" opacity="0.5" marker-end="url(#arrow-blue)"/>
+  <text x="850" y="900" fill="#bc8cff" font-size="8" opacity="0.6" transform="rotate(-90 850 900)">Kalman feedback loop → next prediction more accurate</text>
+</svg>
+    </div>
+  </div>
+
+  <div class="callout">
+    <div class="co-label">Core Principle (ADR-001)</div>
+    Price is the <strong>primary routing signal</strong>. Provider selection is always
+    <code>argmin(effective_price)</code> among viable providers — no hardcoded cascade,
+    no peak-hour routing directive. Peak hours affect routing <em>only</em> through the
+    price multiplier, never through an if-statement.
+  </div>
+</section>
+
+<!-- ═══ 02: KALMAN FILTERS ═══ -->
+<section class="section" id="kalman">
+  <div class="section-header">
+    <span class="section-num">02 — KALMAN FILTERS</span>
+    <h2 class="section-title">Two Independent Filter Families</h2>
+    <p class="section-desc">
+      Two completely independent Kalman filter families operate per-provider, each tuned
+      to its physics (ADR-002). They never share state. One estimates cost, the other
+      predicts consumption — together they power the routing decision.
+    </p>
+  </div>
+
+  <div class="grid-2">
+    <!-- PriceKalman -->
+    <div class="panel">
+      <div class="panel-title">PriceKalman <span class="tag">src/price_kalman.py</span></div>
+      <div class="svg-wrap">
+<svg viewBox="0 0 420 480" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace,monospace" font-size="10">
+  <defs>
+    <marker id="pk-arr" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 z" fill="#39d2c0"/>
+    </marker>
+  </defs>
+
+  <!-- Input -->
+  <rect x="110" y="10" width="200" height="50" rx="8" fill="#161b22" stroke="#39d2c0" stroke-width="1.5"/>
+  <text x="210" y="30" text-anchor="middle" fill="#39d2c0" font-size="11" font-weight="600">INPUT</text>
+  <text x="210" y="46" text-anchor="middle" fill="#8b949e" font-size="9">Observed cost /M tokens</text>
+
+  <line x1="210" y1="60" x2="210" y2="90" stroke="#39d2c0" stroke-width="1.5" class="flow-line" marker-end="url(#pk-arr)"/>
+
+  <!-- State box -->
+  <rect x="60" y="90" width="300" height="150" rx="10" fill="#0d1117" stroke="#39d2c0" stroke-width="2"/>
+  <text x="210" y="112" text-anchor="middle" fill="#39d2c0" font-size="12" font-weight="700">2-STATE MODEL</text>
+  <text x="210" y="126" text-anchor="middle" fill="#8b949e" font-size="9">constant-velocity · F = [[1,1],[0,1]]</text>
+
+  <!-- State components -->
+  <rect x="80" y="140" width="120" height="42" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="140" y="158" text-anchor="middle" fill="#c9d1d9" font-size="10" font-weight="600">base_rate</text>
+  <text x="140" y="172" text-anchor="middle" fill="#8b949e" font-size="8">$/M · smoothed cost</text>
+
+  <rect x="220" y="140" width="120" height="42" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="280" y="158" text-anchor="middle" fill="#c9d1d9" font-size="10" font-weight="600">velocity</text>
+  <text x="280" y="172" text-anchor="middle" fill="#8b949e" font-size="8">$/M/cycle · trend</text>
+
+  <!-- Matrices -->
+  <text x="210" y="202" text-anchor="middle" fill="#8b949e" font-size="9">Q = diag(1e-6) · R = 1e-4 · H = [1, 0]</text>
+  <text x="210" y="218" text-anchor="middle" fill="#8b949e" font-size="9">cost drifts slowly → tiny process noise</text>
+
+  <line x1="210" y1="240" x2="210" y2="270" stroke="#39d2c0" stroke-width="1.5" class="flow-line" marker-end="url(#pk-arr)"/>
+
+  <!-- Prediction output -->
+  <rect x="40" y="270" width="340" height="80" rx="8" fill="#161b22" stroke="#39d2c0" stroke-width="1.5"/>
+  <text x="210" y="290" text-anchor="middle" fill="#39d2c0" font-size="11" font-weight="600">OUTPUTS</text>
+  <text x="210" y="308" text-anchor="middle" fill="#c9d1d9" font-size="9">base_rate (smoothed $/M)</text>
+  <text x="210" y="322" text-anchor="middle" fill="#c9d1d9" font-size="9">velocity (trend direction)</text>
+  <text x="210" y="336" text-anchor="middle" fill="#c9d1d9" font-size="9">effective_price() — applies multipliers</text>
+
+  <line x1="210" y1="350" x2="210" y2="380" stroke="#39d2c0" stroke-width="1.5" class="flow-line" marker-end="url(#pk-arr)"/>
+
+  <!-- Converged values -->
+  <rect x="40" y="380" width="340" height="90" rx="8" fill="#0d1117" stroke="#3fb950" stroke-width="1"/>
+  <text x="210" y="400" text-anchor="middle" fill="#3fb950" font-size="10" font-weight="600">CONVERGED RATES (50,354 decisions)</text>
+  <text x="70" y="420" fill="#3fb950" font-size="9">ours</text>
+  <text x="380" y="420" text-anchor="end" fill="#3fb950" font-size="9" font-weight="600">$0.001/M</text>
+  <text x="70" y="436" fill="#58a6ff" font-size="9">friend</text>
+  <text x="380" y="436" text-anchor="end" fill="#58a6ff" font-size="9" font-weight="600">$0.029/M</text>
+  <text x="70" y="452" fill="#bc8cff" font-size="9">ollama</text>
+  <text x="380" y="452" text-anchor="end" fill="#bc8cff" font-size="9" font-weight="600">$0.024/M</text>
+</svg>
+      </div>
+      <p style="font-size:12px;color:var(--txt-dim);margin-top:12px;line-height:1.5">
+        Estimates the <strong>smooth component</strong> of effective cost per million tokens.
+        Peak multiplier, scarcity, and health are deterministic functions applied
+        <em>on top</em> — they are NOT Kalman inputs (ADR-003).
+      </p>
+    </div>
+
+    <!-- ConsumptionKalman -->
+    <div class="panel">
+      <div class="panel-title">ConsumptionKalman <span class="tag">src/consumption_kalman.py</span></div>
+      <div class="svg-wrap">
+<svg viewBox="0 0 420 480" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace,monospace" font-size="10">
+  <defs>
+    <marker id="ck-arr" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 z" fill="#bc8cff"/>
+    </marker>
+  </defs>
+
+  <!-- Input -->
+  <rect x="110" y="10" width="200" height="50" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
+  <text x="210" y="30" text-anchor="middle" fill="#bc8cff" font-size="11" font-weight="600">INPUT</text>
+  <text x="210" y="46" text-anchor="middle" fill="#8b949e" font-size="9">Token usage per period</text>
+
+  <line x1="210" y1="60" x2="210" y2="90" stroke="#bc8cff" stroke-width="1.5" class="flow-line" marker-end="url(#ck-arr)"/>
+
+  <!-- State box -->
+  <rect x="40" y="90" width="340" height="170" rx="10" fill="#0d1117" stroke="#bc8cff" stroke-width="2"/>
+  <text x="210" y="112" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="700">3-STATE MODEL</text>
+  <text x="210" y="126" text-anchor="middle" fill="#8b949e" font-size="8.5">constant-accel · F = [[1,dt,½dt²],[0,1,dt],[0,0,1]]</text>
+
+  <!-- State components -->
+  <rect x="60" y="140" width="90" height="52" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="105" y="160" text-anchor="middle" fill="#c9d1d9" font-size="9" font-weight="600">burn_rate</text>
+  <text x="105" y="174" text-anchor="middle" fill="#8b949e" font-size="7.5">tok/period</text>
+  <text x="105" y="186" text-anchor="middle" fill="#8b949e" font-size="7.5">0th deriv</text>
+
+  <rect x="165" y="140" width="90" height="52" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="210" y="160" text-anchor="middle" fill="#c9d1d9" font-size="9" font-weight="600">velocity</text>
+  <text x="210" y="174" text-anchor="middle" fill="#8b949e" font-size="7.5">tok/period²</text>
+  <text x="210" y="186" text-anchor="middle" fill="#8b949e" font-size="7.5">1st deriv</text>
+
+  <rect x="270" y="140" width="90" height="52" rx="6" fill="#161b22" stroke="#30363d"/>
+  <text x="315" y="160" text-anchor="middle" fill="#c9d1d9" font-size="9" font-weight="600">acceleration</text>
+  <text x="315" y="174" text-anchor="middle" fill="#8b949e" font-size="7.5">tok/period³</text>
+  <text x="315" y="186" text-anchor="middle" fill="#8b949e" font-size="7.5">2nd deriv</text>
+
+  <!-- Auto-tuning note -->
+  <text x="210" y="214" text-anchor="middle" fill="#8b949e" font-size="9">Auto-tuned via from_history():</text>
+  <text x="210" y="228" text-anchor="middle" fill="#8b949e" font-size="9">R = empirical variance · Q = R × 1e-3</text>
+  <text x="210" y="244" text-anchor="middle" fill="#8b949e" font-size="9">H = [1, 0, 0] — only burn_rate observed</text>
+
+  <line x1="210" y1="260" x2="210" y2="290" stroke="#bc8cff" stroke-width="1.5" class="flow-line" marker-end="url(#ck-arr)"/>
+
+  <!-- Outputs -->
+  <rect x="40" y="290" width="340" height="90" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
+  <text x="210" y="310" text-anchor="middle" fill="#bc8cff" font-size="11" font-weight="600">OUTPUTS</text>
+  <text x="210" y="328" text-anchor="middle" fill="#c9d1d9" font-size="9">predict_horizon(n) — projected burn rate</text>
+  <text x="210" y="342" text-anchor="middle" fill="#c9d1d9" font-size="9">predict_cumulative(n) — total tokens</text>
+  <text x="210" y="356" text-anchor="middle" fill="#c9d1d9" font-size="9">will_exhaust(quota, n) → (bool, periods)</text>
+  <text x="210" y="370" text-anchor="middle" fill="#c9d1d9" font-size="9">uncertainty — √(P[0,0])</text>
+
+  <line x1="210" y1="380" x2="210" y2="410" stroke="#bc8cff" stroke-width="1.5" class="flow-line" marker-end="url(#ck-arr)"/>
+
+  <!-- Live data -->
+  <rect x="40" y="410" width="340" height="60" rx="8" fill="#0d1117" stroke="#d29922" stroke-width="1"/>
+  <text x="210" y="428" text-anchor="middle" fill="#d29922" font-size="9" font-weight="600">LIVE DATA (from proxy /quota)</text>
+  <text x="210" y="444" text-anchor="middle" fill="#c9d1d9" font-size="9">ours: 359K tph · friend: 19.8M tph</text>
+  <text x="210" y="458" text-anchor="middle" fill="#c9d1d9" font-size="9">friend 5h window: 95% used · LOCKED</text>
+</svg>
+      </div>
+      <p style="font-size:12px;color:var(--txt-dim);margin-top:12px;line-height:1.5">
+        Provider-agnostic predictor of token consumption and quota exhaustion.
+        Knows nothing about price, cost, peak hours, or health. The
+        <code>will_exhaust()</code> output feeds the lock decisions in Phase 1 & 2 of
+        <code>best_key()</code>.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 03: EFFECTIVE PRICE FORMULA ═══ -->
+<section class="section" id="formula">
+  <div class="section-header">
+    <span class="section-num">03 — EFFECTIVE PRICE</span>
+    <h2 class="section-title">The Five Multipliers</h2>
+    <p class="section-desc">
+      The Kalman-smoothed base rate gets multiplied by four deterministic functions
+      (ADR-008). All multipliers are pure and side-effect-free. Any infinite multiplier
+      makes the provider effectively unreachable.
+    </p>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Formula <span class="tag">price_kalman.effective_price()</span></div>
+    <div class="formula">
+      <span class="var v-base">base_rate</span>
+      <span class="op">×</span>
+      <span class="var v-peak">peak_mult</span>
+      <span class="op">×</span>
+      <span class="var v-scar">scarcity</span>
+      <span class="op">×</span>
+      <span class="var v-health">health</span>
+      <span class="op">×</span>
+      <span class="var v-pace">pace</span>
+      <span class="op">=</span>
+      <span style="color:var(--green);font-weight:700">effective_price</span>
+    </div>
+
+    <div class="mult-grid">
+      <div class="mult-card base">
+        <div class="mc-name">base_rate</div>
+        <div class="mc-range">from PriceKalman · $/M</div>
+        <div class="mc-desc">The smoothed cost estimate. Converges from seed rates to amortized reality over thousands of observations.</div>
+      </div>
+      <div class="mult-card peak">
+        <div class="mc-name">peak_mult</div>
+        <div class="mc-range">1.0× → 3.0×</div>
+        <div class="mc-desc">Instant step function during UTC 06:00–09:59 (Beijing peak). Only affects z.ai keys. Never smoothed (ADR-003).</div>
+      </div>
+      <div class="mult-card scar">
+        <div class="mc-name">scarcity</div>
+        <div class="mc-range">1.0× → 2.0×</div>
+        <div class="mc-desc">Linear ramp from 50% quota usage to 100%. Formula: <code>1 + max(0, (used_pct − 50) / 50)</code></div>
+      </div>
+      <div class="mult-card health">
+        <div class="mc-name">health</div>
+        <div class="mc-range">1.0× → 1.5× → 3× → 10× → ∞</div>
+        <div class="mc-desc">Graduated penalty based on failure count. Circuit breaker at >10 failures = +∞ (unreachable).</div>
+      </div>
+      <div class="mult-card pace">
+        <div class="mc-name">pace</div>
+        <div class="mc-range">0.5× → 3.0×</div>
+        <div class="mc-desc">Predictive pacing. <code>clamp(ratio², 0.5, 3.0)</code>. Attracts traffic when underutilizing, slows when exhausting.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Health penalty scale -->
+  <div class="panel">
+    <div class="panel-title">Health Penalty Scale <span class="tag">graduated</span></div>
+    <div class="health-scale">
+      <div class="health-seg hs-0">
+        <span class="hs-mult">1.0×</span>
+        <span class="hs-fail">0 failures</span>
+        No penalty
+      </div>
+      <div class="health-seg hs-1">
+        <span class="hs-mult">1.5×</span>
+        <span class="hs-fail">1–2 failures</span>
+        Soft (transient)
+      </div>
+      <div class="health-seg hs-2">
+        <span class="hs-mult">3.0×</span>
+        <span class="hs-fail">3–5 failures</span>
+        Moderate
+      </div>
+      <div class="health-seg hs-3">
+        <span class="hs-mult">10×</span>
+        <span class="hs-fail">6–10 failures</span>
+        Severe
+      </div>
+      <div class="health-seg hs-4">
+        <span class="hs-mult">+∞</span>
+        <span class="hs-fail">&gt;10 / breaker</span>
+        Unreachable
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 04: REQUEST LIFECYCLE ═══ -->
+<section class="section" id="lifecycle">
+  <div class="section-header">
+    <span class="section-num">04 — REQUEST LIFECYCLE</span>
+    <h2 class="section-title">Single Request, Step by Step</h2>
+    <p class="section-desc">
+      A swim-lane view showing how one request moves through the system, with decision
+      points, branch conditions, and the Kalman feedback loop that makes each
+      subsequent prediction more accurate.
+    </p>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Lifecycle Flow <span class="tag">7 steps · with branches</span></div>
+    <div class="svg-wrap">
+<svg viewBox="0 0 920 1140" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace,monospace" font-size="10">
+  <defs>
+    <marker id="lc-arr" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 z" fill="#39d2c0"/>
+    </marker>
+    <marker id="lc-arr-red" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 z" fill="#f85149"/>
+    </marker>
+    <marker id="lc-arr-green" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 z" fill="#3fb950"/>
+    </marker>
+  </defs>
+
+  <!-- Lane backgrounds -->
+  <rect x="0" y="0" width="920" height="1140" fill="none"/>
+
+  <!-- Step 1: Arrival -->
+  <circle cx="60" cy="50" r="18" fill="#39d2c0"/>
+  <text x="60" y="55" text-anchor="middle" fill="#0a0e14" font-size="13" font-weight="700">1</text>
+  <rect x="100" y="30" width="380" height="42" rx="8" fill="#161b22" stroke="#39d2c0"/>
+  <text x="290" y="50" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="600">Request arrives at hermes-gateway (:9098)</text>
+  <text x="290" y="64" text-anchor="middle" fill="#8b949e" font-size="9">POST /v1/chat/completions → forwarded to proxy :9099</text>
+  <line x1="60" y1="72" x2="60" y2="120" stroke="#39d2c0" stroke-width="2" class="flow-line" marker-end="url(#lc-arr)"/>
+
+  <!-- Step 2: best_key -->
+  <circle cx="60" cy="140" r="18" fill="#39d2c0"/>
+  <text x="60" y="145" text-anchor="middle" fill="#0a0e14" font-size="13" font-weight="700">2</text>
+  <rect x="100" y="120" width="500" height="42" rx="8" fill="#161b22" stroke="#39d2c0"/>
+  <text x="350" y="140" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="600">best_key() runs 4-phase selection</text>
+  <text x="350" y="154" text-anchor="middle" fill="#8b949e" font-size="9">Kalman prediction → locks → recovery → health filter</text>
+
+  <!-- Decision diamond: key found? -->
+  <line x1="60" y1="162" x2="60" y2="195" stroke="#39d2c0" stroke-width="2"/>
+  <polygon points="60,195 110,230 60,265 10,230" fill="#0d1117" stroke="#d29922" stroke-width="1.5"/>
+  <text x="60" y="228" text-anchor="middle" fill="#d29922" font-size="9" font-weight="600">key</text>
+  <text x="60" y="240" text-anchor="middle" fill="#d29922" font-size="9" font-weight="600">found?</text>
+
+  <!-- Yes branch (left) -->
+  <line x1="10" y1="230" x2="-30" y2="230" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="-20" y="222" fill="#3fb950" font-size="9">YES</text>
+
+  <!-- No branch (right) -->
+  <line x1="110" y1="230" x2="650" y2="230" stroke="#f85149" stroke-width="1.5" class="flow-line" marker-end="url(#lc-arr-red)"/>
+  <text x="370" y="222" fill="#f85149" font-size="9">NO → failover path</text>
+
+  <!-- Failover box -->
+  <rect x="650" y="210" width="250" height="42" rx="8" fill="#161b22" stroke="#f0883e"/>
+  <text x="775" y="230" text-anchor="middle" fill="#f0883e" font-size="10" font-weight="600">LiveRouter.select_failover()</text>
+  <text x="775" y="244" text-anchor="middle" fill="#8b949e" font-size="8">RoutingOptimizer → all providers</text>
+  <line x1="775" y1="252" x2="775" y2="290" stroke="#f0883e" stroke-width="1.5" class="flow-line" marker-end="url(#lc-arr)"/>
+
+  <rect x="650" y="290" width="250" height="42" rx="8" fill="#161b22" stroke="#f85149"/>
+  <text x="775" y="310" text-anchor="middle" fill="#f85149" font-size="10" font-weight="600">External Failover (hardcoded)</text>
+  <text x="775" y="324" text-anchor="middle" fill="#8b949e" font-size="8">DeepInfra → PPQ → OpenRouter</text>
+
+  <!-- Merge back -->
+  <path d="M 775 332 Q 775 370 500 370" fill="none" stroke="#8b949e" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#lc-arr)"/>
+
+  <line x1="60" y1="265" x2="60" y2="360" stroke="#39d2c0" stroke-width="2" class="flow-line" marker-end="url(#lc-arr)"/>
+
+  <!-- Step 3: Pricing -->
+  <circle cx="60" cy="380" r="18" fill="#39d2c0"/>
+  <text x="60" y="385" text-anchor="middle" fill="#0a0e14" font-size="13" font-weight="700">3</text>
+  <rect x="100" y="360" width="480" height="42" rx="8" fill="#161b22" stroke="#58a6ff"/>
+  <text x="340" y="380" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="600">Pricing Engine computes effective_price</text>
+  <text x="340" y="394" text-anchor="middle" fill="#8b949e" font-size="9">base × peak × scarcity × health × pace</text>
+
+  <line x1="60" y1="402" x2="60" y2="440" stroke="#39d2c0" stroke-width="2" class="flow-line" marker-end="url(#lc-arr)"/>
+
+  <!-- Step 4: Optimizer -->
+  <circle cx="60" cy="460" r="18" fill="#39d2c0"/>
+  <text x="60" y="465" text-anchor="middle" fill="#0a0e14" font-size="13" font-weight="700">4</text>
+  <rect x="100" y="440" width="500" height="50" rx="8" fill="#161b22" stroke="#f0883e"/>
+  <text x="350" y="460" text-anchor="middle" fill="#f0883e" font-size="11" font-weight="600">Routing Optimizer evaluates all providers</text>
+  <text x="350" y="474" text-anchor="middle" fill="#8b949e" font-size="9">5 gates: quality → health → exhaustion → scarcity → price</text>
+  <text x="350" y="484" text-anchor="middle" fill="#8b949e" font-size="9">→ sort by effective_price → cheapest viable</text>
+
+  <line x1="60" y1="490" x2="60" y2="530" stroke="#39d2c0" stroke-width="2" class="flow-line" marker-end="url(#lc-arr)"/>
+
+  <!-- Step 5: Dispatch Gate -->
+  <circle cx="60" cy="550" r="18" fill="#39d2c0"/>
+  <text x="60" y="555" text-anchor="middle" fill="#0a0e14" font-size="13" font-weight="700">5</text>
+  <rect x="100" y="530" width="480" height="42" rx="8" fill="#161b22" stroke="#d29922"/>
+  <text x="340" y="550" text-anchor="middle" fill="#d29922" font-size="11" font-weight="600">Dispatch Gate (if hardware task)</text>
+  <text x="340" y="564" text-anchor="middle" fill="#8b949e" font-size="9">hardware → quota → price → can_dispatch?</text>
+
+  <!-- Decision: dispatch? -->
+  <line x1="60" y1="572" x2="60" y2="600" stroke="#d29922" stroke-width="1.5"/>
+  <polygon points="60,600 110,630 60,660 10,630" fill="#0d1117" stroke="#d29922" stroke-width="1.5"/>
+  <text x="60" y="628" text-anchor="middle" fill="#d29922" font-size="9" font-weight="600">can</text>
+  <text x="60" y="640" text-anchor="middle" fill="#d29922" font-size="9" font-weight="600">dispatch?</text>
+
+  <line x1="10" y1="630" x2="-40" y2="630" stroke="#f85149" stroke-width="1.5"/>
+  <text x="-30" y="622" fill="#f85149" font-size="9">HOLD</text>
+  <rect x="-40" y="660" width="100" height="30" rx="6" fill="#161b22" stroke="#f85149"/>
+  <text x="10" y="680" text-anchor="middle" fill="#f85149" font-size="9" font-weight="600">QUEUE / RETRY</text>
+
+  <line x1="60" y1="660" x2="60" y2="710" stroke="#3fb950" stroke-width="2" class="flow-line" marker-end="url(#lc-arr-green)"/>
+  <text x="70" y="690" fill="#3fb950" font-size="9">YES</text>
+
+  <!-- Step 6: Forward -->
+  <circle cx="60" cy="730" r="18" fill="#39d2c0"/>
+  <text x="60" y="735" text-anchor="middle" fill="#0a0e14" font-size="13" font-weight="700">6</text>
+  <rect x="100" y="710" width="560" height="110" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="380" y="730" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="600">Forward to chosen provider — response handling</text>
+
+  <rect x="120" y="745" width="120" height="30" rx="5" fill="#161b22" stroke="#3fb950"/>
+  <text x="180" y="764" text-anchor="middle" fill="#3fb950" font-size="8.5" font-weight="600">200 + content ✓</text>
+
+  <rect x="250" y="745" width="130" height="30" rx="5" fill="#161b22" stroke="#58a6ff"/>
+  <text x="315" y="764" text-anchor="middle" fill="#58a6ff" font-size="8.5" font-weight="600">200 + reasoning → inject</text>
+
+  <rect x="390" y="745" width="120" height="30" rx="5" fill="#161b22" stroke="#d29922"/>
+  <text x="450" y="764" text-anchor="middle" fill="#d29922" font-size="8.5" font-weight="600">200 empty → failover</text>
+
+  <rect x="520" y="745" width="120" height="30" rx="5" fill="#161b22" stroke="#f85149"/>
+  <text x="580" y="764" text-anchor="middle" fill="#f85149" font-size="8.5" font-weight="600">401/403/429/402</text>
+
+  <text x="380" y="798" text-anchor="middle" fill="#8b949e" font-size="8.5">401→exhausted · 429→backoff · 402→unfunded · all trigger next provider</text>
+
+  <line x1="60" y1="820" x2="60" y2="860" stroke="#39d2c0" stroke-width="2" class="flow-line" marker-end="url(#lc-arr)"/>
+
+  <!-- Step 7: Logging + Kalman update -->
+  <circle cx="60" cy="880" r="18" fill="#39d2c0"/>
+  <text x="60" y="885" text-anchor="middle" fill="#0a0e14" font-size="13" font-weight="700">7</text>
+  <rect x="100" y="860" width="560" height="90" rx="8" fill="#161b22" stroke="#bc8cff"/>
+  <text x="380" y="880" text-anchor="middle" fill="#bc8cff" font-size="11" font-weight="600">Post-Request Logging & Kalman Update</text>
+
+  <rect x="120" y="895" width="125" height="42" rx="6" fill="#0d1117" stroke="#39d2c0"/>
+  <text x="182" y="912" text-anchor="middle" fill="#39d2c0" font-size="9" font-weight="600">ShadowLogger</text>
+  <text x="182" y="926" text-anchor="middle" fill="#8b949e" font-size="8">live vs shadow</text>
+
+  <rect x="255" y="895" width="125" height="42" rx="6" fill="#0d1117" stroke="#3fb950"/>
+  <text x="317" y="912" text-anchor="middle" fill="#3fb950" font-size="9" font-weight="600">ProfitTracker</text>
+  <text x="317" y="926" text-anchor="middle" fill="#8b949e" font-size="8">savings async</text>
+
+  <rect x="390" y="895" width="135" height="42" rx="6" fill="#0d1117" stroke="#bc8cff" stroke-width="2"/>
+  <text x="457" y="912" text-anchor="middle" fill="#bc8cff" font-size="9" font-weight="600">Kalman.update()</text>
+  <text x="457" y="926" text-anchor="middle" fill="#8b949e" font-size="8">serving key only</text>
+
+  <rect x="535" y="895" width="115" height="42" rx="6" fill="#0d1117" stroke="#58a6ff"/>
+  <text x="592" y="912" text-anchor="middle" fill="#58a6ff" font-size="9" font-weight="600">token_audit</text>
+  <text x="592" y="926" text-anchor="middle" fill="#8b949e" font-size="8">billed vs actual</text>
+
+  <!-- Feedback loop -->
+  <path d="M 457 950 Q 457 980 700 980 Q 850 980 850 140 Q 850 140 620 140" fill="none" stroke="#bc8cff" stroke-width="2" stroke-dasharray="6 4" opacity="0.6" marker-end="url(#lc-arr)"/>
+  <rect x="680" y="540" width="170" height="50" rx="8" fill="#0d1117" stroke="#bc8cff" stroke-width="1" opacity="0.8"/>
+  <text x="765" y="560" text-anchor="middle" fill="#bc8cff" font-size="10" font-weight="600">↻ FEEDBACK LOOP</text>
+  <text x="765" y="575" text-anchor="middle" fill="#8b949e" font-size="8">Kalman state evolves</text>
+  <text x="765" y="585" text-anchor="middle" fill="#8b949e" font-size="8">next prediction sharper</text>
+
+  <!-- Legend -->
+  <rect x="100" y="1010" width="560" height="100" rx="8" fill="#0d1117" stroke="#30363d"/>
+  <text x="380" y="1030" text-anchor="middle" fill="#8b949e" font-size="10" font-weight="600">LEGEND</text>
+  <rect x="120" y="1045" width="14" height="14" rx="3" fill="none" stroke="#39d2c0"/>
+  <text x="142" y="1056" fill="#c9d1d9" font-size="9">Main flow</text>
+  <rect x="230" y="1045" width="14" height="14" rx="3" fill="none" stroke="#d29922"/>
+  <text x="252" y="1056" fill="#c9d1d9" font-size="9">Decision</text>
+  <rect x="340" y="1045" width="14" height="14" rx="3" fill="none" stroke="#3fb950"/>
+  <text x="362" y="1056" fill="#c9d1d9" font-size="9">Success</text>
+  <rect x="440" y="1045" width="14" height="14" rx="3" fill="none" stroke="#f85149"/>
+  <text x="462" y="1056" fill="#c9d1d9" font-size="9">Error / Hold</text>
+  <rect x="550" y="1045" width="14" height="14" rx="3" fill="none" stroke="#bc8cff" stroke-dasharray="3 2"/>
+  <text x="572" y="1056" fill="#c9d1d9" font-size="9">Feedback</text>
+  <text x="120" y="1085" fill="#8b949e" font-size="9">Animated dashed lines = active data flow · Solid = structural</text>
+</svg>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 05: PROVIDER ECONOMICS ═══ -->
+<section class="section" id="economics">
+  <div class="section-header">
+    <span class="section-num">05 — PROVIDER ECONOMICS</span>
+    <h2 class="section-title">Cost Comparison</h2>
+    <p class="section-desc">
+      All providers ranked by converged effective price per million tokens. Flat-rate
+      z.ai keys dominate — the Kalman filter amortizes the monthly fee across actual
+      volume, driving effective rates to fractions of a cent.
+    </p>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Cost per Million Tokens <span class="tag">log scale</span></div>
+    <div id="cost-chart" style="width:100%;height:420px"></div>
+  </div>
+
+  <div class="grid-2">
+    <div class="panel">
+      <div class="panel-title">Provider Details</div>
+      <table class="dtable">
+        <thead>
+          <tr><th>Provider</th><th>Type</th><th class="num">$/M</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="hi">ours</td><td>Flat €155/mo</td><td class="num hi">$0.001</td><td>Cheapest — high volume</td></tr>
+          <tr><td>friend</td><td>Flat shared</td><td class="num">$0.029</td><td>21% penalty over ours</td></tr>
+          <tr><td>ollama</td><td>Flat $100/mo</td><td class="num">$0.024</td><td>No peak hours</td></tr>
+          <tr><td>openrouter</td><td>Per-token</td><td class="num">$0.135</td><td>deepseek-v4-flash</td></tr>
+          <tr><td>ppq</td><td>Per-token</td><td class="num">$0.140</td><td>deepseek-v4-flash</td></tr>
+          <tr><td>deepinfra</td><td>Per-token</td><td class="num neg">$1.300</td><td>Last resort only</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Seed → Converged Evolution</div>
+      <div class="svg-wrap">
+<svg viewBox="0 0 400 300" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace,monospace" font-size="10">
+  <!-- Axes -->
+  <line x1="120" y1="20" x2="120" y2="260" stroke="#30363d" stroke-width="1"/>
+  <line x1="120" y1="260" x2="380" y2="260" stroke="#30363d" stroke-width="1"/>
+  <text x="250" y="285" text-anchor="middle" fill="#8b949e" font-size="9">Cost per Million Tokens ($/M, log scale)</text>
+
+  <!-- ours -->
+  <text x="115" y="55" text-anchor="end" fill="#3fb950" font-size="10" font-weight="600">ours</text>
+  <circle cx="180" cy="50" r="5" fill="#8b949e"/>
+  <text x="180" y="40" text-anchor="middle" fill="#8b949e" font-size="8">seed $0.31</text>
+  <line x1="180" y1="50" x2="310" y2="50" stroke="#3fb950" stroke-width="2" class="flow-line" marker-end="url(#lc-arr-green)"/>
+  <circle cx="310" cy="50" r="6" fill="#3fb950"/>
+  <text x="330" y="54" fill="#3fb950" font-size="10" font-weight="600">$0.001</text>
+
+  <!-- friend -->
+  <text x="115" y="110" text-anchor="end" fill="#58a6ff" font-size="10" font-weight="600">friend</text>
+  <circle cx="190" cy="105" r="5" fill="#8b949e"/>
+  <text x="190" y="95" text-anchor="middle" fill="#8b949e" font-size="8">seed $0.375</text>
+  <line x1="190" y1="105" x2="270" y2="105" stroke="#58a6ff" stroke-width="2" class="flow-line"/>
+  <circle cx="270" cy="105" r="6" fill="#58a6ff"/>
+  <text x="290" y="109" fill="#58a6ff" font-size="10" font-weight="600">$0.029</text>
+
+  <!-- ollama -->
+  <text x="115" y="165" text-anchor="end" fill="#bc8cff" font-size="10" font-weight="600">ollama</text>
+  <circle cx="200" cy="160" r="5" fill="#8b949e"/>
+  <text x="200" y="150" text-anchor="middle" fill="#8b949e" font-size="8">seed $0.50</text>
+  <line x1="200" y1="160" x2="265" y2="160" stroke="#bc8cff" stroke-width="2" class="flow-line"/>
+  <circle cx="265" cy="160" r="6" fill="#bc8cff"/>
+  <text x="285" y="164" fill="#bc8cff" font-size="10" font-weight="600">$0.024</text>
+
+  <!-- ppq (no change) -->
+  <text x="115" y="220" text-anchor="end" fill="#f0883e" font-size="10" font-weight="600">ppq</text>
+  <circle cx="230" cy="215" r="5" fill="#8b949e"/>
+  <text x="230" y="205" text-anchor="middle" fill="#8b949e" font-size="8">fixed $0.14</text>
+  <circle cx="245" cy="215" r="6" fill="#f0883e"/>
+  <text x="265" y="219" fill="#f0883e" font-size="10" font-weight="600">$0.14</text>
+  <text x="300" y="219" fill="#8b949e" font-size="8">(no Kalman)</text>
+</svg>
+      </div>
+      <p style="font-size:12px;color:var(--txt-dim);margin-top:10px">
+        Flat-rate providers converge dramatically as volume amortizes the fixed fee.
+        Per-token providers have published prices — no Kalman needed.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 06: DISPATCH GATE ═══ -->
+<section class="section" id="gate">
+  <div class="section-header">
+    <span class="section-num">06 — DISPATCH GATE</span>
+    <h2 class="section-title">Three-Dimension Decision</h2>
+    <p class="section-desc">
+      A pure, side-effect-free function exposed at <code>GET /v1/dispatch_gate</code>.
+      Governs whether hardware-dependent tasks should proceed. Checks hardware first,
+      then quota sufficiency with predictive margins, then price as informational.
+    </p>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Gate Dimensions <span class="tag">sequential · short-circuit</span></div>
+    <div class="svg-wrap">
+<svg viewBox="0 0 880 360" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace,monospace" font-size="10">
+  <defs>
+    <marker id="dg-arr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#39d2c0"/>
+    </marker>
+    <marker id="dg-arr-red" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#f85149"/>
+    </marker>
+  </defs>
+
+  <!-- Dim 1: Hardware -->
+  <rect x="20" y="40" width="240" height="280" rx="12" fill="#0d1117" stroke="#bc8cff" stroke-width="1.5"/>
+  <circle cx="140" cy="65" r="14" fill="#bc8cff"/>
+  <text x="140" y="70" text-anchor="middle" fill="#0a0e14" font-size="11" font-weight="700">1</text>
+  <text x="140" y="100" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="700">HARDWARE</text>
+  <text x="140" y="115" text-anchor="middle" fill="#8b949e" font-size="9">Binary · checked first</text>
+
+  <rect x="40" y="130" width="200" height="28" rx="5" fill="#161b22" stroke="#30363d"/>
+  <text x="140" y="148" text-anchor="middle" fill="#c9d1d9" font-size="9">none → always (2× margin)</text>
+  <rect x="40" y="164" width="200" height="28" rx="5" fill="#161b22" stroke="#30363d"/>
+  <text x="140" y="182" text-anchor="middle" fill="#c9d1d9" font-size="9">board → /dev/ttyACM* (4×)</text>
+  <rect x="40" y="198" width="200" height="28" rx="5" fill="#161b22" stroke="#30363d"/>
+  <text x="140" y="216" text-anchor="middle" fill="#c9d1d9" font-size="9">dual_board → 2+ boards (6×)</text>
+  <rect x="40" y="232" width="200" height="28" rx="5" fill="#161b22" stroke="#30363d"/>
+  <text x="140" y="250" text-anchor="middle" fill="#c9d1d9" font-size="9">dq05 → SSH reachable (3×)</text>
+
+  <text x="140" y="290" text-anchor="middle" fill="#f85149" font-size="9" font-weight="600">↓ unavailable → HOLD</text>
+  <text x="140" y="305" text-anchor="middle" fill="#3fb950" font-size="9" font-weight="600">↓ available → proceed + override</text>
+
+  <!-- Arrow to Dim 2 -->
+  <line x1="260" y1="180" x2="320" y2="180" stroke="#39d2c0" stroke-width="2" class="flow-line" marker-end="url(#dg-arr)"/>
+
+  <!-- Dim 2: Quota -->
+  <rect x="320" y="40" width="240" height="280" rx="12" fill="#0d1117" stroke="#d29922" stroke-width="1.5"/>
+  <circle cx="440" cy="65" r="14" fill="#d29922"/>
+  <text x="440" y="70" text-anchor="middle" fill="#0a0e14" font-size="11" font-weight="700">2</text>
+  <text x="440" y="100" text-anchor="middle" fill="#d29922" font-size="12" font-weight="700">QUOTA</text>
+  <text x="440" y="115" text-anchor="middle" fill="#8b949e" font-size="9">Predictive · hardware-scaled margin</text>
+
+  <rect x="340" y="130" width="200" height="44" rx="5" fill="#161b22" stroke="#30363d"/>
+  <text x="440" y="148" text-anchor="middle" fill="#c9d1d9" font-size="9">required = budget × margin</text>
+  <text x="440" y="162" text-anchor="middle" fill="#8b949e" font-size="8">+ concurrent_burn_extra</text>
+
+  <rect x="340" y="184" width="200" height="44" rx="5" fill="#161b22" stroke="#30363d"/>
+  <text x="440" y="202" text-anchor="middle" fill="#c9d1d9" font-size="9">find key: remaining ≥ headroom</text>
+  <text x="440" y="216" text-anchor="middle" fill="#8b949e" font-size="8">AND used_pct &lt; 95% AND healthy</text>
+
+  <rect x="340" y="238" width="200" height="28" rx="5" fill="#161b22" stroke="#f0883e"/>
+  <text x="440" y="256" text-anchor="middle" fill="#f0883e" font-size="9">if fail → flash downgrade (×0.3)</text>
+
+  <text x="440" y="290" text-anchor="middle" fill="#3fb950" font-size="9" font-weight="600">↓ sufficient → PROCEED</text>
+  <text x="440" y="305" text-anchor="middle" fill="#f85149" font-size="9" font-weight="600">↓ insufficient → HOLD</text>
+
+  <!-- Arrow to Dim 3 -->
+  <line x1="560" y1="180" x2="620" y2="180" stroke="#39d2c0" stroke-width="2" class="flow-line" marker-end="url(#dg-arr)"/>
+
+  <!-- Dim 3: Price -->
+  <rect x="620" y="40" width="240" height="280" rx="12" fill="#0d1117" stroke="#58a6ff" stroke-width="1.5"/>
+  <circle cx="740" cy="65" r="14" fill="#58a6ff"/>
+  <text x="740" y="70" text-anchor="middle" fill="#0a0e14" font-size="11" font-weight="700">3</text>
+  <text x="740" y="100" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="700">PRICE</text>
+  <text x="740" y="115" text-anchor="middle" fill="#8b949e" font-size="9">Informational + override</text>
+
+  <rect x="640" y="130" width="200" height="28" rx="5" fill="#161b22" stroke="#30363d"/>
+  <text x="740" y="148" text-anchor="middle" fill="#c9d1d9" font-size="9">peak 3× reported, never blocks</text>
+  <rect x="640" y="164" width="200" height="28" rx="5" fill="#161b22" stroke="#30363d"/>
+  <text x="740" y="182" text-anchor="middle" fill="#c9d1d9" font-size="9">scarcity_override if hw present</text>
+  <rect x="640" y="198" width="200" height="44" rx="5" fill="#161b22" stroke="#f0883e"/>
+  <text x="740" y="216" text-anchor="middle" fill="#f0883e" font-size="9" font-weight="600">"a board in hand</text>
+  <text x="740" y="230" text-anchor="middle" fill="#f0883e" font-size="9" font-weight="600">beats waiting"</text>
+
+  <text x="740" y="280" text-anchor="middle" fill="#3fb950" font-size="10" font-weight="600">→ can_dispatch: true/false</text>
+  <text x="740" y="298" text-anchor="middle" fill="#8b949e" font-size="9">+ recommended_model + price</text>
+</svg>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="panel">
+      <div class="panel-title">Task Budget Multipliers</div>
+      <table class="dtable">
+        <thead><tr><th>Task Type</th><th>Model</th><th class="num">Budget Mult</th></tr></thead>
+        <tbody>
+          <tr><td>mechanical</td><td>glm-4.5-flash</td><td class="num">0.25×</td></tr>
+          <tr><td>coding</td><td>glm-5.2</td><td class="num">1.0×</td></tr>
+          <tr><td>research</td><td>glm-5.2</td><td class="num hi">2.5×</td></tr>
+          <tr><td>review</td><td>glm-5.2</td><td class="num">0.5×</td></tr>
+          <tr><td>docs</td><td>glm-4.5-flash</td><td class="num">0.5×</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Live Snapshot</div>
+      <div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:14px;font-family:var(--mono);font-size:11px;color:var(--txt);line-height:1.8">
+<span style="color:var(--green)">"can_dispatch"</span>: <span style="color:var(--cyan)">true</span>,<br>
+<span style="color:var(--green)">"reason"</span>: <span style="color:var(--yellow)">"sufficient headroom"</span>,<br>
+<span style="color:var(--green)">"recommended_model"</span>: <span style="color:var(--purple)">"glm-5.2"</span>,<br>
+<span style="color:var(--green)">"effective_price_per_m"</span>: <span style="color:var(--cyan)">0.002</span>,<br>
+<span style="color:var(--green)">"scarcity_factor"</span>: <span style="color:var(--orange)">2.0</span>,<br>
+<span style="color:var(--green)">"recommended_provider"</span>: <span style="color:var(--blue)">"friend"</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ 07: CONVERGED REPLAY ═══ -->
+<section class="section" id="replay">
+  <div class="section-header">
+    <span class="section-num">07 — CONVERGED REPLAY</span>
+    <h2 class="section-title">Historical Validation</h2>
+    <p class="section-desc">
+      Replay of 50,354 historical routing decisions consuming 527M tokens. The Kalman
+      filters converged to rates 1,000× cheaper than seed estimates while maintaining
+      99.1% agreement with the seed-rate optimizer.
+    </p>
+  </div>
+
+  <div class="grid-3">
+    <div class="panel" style="text-align:center">
+      <div style="font-family:var(--mono);font-size:36px;font-weight:700;color:var(--green)">$0.55</div>
+      <div style="font-size:12px;color:var(--txt-dim);margin-top:6px">Converged Replay Cost</div>
+      <div style="font-size:11px;color:var(--txt-dim);margin-top:10px">vs $10,743.95 live actual</div>
+    </div>
+    <div class="panel" style="text-align:center">
+      <div style="font-family:var(--mono);font-size:36px;font-weight:700;color:var(--cyan)">99.7%</div>
+      <div style="font-size:12px;color:var(--txt-dim);margin-top:6px">Savings vs Seed Rate</div>
+      <div style="font-size:11px;color:var(--txt-dim);margin-top:10px">seed estimate was $11,996.63</div>
+    </div>
+    <div class="panel" style="text-align:center">
+      <div style="font-family:var(--mono);font-size:36px;font-weight:700;color:var(--blue)">100%</div>
+      <div style="font-size:12px;color:var(--txt-dim);margin-top:6px">Routed to "ours"</div>
+      <div style="font-size:11px;color:var(--txt-dim);margin-top:10px">under converged rates</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">Replay Metrics</div>
+    <table class="dtable">
+      <thead>
+        <tr><th>Metric</th><th class="num">Value</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Decisions replayed</td><td class="num">50,354</td></tr>
+        <tr><td>Tokens consumed</td><td class="num">527M</td></tr>
+        <tr><td>Live cost (actual spend)</td><td class="num">$10,743.95</td></tr>
+        <tr><td>Shadow cost (seed-rate estimate)</td><td class="num">$11,996.63</td></tr>
+        <tr><td>Converged replay cost</td><td class="num hi">$0.55</td></tr>
+        <tr><td>Converged vs Seed savings</td><td class="num pos">99.7%</td></tr>
+        <tr><td>Live vs Converged agreement</td><td class="num">31.8%</td></tr>
+        <tr><td>Seed vs Converged agreement</td><td class="num pos">99.1%</td></tr>
+        <tr><td>Routing under converged rates</td><td class="num">100% → "ours"</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ═══ 08: ADRs ═══ -->
+<section class="section" id="adrs">
+  <div class="section-header">
+    <span class="section-num">08 — ARCHITECTURE DECISIONS</span>
+    <h2 class="section-title">Key ADRs</h2>
+    <p class="section-desc">
+      The design is codified in Architecture Decision Records. These capture the
+      <em>why</em> behind each non-obvious choice.
+    </p>
+  </div>
+
+  <div class="adr-grid">
+    <div class="adr">
+      <div class="adr-id">ADR-001</div>
+      <div class="adr-title">Price-First Routing</div>
+      <div class="adr-body">Price is the primary routing signal. Selection is always <code>argmin(effective_price)</code>.</div>
+    </div>
+    <div class="adr">
+      <div class="adr-id">ADR-002</div>
+      <div class="adr-title">Multi-Kalman Separation</div>
+      <div class="adr-body">Separate filters per concern: cost, consumption, demand. They never share state.</div>
+    </div>
+    <div class="adr">
+      <div class="adr-id">ADR-003</div>
+      <div class="adr-title">Deterministic Peak Multiplier</div>
+      <div class="adr-body">Peak hours are an instant step function, NOT Kalman-smoothed.</div>
+    </div>
+    <div class="adr">
+      <div class="adr-id">ADR-004</div>
+      <div class="adr-title">Effective Price Positivity</div>
+      <div class="adr-body">Price is always &gt; 0 ($0.001 floor). +∞ means unreachable.</div>
+    </div>
+    <div class="adr">
+      <div class="adr-id">ADR-005</div>
+      <div class="adr-title">Three-Layer Actor Separation</div>
+      <div class="adr-body">Kalman (predict) → Pricing (deterministic) → Router (argmin).</div>
+    </div>
+    <div class="adr">
+      <div class="adr-id">ADR-006</div>
+      <div class="adr-title">Shadow Mode Validation</div>
+      <div class="adr-body">Run optimizer in read-only parallel before going live.</div>
+    </div>
+    <div class="adr">
+      <div class="adr-id">ADR-008</div>
+      <div class="adr-title">Deterministic Multipliers</div>
+      <div class="adr-body">All non-cost factors applied post-Kalman as pure functions.</div>
+    </div>
+    <div class="adr">
+      <div class="adr-id">ADR-009</div>
+      <div class="adr-title">Scarcity Multiplier</div>
+      <div class="adr-body">Linear ramp starting at 50% quota usage (1× → 2×).</div>
+    </div>
+  </div>
+
+  <div class="callout" style="margin-top:24px">
+    <div class="co-label">Production Deployment</div>
+    <strong>DQ05</strong> (primary proxy, port 9099) · <strong>T470</strong> (secondary) ·
+    CVM Server publishes unified snapshots via Nostr NIP-28 + HTTP. Kill switches:
+    <code>.enable_live_routing</code>, <code>.key_disabled_ours</code>. All shadow/logging
+    paths are wrapped in try/except — they can never break production routing.
+  </div>
+</section>
+
+<!-- ═══ FOOTER ═══ -->
+<footer class="footer">
+  <p>Merchant Routing Engine — Kalman Filter Architecture Diagram</p>
+  <p class="mono">demo/diagram-nsite · branch: converged-rate-replay</p>
+  <p style="margin-top:8px;font-size:11px">Not yet deployed — pending review</p>
+</footer>
+
+<script>
+/* ═══ Plotly cost chart ═══ */
+(function(){
+  const providers = ['ours','friend','ollama','openrouter','ppq','deepinfra'];
+  const costs = [0.001, 0.029, 0.024, 0.135, 0.140, 1.300];
+  const colors = ['#3fb950','#58a6ff','#bc8cff','#8b949e','#f0883e','#f85149'];
+  const types = ['Flat €155/mo','Flat shared','Flat $100/mo','Per-token','Per-token','Per-token'];
+
+  const trace = {
+    x: costs,
+    y: providers,
+    type: 'bar',
+    orientation: 'h',
+    marker: { color: colors },
+    text: costs.map(c => '$'+c.toFixed(3)+'/M'),
+    textposition: 'outside',
+    textfont: { family: 'ui-monospace,monospace', size: 11, color: '#c9d1d9' },
+    hovertemplate: '<b>%{y}</b><br>Cost: $%{x}/M tokens<br>Type: ' + '%{customdata}<extra></extra>',
+    customdata: types,
+  };
+
+  const layout = {
+    title: { text: 'Effective Price per Million Tokens ($/M)', font: { color: '#c9d1d9', size: 14 }, x: 0.02 },
+    paper_bgcolor: '#0d1117',
+    plot_bgcolor: '#0d1117',
+    font: { family: 'ui-monospace,monospace', color: '#8b949e', size: 11 },
+    margin: { l: 110, r: 80, t: 40, b: 50 },
+    xaxis: {
+      type: 'log',
+      title: { text: '$ / M tokens (log scale)', font: { color: '#8b949e', size: 10 } },
+      gridcolor: '#21262d',
+      zerolinecolor: '#21262d',
+      tickfont: { color: '#8b949e', size: 9 },
+      tickformat: '.3f',
+    },
+    yaxis: {
+      gridcolor: '#21262d',
+      tickfont: { color: '#c9d1d9', size: 11 },
+    },
+    showlegend: false,
+  };
+
+  Plotly.newPlot('cost-chart', [trace], layout, {
+    responsive: true,
+    displayModeBar: false,
+  });
+})();
+
+/* ═══ Nav scroll spy ═══ */
+(function(){
+  const sections = document.querySelectorAll('section[id]');
+  const navLinks = document.querySelectorAll('.nav a');
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const id = entry.target.id;
+        navLinks.forEach(link => {
+          link.classList.toggle('active', link.getAttribute('href') === '#' + id);
+        });
+      }
+    });
+  }, { rootMargin: '-30% 0px -60% 0px' });
+  sections.forEach(s => observer.observe(s));
+})();
+</script>
+</body>
+</html>
