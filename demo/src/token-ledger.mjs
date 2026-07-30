@@ -150,8 +150,7 @@ export async function createTokenLedger(opts = {}) {
       ORDER BY total_spent DESC, prompt_count DESC, created_at ASC`),
     applyCharge: db.prepare(`
       UPDATE demo_participants
-         SET balance = ?, total_spent = ?, prompt_count = prompt_count + 1,
-             last_prompt_at = ?
+         SET balance = ?, total_spent = ?, prompt_count = ?, last_prompt_at = ?
        WHERE npub = ?`),
     touchLastPrompt: db.prepare(`
       UPDATE demo_participants SET last_prompt_at = ? WHERE npub = ?`),
@@ -292,10 +291,14 @@ export async function createTokenLedger(opts = {}) {
    * @param {number} args.est_tokens       — estimated real tokens for the prompt
    * @param {number} [args.price_per_token]— demo-tokens/est-token (default cfg.basePricePerToken)
    * @param {number} [args.now]            — injectable clock (testing)
+   * @param {boolean} [args.topUp=false]   — adjustment to an in-flight prompt
+   *   (e.g. real tokens exceeded the pre-flight estimate). NOT a new prompt:
+   *   bypasses the rate limit and does NOT increment prompt_count. Lets Task
+   *   A1's /prompt top up a charge after routing without tripping the window.
    * @returns {object} charge result with scarcity + balances
    * @throws {Error} with .code/.httpStatus on failure.
    */
-  function charge({ npub, est_tokens, price_per_token, now }) {
+  function charge({ npub, est_tokens, price_per_token, now, topUp = false }) {
     if (!npub || typeof npub !== 'string') {
       throw httpError(400, 'bad_request', 'npub required');
     }
@@ -315,25 +318,30 @@ export async function createTokenLedger(opts = {}) {
     }
 
     // Rate limit: 1 prompt / rateLimitMs / npub. A participant's FIRST prompt
-    // is never rate-limited (no prior entry ⇒ no window to be inside). Checked
-    // & marked BEFORE the balance check so a flood of attempts still throttles.
-    if (lastPromptAt.has(npub)) {
-      const last = lastPromptAt.get(npub);
-      if (ts - last < cfg.rateLimitMs) {
-        const retryIn = Math.ceil((cfg.rateLimitMs - (ts - last)) / 1000);
-        throw httpError(429, 'rate_limited', `rate limited; retry in ${retryIn}s`, {
-          retry_after_s: retryIn,
-        });
+    // is never rate-limited (no prior entry ⇒ no window to be inside). A topUp
+    // is part of an in-flight prompt, so it never consumes a rate-limit slot.
+    // Checked & marked BEFORE the balance check so a flood still throttles.
+    if (!topUp) {
+      if (lastPromptAt.has(npub)) {
+        const last = lastPromptAt.get(npub);
+        if (ts - last < cfg.rateLimitMs) {
+          const retryIn = Math.ceil((cfg.rateLimitMs - (ts - last)) / 1000);
+          throw httpError(429, 'rate_limited', `rate limited; retry in ${retryIn}s`, {
+            retry_after_s: retryIn,
+          });
+        }
       }
+      lastPromptAt.set(npub, ts);
+      stmts.touchLastPrompt.run(ts, npub);
     }
-    lastPromptAt.set(npub, ts);
-    stmts.touchLastPrompt.run(ts, npub);
 
+    const newPromptCount = participant.prompt_count + (topUp ? 0 : 1);
     const scarcity = currentScarcity();
     const deduction = Math.round(est * ppt * scarcity);
     if (deduction <= 0) {
-      // Nothing to charge — still counts as a prompt for rate-limit/counter.
-      stmts.applyCharge.run(participant.balance, participant.total_spent, ts, npub);
+      // Nothing to charge — still counts as a prompt for rate-limit/counter
+      // (a zero-cost topUp changes nothing).
+      stmts.applyCharge.run(participant.balance, participant.total_spent, newPromptCount, ts, npub);
       return {
         ok: true,
         npub,
@@ -343,8 +351,9 @@ export async function createTokenLedger(opts = {}) {
         deduction: 0,
         balance_after: participant.balance,
         total_spent: participant.total_spent,
-        prompt_count: participant.prompt_count + 1,
-        note: 'zero-cost prompt (deduction rounded to 0)',
+        prompt_count: newPromptCount,
+        topUp,
+        note: topUp ? 'zero-cost top-up' : 'zero-cost prompt (deduction rounded to 0)',
       };
     }
     if (participant.balance < deduction) {
@@ -353,6 +362,7 @@ export async function createTokenLedger(opts = {}) {
         required: deduction,
         deficit: deduction - participant.balance,
         scarcity_factor: scarcity,
+        topUp,
       });
     }
 
@@ -360,8 +370,8 @@ export async function createTokenLedger(opts = {}) {
     const newSpent = participant.total_spent + deduction;
     db.exec('BEGIN');
     try {
-      stmts.applyCharge.run(newBalance, newSpent, ts, npub);
-      stmts.insertLedger.run(npub, -deduction, est, ppt, scarcity, 'charge', newBalance, ts);
+      stmts.applyCharge.run(newBalance, newSpent, newPromptCount, ts, npub);
+      stmts.insertLedger.run(npub, -deduction, est, ppt, scarcity, topUp ? 'topup' : 'charge', newBalance, ts);
       db.exec('COMMIT');
     } catch (e) {
       db.exec('ROLLBACK');
@@ -376,7 +386,8 @@ export async function createTokenLedger(opts = {}) {
       deduction,
       balance_after: newBalance,
       total_spent: newSpent,
-      prompt_count: participant.prompt_count + 1,
+      prompt_count: newPromptCount,
+      topUp,
     };
   }
 

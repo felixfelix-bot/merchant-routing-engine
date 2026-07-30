@@ -185,6 +185,13 @@ console.log('\n[G4] rate limit (1 prompt / 5s / npub)');
   const c3 = l.charge({ npub: 'npub_alice', est_tokens: 10, price_per_token: 1.0, now: 6500 });
   ok('charge after 5s window succeeds', !!c3.ok);
 
+  // topUp: bypasses rate limit + does not increment prompt_count (same prompt)
+  const aliceBefore = l.getLedger().find((p) => p.npub === 'npub_alice');
+  const tu = l.charge({ npub: 'npub_alice', est_tokens: 5, price_per_token: 1.0, now: 6700, topUp: true });
+  ok('topUp succeeds inside the rate window', !!tu.ok && tu.topUp === true);
+  ok('topUp does NOT increment prompt_count', tu.prompt_count === aliceBefore.prompt_count, `before=${aliceBefore.prompt_count} after=${tu.prompt_count}`);
+  ok('topUp still deducts tokens', tu.deduction === 5 && tu.balance_after < aliceBefore.balance, `deduction=${tu.deduction}`);
+
   // reset clears rate-limit window
   l.reset();
   l.register('npub_alice');
