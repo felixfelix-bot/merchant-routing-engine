@@ -9,11 +9,12 @@
   },
   "scripts": {
     "start": "node src/dashboard-server.mjs",
-    "gates": "node tests/verify-a1-gates.mjs",
     "ledger-gates": "node tests/verify-gates.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
+    "@types/node": "^26.1.2",
+    "nostr-tools": "^2.24.1",
     "typescript": "^7.0.2"
   }
 }

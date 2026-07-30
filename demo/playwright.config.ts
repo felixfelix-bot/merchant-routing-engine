@@ -41,5 +41,31 @@ export default defineConfig({
         hasTouch: false,
       },
     },
+    {
+      // Integration — display ↔ participant via shared CVM (A4).
+      // Desktop viewport; the participant page is opened as a mobile page inside the test.
+      name: 'integration',
+      testMatch: /integration.*\.spec\.ts/,
+      use: {
+        ...devices['Desktop Chrome'],
+        channel: 'chromium',
+        viewport: { width: 1440, height: 900 },
+        isMobile: false,
+        hasTouch: false,
+      },
+    },
+    {
+      // CVM server — integration tests over Nostr relays (A1b).
+      // Desktop viewport; the test manages its own video context.
+      name: 'cvm-server',
+      testMatch: /cvm-server.*\.spec\.ts/,
+      use: {
+        ...devices['Desktop Chrome'],
+        channel: 'chromium',
+        viewport: { width: 900, height: 700 },
+        isMobile: false,
+        hasTouch: false,
+      },
+    },
   ],
 });

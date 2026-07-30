@@ -10,3 +10,6 @@ node_modules/
 # Local env overrides
 .env
 .env.*
+
+# CVM server private key (defense-in-depth — never commit)
+cvm-server-key.json
