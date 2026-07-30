@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0a0e14">
+<title>Sovereign Demo — Participant</title>
+<!-- Offline-bundled vendor libs (no CDN) -->
+<script src="../display/vendor/nostr-tools.min.js"></script>
+<style>
+/* ════════════════════════════════════════════════════════════════════════
+   PHONE-FIRST DARK THEME
+   ════════════════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#0a0e14; --bg2:#0d1117; --card:#131820; --card2:#161b22;
+  --border:#21262d; --border2:#30363d;
+  --txt:#c9d1d9; --txt-dim:#8b949e; --txt-bright:#f0f6fc;
+  --blue:#58a6ff; --green:#3fb950; --red:#f85149; --yellow:#d29922;
+  --purple:#bc8cff; --cyan:#39d2c0; --orange:#f0883e;
+  --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow-x:hidden}
+body{
+  background:var(--bg);color:var(--txt);font-family:var(--sans);
+  font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased;
+  padding-bottom:env(safe-area-inset-bottom);
+}
+
+/* ── top bar ── */
+.topbar{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:12px 16px;background:var(--bg2);border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:50;backdrop-filter:blur(8px);
+}
+.topbar h1{font-size:15px;font-weight:600;color:var(--txt-bright);letter-spacing:-.2px}
+.topbar h1 .accent{color:var(--cyan)}
+.topbar .spacer{flex:1}
+.badge{
+  font-family:var(--mono);font-size:10px;font-weight:600;padding:3px 8px;
+  border-radius:4px;border:1px solid var(--border2);color:var(--txt-dim);
+  display:inline-flex;align-items:center;gap:5px;white-space:nowrap;
+}
+.badge .dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+.badge.demo{border-color:var(--yellow);color:var(--yellow)}
+.badge.demo .dot{background:var(--yellow);animation:pulse 1.5s infinite}
+.badge.live .dot{background:var(--green);animation:pulse 2s infinite}
+.badge.error{border-color:var(--red);color:var(--red)}
+.badge.error .dot{background:var(--red)}
+.badge.connecting{border-color:var(--blue);color:var(--blue)}
+.badge.connecting .dot{background:var(--blue);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── layout ── */
+.stack{display:flex;flex-direction:column;gap:12px;padding:12px 16px 40px;max-width:500px;margin:0 auto}
+.card{
+  background:var(--card);border:1px solid var(--border);border-radius:12px;
+  padding:16px;display:flex;flex-direction:column;min-width:0;
+}
+.card h2{
+  font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;
+  color:var(--txt-dim);margin-bottom:12px;display:flex;align-items:center;gap:8px;
+}
+.card h2 .num{
+  width:18px;height:18px;border-radius:5px;background:var(--border2);
+  display:inline-flex;align-items:center;justify-content:center;font-size:10px;
+  color:var(--cyan);
+}
+
+/* ── login ── */
+.login-options{display:flex;flex-direction:column;gap:10px}
+.btn{
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  padding:14px 18px;border-radius:10px;border:1px solid var(--border2);
+  background:var(--bg2);color:var(--txt-bright);font-family:var(--sans);
+  font-size:15px;font-weight:600;cursor:pointer;transition:all .2s;width:100%;
+  -webkit-tap-highlight-color:transparent;
+}
+.btn:active{transform:scale(.98)}
+.btn.primary{background:var(--cyan);color:#000;border-color:var(--cyan)}
+.btn.primary:disabled{opacity:.5;cursor:not-allowed}
+.btn.secondary{background:transparent;color:var(--cyan);border-color:var(--cyan)}
+.btn.danger{background:transparent;color:var(--red);border-color:var(--red)}
+.btn .icon{font-size:18px}
+.npub-input{
+  padding:12px 14px;border-radius:10px;border:1px solid var(--border2);
+  background:var(--bg2);color:var(--txt-bright);font-family:var(--mono);
+  font-size:13px;width:100%;outline:none;transition:border-color .2s;
+}
+.npub-input:focus{border-color:var(--cyan)}
+.npub-input::placeholder{color:var(--txt-dim)}
+.or-divider{display:flex;align-items:center;gap:10px;color:var(--txt-dim);font-size:12px}
+.or-divider::before,.or-divider::after{content:'';flex:1;height:1px;background:var(--border)}
+.login-error{color:var(--red);font-size:12px;padding:8px 12px;background:rgba(248,81,73,.1);border-radius:8px;display:none}
+.login-error.show{display:block}
+
+/* ── logged in user pill ── */
+.user-pill{
+  display:flex;align-items:center;gap:8px;padding:8px 12px;
+  background:var(--bg2);border:1px solid var(--border);border-radius:20px;
+  font-size:12px;font-family:var(--mono);color:var(--cyan);max-width:200px;
+}
+.user-pill .who{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ═══ PANEL 2: TOKEN BALANCE ═══ */
+.balance-big{
+  font-family:var(--mono);font-size:36px;font-weight:700;color:var(--green);
+  text-align:center;line-height:1;margin:8px 0;
+}
+.balance-sub{text-align:center;font-size:12px;color:var(--txt-dim)}
+.balance-sub .granted{color:var(--txt-dim)}
+
+/* ═══ PANEL 3: PROMPT INPUT ═══ */
+.prompt-textarea{
+  width:100%;min-height:80px;padding:12px 14px;border-radius:10px;
+  border:1px solid var(--border2);background:var(--bg2);color:var(--txt-bright);
+  font-family:var(--sans);font-size:15px;resize:vertical;outline:none;
+  transition:border-color .2s;line-height:1.4;
+}
+.prompt-textarea:focus{border-color:var(--cyan)}
+.prompt-textarea::placeholder{color:var(--txt-dim)}
+.cost-preview{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:8px 12px;margin-top:8px;background:var(--bg2);border-radius:8px;
+  border:1px solid var(--border);font-size:12px;font-family:var(--mono);
+}
+.cost-preview .cp-label{color:var(--txt-dim)}
+.cost-preview .cp-value{color:var(--orange)}
+.prompt-actions{display:flex;gap:8px;margin-top:10px}
+.prompt-actions .btn{flex:1}
+
+/* ── response area ── */
+.response-card{
+  background:var(--bg2);border:1px solid var(--border);border-radius:10px;
+  padding:14px;margin-top:10px;display:none;flex-direction:column;gap:8px;
+  animation:fadeIn .3s ease;
+}
+.response-card.show{display:flex}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.response-card .rc-header{
+  display:flex;justify-content:space-between;align-items:center;
+  font-size:11px;font-family:var(--mono);color:var(--txt-dim);
+}
+.response-card .rc-prov{color:var(--cyan);font-weight:600}
+.response-card .rc-body{
+  font-size:14px;color:var(--txt-bright);line-height:1.5;white-space:pre-wrap;
+  word-break:break-word;max-height:300px;overflow-y:auto;
+}
+.response-card .rc-stats{
+  display:flex;gap:12px;font-size:11px;font-family:var(--mono);color:var(--txt-dim);
+  padding-top:8px;border-top:1px solid var(--border);
+}
+.response-card .rc-stats .rs-cost{color:var(--orange)}
+.response-card .rc-stats .rs-tok{color:var(--cyan)}
+.prompt-error{
+  color:var(--red);font-size:13px;padding:10px 12px;margin-top:8px;
+  background:rgba(248,81,73,.1);border-radius:8px;display:none;
+}
+.prompt-error.show{display:block}
+
+/* ═══ PANEL 4: YOUR SPEND ═══ */
+.spend-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.spend-stat{
+  background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;
+}
+.spend-stat .ss-l{font-size:10px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:.4px}
+.spend-stat .ss-v{font-family:var(--mono);font-size:20px;font-weight:600;color:var(--txt-bright);margin-top:3px}
+.spend-stat .ss-v.cyan{color:var(--cyan)}
+.spend-stat .ss-v.orange{color:var(--orange)}
+.spend-stat .ss-v.green{color:var(--green)}
+.spend-stat .ss-sub{font-size:10px;color:var(--txt-dim);font-family:var(--mono);margin-top:2px}
+
+/* ═══ PANEL 5: CURRENT PRICE ═══ */
+.price-display{
+  display:flex;align-items:baseline;justify-content:center;gap:6px;
+  padding:8px 0;flex:1;justify-content:center;
+}
+.price-display .price-big{
+  font-family:var(--mono);font-size:32px;font-weight:700;color:var(--cyan);
+}
+.price-display .price-unit{font-size:14px;color:var(--txt-dim)}
+.price-meta{
+  display:flex;justify-content:center;gap:16px;font-size:11px;
+  color:var(--txt-dim);font-family:var(--mono);margin-top:4px;
+}
+.price-meta .pm-scarcity{color:var(--yellow)}
+
+/* ── hidden utility ── */
+.hidden{display:none !important}
+
+/* ── loading spinner ── */
+.spinner{
+  display:inline-block;width:16px;height:16px;border:2px solid var(--border2);
+  border-top-color:var(--cyan);border-radius:50%;animation:spin .6s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ── register status ── */
+.register-status{
+  display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:10px;
+  font-size:13px;animation:fadeIn .3s ease;
+}
+.register-status.success{background:rgba(63,185,80,.1);border:1px solid rgba(63,185,80,.3);color:var(--green)}
+.register-status.error{background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);color:var(--red)}
+.register-status.loading{background:var(--bg2);border:1px solid var(--border);color:var(--txt-dim)}
+</style>
+</head>
+<body>
+
+<!-- ═══ TOP BAR ═══ -->
+<div class="topbar">
+  <h1>⚡ Sovereign <span class="accent">Demo</span></h1>
+  <span class="spacer"></span>
+  <span class="badge connecting" id="conn-badge"><span class="dot"></span><span id="conn-text">connecting…</span></span>
+</div>
+
+<div class="stack">
+
+  <!-- ═══ PANEL 1: NIP07 LOGIN ═══ -->
+  <div class="card" id="login-card">
+    <h2><span class="num">1</span> Login with Nostr</h2>
+    <div class="login-options" id="login-options">
+      <button class="btn primary" id="btn-nip07">
+        <span class="icon"> nostr</span> Connect Wallet
+      </button>
+      <div class="or-divider">or enter npub manually</div>
+      <input class="npub-input" id="npub-input" type="text" placeholder="npub1… or hex pubkey" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button class="btn secondary" id="btn-npub">Continue with npub</button>
+      <div class="login-error" id="login-error"></div>
+    </div>
+  </div>
+
+  <!-- ═══ LOGGED IN / REGISTER STATUS ═══ -->
+  <div class="card hidden" id="status-card">
+    <h2>Welcome <span class="user-pill"><span class="who" id="user-npub">—</span></span></h2>
+    <div id="register-status"></div>
+  </div>
+
+  <!-- ═══ PANEL 2: TOKEN BALANCE ═══ -->
+  <div class="card hidden" id="balance-card">
+    <h2><span class="num">2</span> Token Balance</h2>
+    <div class="balance-big" id="balance-big">—</div>
+    <div class="balance-sub"><span class="granted" id="balance-granted">— granted</span></div>
+  </div>
+
+  <!-- ═══ PANEL 3: PROMPT INPUT ═══ -->
+  <div class="card hidden" id="prompt-card">
+    <h2><span class="num">3</span> Send a Prompt</h2>
+    <textarea class="prompt-textarea" id="prompt-input" placeholder="Type a prompt…" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+    <div class="cost-preview" id="cost-preview">
+      <span class="cp-label">Est. cost</span>
+      <span class="cp-value" id="cost-value">— tokens</span>
+    </div>
+    <div class="prompt-actions">
+      <button class="btn primary" id="btn-send">Send Prompt</button>
+    </div>
+    <div class="prompt-error" id="prompt-error"></div>
+    <div class="response-card" id="response-card">
+      <div class="rc-header">
+        <span class="rc-prov" id="resp-prov">—</span>
+        <span id="resp-model">—</span>
+      </div>
+      <div class="rc-body" id="resp-body">—</div>
+      <div class="rc-stats">
+        <span class="rs-tok" id="resp-tokens">— tokens</span>
+        <span class="rs-cost" id="resp-cost">$—</span>
+        <span id="resp-balance">— balance</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ PANEL 4: YOUR SPEND ═══ -->
+  <div class="card hidden" id="spend-card">
+    <h2><span class="num">4</span> Your Spend</h2>
+    <div class="spend-grid">
+      <div class="spend-stat">
+        <div class="ss-l">Prompts Sent</div>
+        <div class="ss-v cyan" id="spend-prompts">0</div>
+      </div>
+      <div class="spend-stat">
+        <div class="ss-l">Tokens Used</div>
+        <div class="ss-v orange" id="spend-tokens">0</div>
+      </div>
+      <div class="spend-stat">
+        <div class="ss-l">Avg Cost</div>
+        <div class="ss-v green" id="spend-avg">$0.00</div>
+      </div>
+      <div class="spend-stat">
+        <div class="ss-l">Member Since</div>
+        <div class="ss-v" id="spend-since" style="font-size:14px">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ PANEL 5: CURRENT PRICE ═══ -->
+  <div class="card hidden" id="price-card">
+    <h2><span class="num">5</span> Current Token Price</h2>
+    <div class="price-display">
+      <span class="price-big" id="price-big">—</span>
+      <span class="price-unit">$ / M tokens</span>
+    </div>
+    <div class="price-meta">
+      <span>Scarcity <span class="pm-scarcity" id="price-scarcity">1.0×</span></span>
+      <span id="price-level">—</span>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════════════
+   CONFIG
+   ════════════════════════════════════════════════════════════════════════ */
+const DEFAULT_SERVER_NPUB = '';
+const RELAYS = ['wss://nostr.mom', 'wss://relay.primal.net', 'wss://nos.lol'];
+const POLL_MS = 5000;
+const STARTING_BALANCE = 50000;
+const CVM_TIMEOUT_MS = 30000;  // send_prompt can take longer
+const CVM_MSG_KIND = 25910;
+const GIFT_WRAP_KIND = 1059;
+
+/* ════════════════════════════════════════════════════════════════════════
+   STATE
+   ════════════════════════════════════════════════════════════════════════ */
+let state = {
+  mode: 'demo',
+  serverPubkey: null,
+  cvm: null,
+  npub: null,           // hex pubkey of logged-in user
+  npubDisplay: null,    // display string (npub1... or hex short)
+  registered: false,
+  balance: 0,
+  granted: 0,
+  promptsSent: 0,
+  tokensUsed: 0,
+  joinedAt: null,
+  currentPrice: 0,
+  scarcityFactor: 1.0,
+  scarcityLevel: 'low',
+  lastPromptTs: 0,
+  sending: false,
+};
+
+/* ════════════════════════════════════════════════════════════════════════
+   URL / CONFIG PARSING
+   ════════════════════════════════════════════════════════════════════════ */
+function param(name) {
+  return new URLSearchParams(location.search).get(name);
+}
+function resolveServerKey() {
+  let raw = param('server') || localStorage.getItem('cvm_server') || DEFAULT_SERVER_NPUB;
+  if (!raw) return null;
+  raw = raw.trim();
+  if (raw.startsWith('npub1') && window.NostrTools?.nip19) {
+    try {
+      const d = window.NostrTools.nip19.decode(raw);
+      if (d.type === 'npub') return d.data;
+    } catch (e) { console.warn('npub decode failed:', e); }
+  }
+  if (/^[0-9a-f]{64}$/i.test(raw)) return raw.toLowerCase();
+  return null;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   UTILITIES
+   ════════════════════════════════════════════════════════════════════════ */
+function fmtTok(n) {
+  if (n == null || isNaN(n)) return '—';
+  n = Number(n);
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(Math.round(n));
+}
+function fmt$(n, dp = 4) {
+  if (n == null || isNaN(n)) return '—';
+  if (n >= 1) return '$' + n.toFixed(2);
+  return '$' + n.toFixed(dp);
+}
+function shortNpub(n) {
+  if (!n) return 'anon';
+  if (n.startsWith('npub1')) return n.slice(0, 16) + '…';
+  return n.slice(0, 10) + '…' + n.slice(-4);
+}
+function uuidv4() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const b = new Uint8Array(16); crypto.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+function estimateTokens(text) {
+  if (!text || typeof text !== 'string') return 1;
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+function setConn(mode) {
+  const b = document.getElementById('conn-badge'), t = document.getElementById('conn-text');
+  b.className = 'badge';
+  if (mode === 'live') { b.classList.add('live'); t.textContent = 'LIVE · CVM'; }
+  else if (mode === 'demo') { b.classList.add('demo'); t.textContent = 'DEMO MODE'; }
+  else if (mode === 'connecting') { b.classList.add('connecting'); t.textContent = 'CVM connecting…'; }
+  else { b.classList.add('error'); t.textContent = 'OFFLINE'; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   CVM BROWSER CLIENT
+   Direct nostr-tools implementation (gift-wrap kind 1059, inner kind 25910).
+   Same pattern as display/index.html.
+   ════════════════════════════════════════════════════════════════════════ */
+class CVMClient {
+  constructor(serverPubkeyHex) {
+    const N = window.NostrTools;
+    this.nip44 = N.nip44;
+    this.finalizeEvent = N.finalizeEvent;
+    this.getPublicKey = N.getPublicKey;
+    this.pool = new N.SimplePool();
+    this.relays = RELAYS;
+    this.serverPubkey = serverPubkeyHex;
+    this.sk = N.generateSecretKey();
+    this.pk = this.getPublicKey(this.sk);
+    this.pending = new Map();
+    this.sub = null;
+    this.connected = false;
+    this._seenIds = new Set();
+  }
+
+  async connect() {
+    this.sub = this.pool.subscribeMany(
+      this.relays,
+      { kinds: [GIFT_WRAP_KIND], '#p': [this.pk], limit: 100 },
+      {
+        onevent: (ev) => this._handleResponse(ev),
+        oneose: () => { this.connected = true; },
+        onclose: () => { this.connected = false; },
+      }
+    );
+    await new Promise(r => setTimeout(r, 800));
+    return this.connected;
+  }
+
+  _handleResponse(ev) {
+    if (this._seenIds.has(ev.id)) return;
+    this._seenIds.add(ev.id);
+    if (this._seenIds.size > 500) {
+      const arr = [...this._seenIds]; this._seenIds = new Set(arr.slice(-300));
+    }
+    try {
+      const ck = this.nip44.v2.utils.getConversationKey(this.sk, ev.pubkey);
+      const decrypted = this.nip44.v2.decrypt(ev.content, ck);
+      const inner = JSON.parse(decrypted);
+      const msg = JSON.parse(inner.content);
+      const id = msg.id || (inner.tags && inner.tags.find(t => t[0] === 'e') ? inner.tags.find(t => t[0] === 'e')[1] : null);
+      if (!id) return;
+      const p = this.pending.get(id);
+      if (!p) return;
+      this.pending.delete(id);
+      clearTimeout(p.timer);
+      // Handle MCP-style response: { result: { content: [{ text: "..." }] } }
+      let result = msg.result;
+      if (result && result.content && Array.isArray(result.content)) {
+        const textItem = result.content.find(c => c.type === 'text');
+        if (textItem) {
+          try { result = JSON.parse(textItem.text); } catch { /* keep as-is */ }
+        }
+      }
+      if (msg.isError || (result && result.error)) {
+        p.reject(new Error((result && result.error) || 'CVM error'));
+      } else {
+        p.resolve(result);
+      }
+    } catch (e) {
+      // Malformed or not for us — silently ignore
+    }
+  }
+
+  callTool(name, args = {}, timeoutMs = CVM_TIMEOUT_MS) {
+    const id = uuidv4();
+    const mcpReq = {
+      jsonrpc: '2.0',
+      id,
+      method: 'tools/call',
+      params: { name, arguments: args },
+    };
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pending.has(id)) {
+          this.pending.delete(id);
+          reject(new Error('CVM timeout (' + name + ')'));
+        }
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
+      setTimeout(async () => {
+        try { await this._sendGiftWrap(mcpReq); }
+        catch (e) {
+          if (this.pending.has(id)) {
+            this.pending.delete(id); clearTimeout(timer); reject(e);
+          }
+        }
+      }, 400);
+    });
+  }
+
+  async _sendGiftWrap(mcpMsg) {
+    const innerEvent = {
+      pubkey: this.pk,
+      kind: CVM_MSG_KIND,
+      tags: [['p', this.serverPubkey]],
+      content: JSON.stringify(mcpMsg),
+      created_at: Math.floor(Date.now() / 1000),
+    };
+    const signedInner = this.finalizeEvent(innerEvent, this.sk);
+    const wrapSk = crypto.getRandomValues(new Uint8Array(32));
+    const wrapPk = this.getPublicKey(wrapSk);
+    const ck = this.nip44.v2.utils.getConversationKey(wrapSk, this.serverPubkey);
+    const encrypted = this.nip44.v2.encrypt(JSON.stringify(signedInner), ck);
+    const giftWrap = {
+      kind: GIFT_WRAP_KIND,
+      content: encrypted,
+      tags: [['p', this.serverPubkey]],
+      created_at: Math.floor(Date.now() / 1000),
+      pubkey: wrapPk,
+    };
+    const signedWrap = this.finalizeEvent(giftWrap, wrapSk);
+    await Promise.allSettled(
+      this.relays.map(r =>
+        Promise.resolve(this.pool.publish([r], signedWrap)).catch(() => {})
+      )
+    );
+  }
+
+  close() {
+    this.pending.forEach(p => { clearTimeout(p.timer); p.reject(new Error('closed')); });
+    this.pending.clear();
+    if (this.sub) { try { this.sub.close(); } catch {} }
+    try { this.pool.close(this.relays); } catch {}
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   DEMO DATA (fallback when CVM server not configured)
+   ════════════════════════════════════════════════════════════════════════ */
+const demoData = {
+  pricing: { ours: { your_price: 0.026, cost_basis: 0.02, margin_pct: 23 } },
+  scarcity: { factor: 1.0, level: 'low' },
+};
+
+/* ════════════════════════════════════════════════════════════════════════
+   LOGIN: NIP07 + npub fallback
+   ════════════════════════════════════════════════════════════════════════ */
+function showLoginError(msg) {
+  const el = document.getElementById('login-error');
+  el.textContent = msg;
+  el.classList.add('show');
+}
+function hideLoginError() {
+  document.getElementById('login-error').classList.remove('show');
+}
+
+async function handleNIP07Login() {
+  hideLoginError();
+  if (typeof window.nostr === 'undefined') {
+    showLoginError('No Nostr wallet found. Install Alby or use npub entry below.');
+    return;
+  }
+  try {
+    const pubkey = await window.nostr.getPublicKey();
+    if (!pubkey || !/^[0-9a-f]{64}$/i.test(pubkey)) {
+      showLoginError('Invalid pubkey from wallet.');
+      return;
+    }
+    await loginUser(pubkey);
+  } catch (e) {
+    showLoginError('Wallet error: ' + e.message);
+  }
+}
+
+async function handleNpubLogin() {
+  hideLoginError();
+  const input = document.getElementById('npub-input').value.trim();
+  if (!input) {
+    showLoginError('Please enter an npub or hex pubkey.');
+    return;
+  }
+  let pubkey = null;
+  // Try npub1 decode
+  if (input.startsWith('npub1') && window.NostrTools?.nip19) {
+    try {
+      const d = window.NostrTools.nip19.decode(input);
+      if (d.type === 'npub') pubkey = d.data;
+    } catch (e) {
+      showLoginError('Invalid npub format.');
+      return;
+    }
+  } else if (/^[0-9a-f]{64}$/i.test(input)) {
+    pubkey = input.toLowerCase();
+  } else {
+    showLoginError('Enter a valid npub1... or 64-char hex pubkey.');
+    return;
+  }
+  if (!pubkey) {
+    showLoginError('Could not resolve pubkey.');
+    return;
+  }
+  await loginUser(pubkey);
+}
+
+async function loginUser(pubkey) {
+  state.npub = pubkey;
+  // Try to display as npub1
+  if (window.NostrTools?.nip19) {
+    try {
+      state.npubDisplay = window.NostrTools.nip19.npubEncode(pubkey);
+    } catch {
+      state.npubDisplay = shortNpub(pubkey);
+    }
+  } else {
+    state.npubDisplay = shortNpub(pubkey);
+  }
+  // Hide login, show status
+  document.getElementById('login-card').classList.add('hidden');
+  document.getElementById('status-card').classList.remove('hidden');
+  document.getElementById('user-npub').textContent = shortNpub(state.npubDisplay);
+  // Register
+  await registerParticipant();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   REGISTER PARTICIPANT
+   ════════════════════════════════════════════════════════════════════════ */
+async function registerParticipant() {
+  const statusEl = document.getElementById('register-status');
+  statusEl.className = 'register-status loading';
+  statusEl.innerHTML = '<span class="spinner"></span> Registering…';
+
+  if (state.cvm && state.serverPubkey) {
+    try {
+      const result = await state.cvm.callTool('register_participant', { npub: state.npub });
+      if (result && result.ok !== false) {
+        state.registered = true;
+        state.balance = result.balance || STARTING_BALANCE;
+        state.granted = STARTING_BALANCE;
+        state.joinedAt = new Date().toISOString();
+        statusEl.className = 'register-status success';
+        statusEl.textContent = '✓ ' + (result.message || 'Registered! 50,000 tokens granted.');
+        showPanels();
+        updateUI();
+        startPolling();
+      } else {
+        statusEl.className = 'register-status error';
+        statusEl.textContent = '✕ ' + ((result && result.error) || 'Registration failed.');
+        // Still show panels in demo mode if not whitelisted
+        if (result && result.error && result.error.includes('whitelist')) {
+          enableDemoMode();
+        }
+      }
+    } catch (e) {
+      statusEl.className = 'register-status error';
+      statusEl.textContent = '✕ CVM error: ' + e.message + '. Running in demo mode.';
+      enableDemoMode();
+    }
+  } else {
+    // Demo mode — auto-register
+    state.registered = true;
+    state.balance = STARTING_BALANCE;
+    state.granted = STARTING_BALANCE;
+    state.joinedAt = new Date().toISOString();
+    statusEl.className = 'register-status success';
+    statusEl.textContent = '✓ Demo mode: 50,000 tokens granted.';
+    showPanels();
+    updateUI();
+    startPolling();
+  }
+}
+
+function enableDemoMode() {
+  state.registered = true;
+  state.balance = STARTING_BALANCE;
+  state.granted = STARTING_BALANCE;
+  state.joinedAt = new Date().toISOString();
+  showPanels();
+  updateUI();
+  startPolling();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   SHOW PANELS AFTER LOGIN
+   ════════════════════════════════════════════════════════════════════════ */
+function showPanels() {
+  document.getElementById('balance-card').classList.remove('hidden');
+  document.getElementById('prompt-card').classList.remove('hidden');
+  document.getElementById('spend-card').classList.remove('hidden');
+  document.getElementById('price-card').classList.remove('hidden');
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   COST PREVIEW
+   ════════════════════════════════════════════════════════════════════════ */
+function updateCostPreview() {
+  const text = document.getElementById('prompt-input').value;
+  if (!text.trim()) {
+    document.getElementById('cost-value').textContent = '—';
+    return;
+  }
+  const estTok = estimateTokens(text);
+  const cost = Math.round(estTok * 1.0 * state.scarcityFactor);
+  document.getElementById('cost-value').textContent = cost + ' tokens (' + estTok + ' est)';
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   SEND PROMPT
+   ════════════════════════════════════════════════════════════════════════ */
+async function sendPrompt() {
+  if (state.sending) return;
+  const text = document.getElementById('prompt-input').value.trim();
+  if (!text) {
+    showPromptError('Please enter a prompt.');
+    return;
+  }
+
+  // Rate limit check (client-side, 1 per 5s)
+  const now = Date.now();
+  if (now - state.lastPromptTs < 5000) {
+    const wait = Math.ceil((5000 - (now - state.lastPromptTs)) / 1000);
+    showPromptError('Rate limited. Wait ' + wait + 's before sending another prompt.');
+    return;
+  }
+
+  // Insufficient balance check
+  const estTok = estimateTokens(text);
+  const estCost = Math.round(estTok * 1.0 * state.scarcityFactor);
+  if (state.balance < estCost) {
+    showPromptError('Insufficient tokens. You have ' + fmtTok(state.balance) + ', need ~' + estCost + '.');
+    return;
+  }
+
+  hidePromptError();
+  state.sending = true;
+  state.lastPromptTs = now;
+  const btn = document.getElementById('btn-send');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Sending…';
+
+  if (state.cvm && state.serverPubkey) {
+    try {
+      const result = await state.cvm.callTool('send_prompt', { prompt: text, npub: state.npub }, 60000);
+      if (result && result.ok !== false) {
+        displayResponse(result);
+        // Update balance from response
+        if (result.new_balance != null) {
+          state.balance = result.new_balance;
+        }
+        state.promptsSent++;
+        state.tokensUsed += (result.token_cost || result.tokens_used || estCost);
+        updateUI();
+      } else {
+        showPromptError((result && result.error) || 'Failed to send prompt.');
+        // Reset rate limit on failure so user can retry
+        state.lastPromptTs = 0;
+      }
+    } catch (e) {
+      showPromptError('CVM error: ' + e.message);
+      state.lastPromptTs = 0;
+    }
+  } else {
+    // Demo mode — simulate response
+    await new Promise(r => setTimeout(r, 800 + Math.random() * 600));
+    const demoResponses = [
+      'This is a simulated response from the Sovereign Demo. In live mode, this would route through DQ05 via Nostr relays to the actual LLM proxy.',
+      'Demo mode active. Your prompt was received but no real API call was made. Connect a CVM server (?server=npub1...) for live routing.',
+      'Hello from the demo! The real system would route this through the Kalman pricing engine with scarcity-adjusted token economics.',
+    ];
+    const resp = demoResponses[Math.floor(Math.random() * demoResponses.length)];
+    const tokens = estTok + Math.floor(Math.random() * 200);
+    const cost = Math.round(tokens * 1.0 * state.scarcityFactor);
+    displayResponse({
+      response: resp,
+      provider: 'demo',
+      model: 'demo-mode',
+      tokens_used: tokens,
+      cost_usd: 0,
+      token_cost: cost,
+      new_balance: state.balance - cost,
+    });
+    state.balance -= cost;
+    state.promptsSent++;
+    state.tokensUsed += cost;
+    updateUI();
+  }
+
+  state.sending = false;
+  btn.disabled = false;
+  btn.textContent = 'Send Prompt';
+}
+
+function displayResponse(r) {
+  const card = document.getElementById('response-card');
+  document.getElementById('resp-prov').textContent = (r.provider || '?').toUpperCase();
+  document.getElementById('resp-model').textContent = r.model || '—';
+  document.getElementById('resp-body').textContent = r.response || '(empty response)';
+  document.getElementById('resp-tokens').textContent = fmtTok(r.tokens_used || 0) + ' tokens';
+  document.getElementById('resp-cost').textContent = r.token_cost != null ? r.token_cost + ' tok' : fmt$(r.cost_usd, 6);
+  document.getElementById('resp-balance').textContent = r.new_balance != null ? fmtTok(r.new_balance) + ' balance' : '';
+  card.classList.add('show');
+}
+
+function showPromptError(msg) {
+  const el = document.getElementById('prompt-error');
+  el.textContent = msg;
+  el.classList.add('show');
+}
+function hidePromptError() {
+  document.getElementById('prompt-error').classList.remove('show');
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   POLLING: get_snapshot for balance/price
+   ════════════════════════════════════════════════════════════════════════ */
+let pollTimer = null;
+
+function startPolling() {
+  if (pollTimer) return;
+  poll(); // immediate
+  pollTimer = setInterval(poll, POLL_MS);
+}
+
+async function poll() {
+  if (!state.registered) return;
+
+  if (state.cvm && state.serverPubkey) {
+    try {
+      const raw = await state.cvm.callTool('get_snapshot', {}, CVM_TIMEOUT_MS);
+      if (raw) {
+        // Find our balance from ledger
+        const ledger = raw.ledger || [];
+        const me = ledger.find(e => (e.npub_short || '').includes(state.npub?.slice(0, 8)) || e.npub === state.npub);
+        if (me) {
+          state.balance = me.balance ?? state.balance;
+          state.promptsSent = me.prompts_sent ?? state.promptsSent;
+          state.tokensUsed = me.tokens_spent ?? state.tokensUsed;
+        }
+        // Also check if get_snapshot returns our participant data directly
+        // Update pricing
+        const pricing = raw.pricing || {};
+        const ours = pricing.ours || {};
+        state.currentPrice = ours.your_price || ours.effective_rate || 0;
+        const scarcity = raw.scarcity || {};
+        state.scarcityFactor = scarcity.factor || 1.0;
+        state.scarcityLevel = scarcity.level || 'low';
+        state.mode = 'live';
+        setConn('live');
+        updateUI();
+      }
+    } catch (e) {
+      console.warn('Poll failed:', e.message);
+      // Keep last known state, don't flip to demo on transient failures
+    }
+  } else {
+    // Demo mode — simulate price drift
+    if (state.currentPrice === 0) state.currentPrice = 0.026;
+    state.currentPrice += (Math.random() - 0.5) * 0.002;
+    state.currentPrice = Math.max(0.01, state.currentPrice);
+    setConn('demo');
+    updateUI();
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   UI UPDATE
+   ════════════════════════════════════════════════════════════════════════ */
+function updateUI() {
+  // Balance
+  document.getElementById('balance-big').textContent = fmtTok(state.balance);
+  document.getElementById('balance-granted').textContent = fmtTok(state.granted) + ' granted';
+
+  // Spend
+  document.getElementById('spend-prompts').textContent = state.promptsSent;
+  document.getElementById('spend-tokens').textContent = fmtTok(state.tokensUsed);
+  const avgCost = state.promptsSent > 0 ? (state.tokensUsed / state.promptsSent) : 0;
+  document.getElementById('spend-avg').textContent = fmtTok(Math.round(avgCost)) + ' tok';
+  if (state.joinedAt) {
+    const d = new Date(state.joinedAt);
+    document.getElementById('spend-since').textContent = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  }
+
+  // Price
+  document.getElementById('price-big').textContent = state.currentPrice > 0 ? '$' + state.currentPrice.toFixed(4) : '—';
+  document.getElementById('price-scarcity').textContent = state.scarcityFactor.toFixed(1) + '×';
+  document.getElementById('price-level').textContent = state.scarcityLevel;
+
+  // Cost preview
+  updateCostPreview();
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   INIT
+   ════════════════════════════════════════════════════════════════════════ */
+async function init() {
+  // Set up event listeners
+  document.getElementById('btn-nip07').addEventListener('click', handleNIP07Login);
+  document.getElementById('btn-npub').addEventListener('click', handleNpubLogin);
+  document.getElementById('npub-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleNpubLogin();
+  });
+  document.getElementById('btn-send').addEventListener('click', sendPrompt);
+  document.getElementById('prompt-input').addEventListener('input', updateCostPreview);
+  document.getElementById('prompt-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      sendPrompt();
+    }
+  });
+
+  // Disable NIP07 button if not available
+  if (typeof window.nostr === 'undefined') {
+    const btn = document.getElementById('btn-nip07');
+    btn.disabled = true;
+    btn.title = 'No Nostr wallet detected';
+    btn.innerHTML = '<span class="icon"> nostr</span> No Wallet Found';
+  }
+
+  // Try CVM connection
+  state.serverPubkey = resolveServerKey();
+  // Test injection hook: if window.__testCVM is set, use it as the CVM client
+  if (window.__testCVM) {
+    state.cvm = window.__testCVM;
+    state.serverPubkey = 'test-injected';
+    setConn('live');
+  } else if (state.serverPubkey && window.NostrTools) {
+    try {
+      state.cvm = new CVMClient(state.serverPubkey);
+      setConn('connecting');
+      await state.cvm.connect();
+      console.info('CVM client connected. Server:', state.serverPubkey.slice(0, 16) + '…');
+    } catch (e) {
+      console.warn('CVM connect failed:', e.message);
+      state.cvm = null;
+      setConn('demo');
+    }
+  } else {
+    setConn('demo');
+  }
+
+  // Check for pre-set npub (e.g. from URL or localStorage)
+  const presetNpub = param('npub');
+  if (presetNpub) {
+    document.getElementById('npub-input').value = presetNpub;
+  }
+}
+
+init();
+</script>
+</body>
+</html>

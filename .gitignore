@@ -47,3 +47,5 @@ venv/
 .pytest_cache/
 .coverage
 htmlcov/
+demo/test-results/
+demo/node_modules/
