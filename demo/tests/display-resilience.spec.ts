@@ -162,3 +162,45 @@ test('connection badge stays LIVE between polls, does not flicker to connecting'
   const flickered = afterLive.some((t) => t && t.toLowerCase().includes('connecting'));
   expect(flickered, `badge flickered to connecting; history=${JSON.stringify(hist)}`).toBe(false);
 });
+
+/* ───────────────────────── TASK 3: STALE keeps data visible ─────────────────────────
+ * When the CVM goes offline AFTER data has loaded, panels must keep showing the
+ * last-known data (not blank) and the badge must read STALE, not "connecting". */
+test('panels keep showing data with STALE badge after CVM goes offline', async ({ page }) => {
+  const now = Date.now() / 1000;
+  mockSnapshot = {
+    ts: now,
+    quota: { ours: { used_pct: 32, remaining: 1360000, locked: false } },
+    pricing: {},
+    routing_decisions: [{ ts: now, provider: 'ours', model: 'glm-5.2', tokens: 1000, cost: 0.001, reason: 'test' }],
+    dispatch_gate: { can_dispatch: true, recommended_model: 'glm-5.2', reason: 'clear', effective_price_per_m: 0.03, safety_margin: 2 },
+    cost_today: 1.72,
+    cost_hour: 0.45,
+    participants: { count: 1, total_prompts: 6, total_tokens: 16247 },
+    scarcity: { factor: 1, level: 'low', budget_used_pct: 26 },
+    system: {},
+    pricing_meta: {},
+    provider_dist: {},
+    ledger: [],
+  };
+
+  await page.goto(`${baseUrl}/display-deploy/index.html?api=http://localhost:${mockCVMPort}`);
+
+  // Data must have loaded.
+  await expect(page.locator('#cost-big')).toContainText('$1', { timeout: 5000 });
+  await expect(page.locator('#conn-text')).toContainText('LIVE');
+
+  // Simulate the CVM restarting.
+  mockStatus = 503;
+
+  // Wait for at least one failed poll cycle.
+  await page.waitForTimeout(7000);
+
+  // Last-known data must still be visible (not blanked to $0.00).
+  const costText = await page.locator('#cost-big').textContent();
+  expect(costText, 'cost panel blanked during outage').toContain('$1');
+
+  // Badge must show STALE (we have prior data), not "connecting" or blank.
+  const badge = await page.locator('#conn-text').textContent();
+  expect(badge, `badge was ${badge} during outage`).toContain('STALE');
+});

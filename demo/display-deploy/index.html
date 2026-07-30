@@ -48,6 +48,8 @@ body{
 .badge.error .dot{background:var(--red)}
 .badge.connecting{border-color:var(--blue);color:var(--blue)}
 .badge.connecting .dot{background:var(--blue);animation:pulse 1s infinite}
+.badge.stale{border-color:var(--orange);color:var(--orange)}
+.badge.stale .dot{background:var(--orange);animation:pulse 1.5s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 
 /* ── responsive grid ── */
@@ -437,6 +439,7 @@ function setConn(mode){
   b.className='badge';
   if(mode==='live'){b.classList.add('live');t.textContent='LIVE · REAL DATA';}
   else if(mode==='connecting'){b.classList.add('connecting');t.textContent='connecting…';}
+  else if(mode==='stale'){b.classList.add('stale');t.textContent='STALE · RECONNECTING';}
   else{b.classList.add('error');t.textContent='OFFLINE';}
 }
 
@@ -722,7 +725,8 @@ async function poll(){
     setConn('live');
   }catch(e){
     console.warn('Snapshot fetch failed:', e.message);
-    setConn('offline');
+    if(state.snapshot) setConn('stale');   // have prior data → keep it visible, mark stale
+    else setConn('offline');                // no data yet → genuinely offline
   }
   renderAll();
 }
