@@ -375,7 +375,7 @@ body{
 // CVM server HTTP API — same host as the display, port 3000
 const API_BASE = (param('api') || `http://${location.hostname}:3000`).replace(/\/$/,'');
 // Participant nsite URL for the QR code
-const DEFAULT_PARTICIPANT_URL = 'https://participant.nsite.lol';
+const DEFAULT_PARTICIPANT_URL = 'https://npub13h0eushvdzdrygm545zr5zxr3qvk7zaqhrzyyepprflcjdu3u0yskxz53m.nsite.lol';
 
 const KEYS = ['ours','friend','ollama','ppq'];
 const KEY_LABEL = {ours:'OURS',friend:'FRIEND',ollama:'OLLAMA',ppq:'PPQ'};
@@ -484,7 +484,7 @@ function initMiniCharts(){
       paper_bgcolor:PLOT_BG,plot_bgcolor:PLOT_BG,margin:{l:38,r:38,t:4,b:20},
       showlegend:false,
       xaxis:{...axisBase(''),type:'date',gridcolor:PLOT_GRID,tickfont:{size:8,color:'#6e7681'},tickformat:'%H:%M'},
-      yaxis:{...axisBase('$/M','left'),tickformat:'.2f'},
+      yaxis:{...axisBase('$/M','left'),type:'log',tickformat:'.3f'},
       yaxis2:{...axisBase('%','right'),side:'right',overlaying:'y',showgrid:false,tickformat:'d',range:[0,60]},
       font:{family:'ui-monospace,monospace',size:9},
     },{displayModeBar:false,staticPlot:false,responsive:true});
