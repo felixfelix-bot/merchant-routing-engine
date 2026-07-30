@@ -1005,19 +1005,28 @@ async function init(){
   tickClock(); setInterval(tickClock,1000);
 
   // Try to connect to CVM server if configured
-  state.serverPubkey = resolveServerKey();
-  if(state.serverPubkey && window.NostrTools){
-    try{
-      state.cvm = new CVMClient(state.serverPubkey);
-      setConn('connecting');
-      await state.cvm.connect();
-      console.info('CVM client connected. Server:', state.serverPubkey.slice(0,16)+'…', 'Client:', state.cvm.pk.slice(0,16)+'…');
-    }catch(e){
-      console.warn('CVM connect failed, will use demo mode:', e.message);
-      state.cvm = null;
-    }
+  // Test injection hook: if window.__testCVM is set (by Playwright addInitScript),
+  // use it as the CVM client. Mirrors the participant nsite and lets the live
+  // get_snapshot path be exercised deterministically without real wss traffic.
+  if (window.__testCVM) {
+    state.cvm = window.__testCVM;
+    state.serverPubkey = 'test-injected';
+    setConn('live');
   } else {
-    console.info('No CVM server configured — running in DEMO MODE. Set ?server=npub1… to go live.');
+    state.serverPubkey = resolveServerKey();
+    if(state.serverPubkey && window.NostrTools){
+      try{
+        state.cvm = new CVMClient(state.serverPubkey);
+        setConn('connecting');
+        await state.cvm.connect();
+        console.info('CVM client connected. Server:', state.serverPubkey.slice(0,16)+'…', 'Client:', state.cvm.pk.slice(0,16)+'…');
+      }catch(e){
+        console.warn('CVM connect failed, will use demo mode:', e.message);
+        state.cvm = null;
+      }
+    } else {
+      console.info('No CVM server configured — running in DEMO MODE. Set ?server=npub1… to go live.');
+    }
   }
 
   // First poll + interval
