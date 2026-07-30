@@ -703,8 +703,9 @@ async function fetchSnapshotNostr(){
 }
 
 async function poll(){
+  const isFirst = !state.snapshot;          // only show "connecting" on first load
   try{
-    setConn('connecting');
+    if(isFirst) setConn('connecting');        // keep last status on subsequent polls
     let raw;
     if(USE_NOSTR){
       raw = await fetchSnapshotNostr();

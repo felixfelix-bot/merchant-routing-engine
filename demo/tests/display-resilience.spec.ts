@@ -107,3 +107,58 @@ test('display uses Nostr transport when no api param provided', async ({ page })
   const httpFetches = await page.evaluate(() => (window as any).__http_fetches);
   expect(httpFetches).toBe(0);
 });
+
+/* ───────────────────────── TASK 2: no badge flicker between polls ─────────────────────────
+ * After the first successful load the badge is LIVE. On every subsequent poll
+ * the badge must NOT drop back to "connecting" while the fetch is in flight —
+ * it should stay LIVE until the result is known. We record every conn-text
+ * mutation via a MutationObserver and assert "connecting" never reappears. */
+test('connection badge stays LIVE between polls, does not flicker to connecting', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__conn_history = [];
+    const record = () => {
+      const el = document.getElementById('conn-text');
+      if (el) (window as any).__conn_history.push(el.textContent);
+    };
+    const start = () => {
+      record();
+      new MutationObserver(record).observe(document.getElementById('conn-text')!, {
+        childList: true, characterData: true, subtree: true,
+      });
+    };
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+    else start();
+  });
+
+  const now = Date.now() / 1000;
+  mockSnapshot = {
+    ts: now,
+    quota: { ours: { used_pct: 30, remaining: 1400000, locked: false } },
+    pricing: {},
+    routing_decisions: [{ ts: now, provider: 'ours', model: 'glm-5.2', tokens: 1000, cost: 0.001, reason: 'test' }],
+    dispatch_gate: { can_dispatch: true, recommended_model: 'glm-5.2', reason: 'clear', effective_price_per_m: 0.03, safety_margin: 2 },
+    cost_today: 1.5,
+    cost_hour: 0.3,
+    participants: { count: 1, total_prompts: 5, total_tokens: 10000 },
+    scarcity: { factor: 1, level: 'low', budget_used_pct: 20 },
+    system: {},
+    pricing_meta: {},
+    provider_dist: {},
+    ledger: [],
+  };
+
+  await page.goto(`${baseUrl}/display-deploy/index.html?api=http://localhost:${mockCVMPort}`);
+
+  // Wait for the first LIVE badge.
+  await expect(page.locator('#conn-text')).toContainText('LIVE', { timeout: 5000 });
+
+  // Watch across a full poll cycle (5s) + margin.
+  await page.waitForTimeout(7000);
+
+  const hist: string[] = await page.evaluate(() => (window as any).__conn_history);
+  // Everything after the first LIVE must never read "connecting".
+  const firstLiveIdx = hist.findIndex((t) => t && t.includes('LIVE'));
+  const afterLive = hist.slice(firstLiveIdx + 1);
+  const flickered = afterLive.some((t) => t && t.toLowerCase().includes('connecting'));
+  expect(flickered, `badge flickered to connecting; history=${JSON.stringify(hist)}`).toBe(false);
+});
