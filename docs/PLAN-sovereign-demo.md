@@ -360,6 +360,37 @@ Same as v2 plan — Cashu mint on VPS, real ecash payments for API access.
 7. "Here's my cost basis, my price, and my margin per provider." → per-key charts
 8. "This isn't slides. These are real API calls, real money, routing through Nostr-addressed infrastructure." → cost meter climbing
 
+## QUALITY GATE: PLAYWRIGHT TESTS + VIDEOS (MANDATORY FOR ALL TASKS)
+
+Every task MUST include:
+1. **Playwright test suite** — full coverage of all functionality
+2. **Playwright video recording** — `--video=on`, saved to `demo/test-videos/`
+3. **Commit + push** — code, tests, and videos pushed to repo (dr remote = felixfelix-bot fork)
+4. **Video sent to Felix** — for A4 (integration), the video MUST be delivered via MEDIA: before Felix is asked to test
+
+Test files:
+- `test/cvm-server.spec.ts` (A1) — all 5 CVM tools
+- `test/display-nsite.spec.ts` (A2) — all 8 panels
+- `test/participant-nsite.spec.ts` (A3) — full participant flow
+- `test/integration.spec.ts` (A4) — end-to-end multi-page
+
+Video files:
+- `demo/test-videos/cvm-server-test.mp4`
+- `demo/test-videos/display-nsite-test.mp4`
+- `demo/test-videos/participant-nsite-test.mp4`
+- `demo/test-videos/integration-test.mp4` (THE money shot — Felix reviews this)
+
+Playwright config:
+- `playwright.config.ts` in demo/ directory
+- `--video=on` for all tests
+- Mobile emulation for participant tests (375px viewport)
+- Headless mode for CI, headed mode for video recording
+
+No task is complete until: tests pass + video recorded + code pushed.
+A4 not complete until: integration video sent to Felix via MEDIA:.
+
+---
+
 ## RISKS
 
 1. **Relay latency** — mitigated: 3 relays, persistent connections, measure during A4
