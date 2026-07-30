@@ -391,6 +391,8 @@ const KEYS = ['ours','friend','ollama','ppq'];
 const KEY_LABEL = {ours:'OURS',friend:'FRIEND',ollama:'OLLAMA',ppq:'PPQ'};
 const KEY_COLOR = {ours:'#58a6ff',friend:'#bc8cff',ollama:'#39d2c0',ppq:'#f0883e'};
 const POLL_MS = 5000;
+const POLL_MIN = 5000;                  // base poll interval; reset to this on recovery
+const POLL_MAX = 30000;                 // hard cap during extended outages
 const HIST_MAX = 480;                  // ~40min at 5s polling
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -685,6 +687,7 @@ function renderAll(){
    SNAPSHOT FETCH — Nostr-native (production) with HTTP fallback (?api=)
    ════════════════════════════════════════════════════════════════════════ */
 let nostrPool = null;
+let pollInterval = POLL_MS;            // current delay; grows on failure, resets on success
 
 /* Reads the CVM's latest snapshot from its public kind-30315 replaceable
    broadcast over Nostr relays. Same transport the participant app uses, so the
@@ -707,6 +710,7 @@ async function fetchSnapshotNostr(){
 
 async function poll(){
   const isFirst = !state.snapshot;          // only show "connecting" on first load
+  let ok = false;
   try{
     if(isFirst) setConn('connecting');        // keep last status on subsequent polls
     let raw;
@@ -723,12 +727,24 @@ async function poll(){
     state.snapshot = snap;
     if(snap.cost_today!=null) state.costToday=snap.cost_today;
     setConn('live');
+    ok = true;
   }catch(e){
     console.warn('Snapshot fetch failed:', e.message);
     if(state.snapshot) setConn('stale');   // have prior data → keep it visible, mark stale
     else setConn('offline');                // no data yet → genuinely offline
   }
   renderAll();
+  // Self-scheduling poll with exponential backoff on failure (5s→10s→20s→30s),
+  // reset to 5s the moment a fetch succeeds. Replaces the fixed setInterval.
+  let nextDelay;
+  if(ok){
+    nextDelay = POLL_MIN;
+    pollInterval = POLL_MIN;               // recover straight to the base rate
+  }else{
+    nextDelay = pollInterval;              // honour the current interval first...
+    pollInterval = Math.min(pollInterval * 2, POLL_MAX);   // ...then back off
+  }
+  setTimeout(poll, nextDelay);
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -765,8 +781,7 @@ async function init(){
       }
     } catch(e) { console.warn('Price history fetch failed (non-fatal):', e.message); }
   }
-  await poll();
-  setInterval(poll, POLL_MS);
+  await poll();                     // poll() self-schedules subsequent polls (with backoff)
 }
 init();
 </script>

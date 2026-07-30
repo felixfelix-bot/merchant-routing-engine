@@ -204,3 +204,41 @@ test('panels keep showing data with STALE badge after CVM goes offline', async (
   const badge = await page.locator('#conn-text').textContent();
   expect(badge, `badge was ${badge} during outage`).toContain('STALE');
 });
+
+/* ───────────────────────── TASK 4: exponential backoff ─────────────────────────
+ * During an extended outage the poll interval must grow (5s→10s→20s→30s) and
+ * reset to 5s on recovery. Rather than count fetches inside racy fixed time
+ * windows, we timestamp every /snapshot fetch and assert the gap between
+ * consecutive polls widens — the most direct proof of backoff. */
+test('poll interval backs off exponentially during extended outage', async ({ page }) => {
+  mockStatus = 503;   // CVM down from the very first poll
+
+  await page.addInitScript(() => {
+    (window as any).__snap_times = [];
+    const of = window.fetch;
+    window.fetch = function (...a: any[]) {
+      const u = String(a[0]);
+      if (u.includes('/snapshot')) (window as any).__snap_times.push(performance.now());
+      return (of as any).apply(this, a);
+    };
+  });
+
+  await page.goto(`${baseUrl}/display-deploy/index.html?api=http://localhost:${mockCVMPort}`);
+
+  // Wait for ≥3 snapshot fetches: poll1 (load), poll2 (~5s), poll3 (~15s).
+  for (let i = 0; i < 60; i++) {
+    const n = await page.evaluate(() => (window as any).__snap_times.length);
+    if (n >= 3) break;
+    await page.waitForTimeout(500);
+  }
+
+  const times: number[] = await page.evaluate(() => (window as any).__snap_times);
+  expect(times.length, `only ${times.length} snapshot fetches recorded`).toBeGreaterThanOrEqual(3);
+
+  const gap1 = times[1] - times[0];   // expect ~5000ms
+  const gap2 = times[2] - times[1];   // expect ~10000ms
+  // The second gap must be noticeably larger than the first — backoff is active.
+  expect(gap2, `gaps not widening: ${gap1.toFixed(0)}ms then ${gap2.toFixed(0)}ms`).toBeGreaterThan(gap1);
+  // And clearly in the ~10s band (not still ~5s).
+  expect(gap2).toBeGreaterThanOrEqual(8000);
+});
