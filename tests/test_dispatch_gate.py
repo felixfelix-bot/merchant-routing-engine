@@ -444,6 +444,13 @@ def test_unhealthy_key_skipped():
     assert r["can_dispatch"] is True
 
 
+def test_both_keys_unhealthy_holds():
+    """MINOR M3: both keys unhealthy → no candidate exists → HOLD."""
+    r = _call(quota=_quota(ours_pct=10.0, friend_pct=10.0,
+                          ours_healthy=False, friend_healthy=False))
+    assert r["can_dispatch"] is False
+
+
 def test_key_at_95pct_skipped():
     """A key at/above the hold threshold (95%) is not a candidate."""
     # Both at 95%: remaining 100K. coding full needs 400K, flash 120K → HOLD.

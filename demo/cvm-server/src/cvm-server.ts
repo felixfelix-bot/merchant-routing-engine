@@ -1079,6 +1079,43 @@ async function main(): Promise<void> {
   console.log(`[cvm] Waiting for requests…`);
   console.log(`[cvm] Test:  cvmi call ${serverPk} tool:get_snapshot`);
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HTTP ENDPOINT — serves real snapshot data for the display dashboard
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const httpPort = parseInt(process.env.CVM_HTTP_PORT || "3000", 10);
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+
+  Bun.serve({
+    port: httpPort,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (req.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: corsHeaders });
+      }
+      if (url.pathname === "/snapshot") {
+        const data = TOOLS.get_snapshot({});
+        return Response.json(data, { headers: corsHeaders });
+      }
+      if (url.pathname === "/price-history") {
+        const hours = parseInt(url.searchParams.get("hours") || "24", 10);
+        const data = TOOLS.get_price_history({ hours });
+        return Response.json(data, { headers: corsHeaders });
+      }
+      if (url.pathname === "/health") {
+        return Response.json({ ok: true, ts: Date.now(), participants: ledgerCount() }, { headers: corsHeaders });
+      }
+      return new Response("Not found\n\nEndpoints: /snapshot, /price-history, /health\n", {
+        status: 404, headers: { ...corsHeaders, "Content-Type": "text/plain" },
+      });
+    },
+  });
+  console.log(`[cvm] HTTP server on http://localhost:${httpPort} (endpoints: /snapshot, /price-history, /health)`);
+
   // Heartbeat every 60s
   setInterval(() => {
     const mem = process.memoryUsage();
