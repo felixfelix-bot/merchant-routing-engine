@@ -1116,6 +1116,34 @@ async function main(): Promise<void> {
   });
   console.log(`[cvm] HTTP server on http://localhost:${httpPort} (endpoints: /snapshot, /price-history, /health)`);
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PUBLIC SNAPSHOT PUBLISHER — kind 30315 (replaceable parameterized)
+  // Broadcasts the current snapshot as plain JSON every 5 seconds so the
+  // display dashboard (and anyone else) can read it without a private key.
+  // ═══════════════════════════════════════════════════════════════════════════
+  setInterval(async () => {
+    try {
+      const snap = TOOLS.get_snapshot({});
+      const content = JSON.stringify(snap);
+      const signedEvent = finalizeEvent({
+        kind: 30315,
+        pubkey: serverPk,
+        content,
+        tags: [["d", "cvm-snapshot"]],
+        created_at: Math.floor(Date.now() / 1000),
+      }, serverSk);
+
+      for (const relay of connectedRelays) {
+        try { await relay.publish(signedEvent); } catch (e: any) {
+          // non-fatal — relay may be temporarily down
+        }
+      }
+      console.log(`[cvm] published public snapshot: ${content.length} bytes`);
+    } catch (e: any) {
+      console.warn(`[cvm] public publish failed: ${e.message}`);
+    }
+  }, 5_000);
+
   // Heartbeat every 60s
   setInterval(() => {
     const mem = process.memoryUsage();

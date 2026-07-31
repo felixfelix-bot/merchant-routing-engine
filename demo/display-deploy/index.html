@@ -687,40 +687,49 @@ function renderAll(){
    SNAPSHOT FETCH — Nostr-native (production) with HTTP fallback (?api=)
    ════════════════════════════════════════════════════════════════════════ */
 let nostrPool = null;
+let nostrSub = null;
 let pollInterval = POLL_MS;            // current delay; grows on failure, resets on success
 
-/* Reads the CVM's latest snapshot from its public kind-30315 replaceable
-   broadcast over Nostr relays. Same transport the participant app uses, so the
-   display works from any nsite gateway with no localhost dependency. */
-async function fetchSnapshotNostr(){
+/* In Nostr mode the display subscribes once to the CVM's public kind-30315
+   replaceable event. New snapshots are pushed in real-time — no polling
+   required. The subscription stays open for the lifetime of the page. */
+async function initNostr(){
+  if(nostrSub) return;                     // already subscribed
   const N = window.NostrTools;
   if(!N || !N.SimplePool) throw new Error('nostr-tools not loaded');
   if(!nostrPool) nostrPool = new N.SimplePool();
-  // querySync resolves at EOSE; race against a timeout so a slow/unreachable
-  // relay set can never hang the poll loop indefinitely.
-  const events = await Promise.race([
-    nostrPool.querySync(CVM_RELAYS, { kinds:[30315], authors:[CVM_NPUB_HEX], limit:1 }),
-    new Promise<never>((_, rej) => setTimeout(() => rej(new Error('nostr query timeout')), 8000)),
-  ]);
-  if(!events || !events.length) return null;
-  // Most recent by created_at (defensive — limit:1 normally suffices).
-  const evt = events.reduce((a, b) => (a.created_at >= b.created_at ? a : b));
-  return JSON.parse(evt.content);
+  nostrSub = nostrPool.subscribeMany(CVM_RELAYS, {
+    kinds: [30315],
+    authors: [CVM_NPUB_HEX],
+    "#d": ["cvm-snapshot"],
+    limit: 1,
+  }, {
+    onevent: (event) => {
+      try {
+        const raw = JSON.parse(event.content);
+        const snap = normalizeSnapshot(raw);
+        if(!snap) throw new Error('invalid snapshot');
+        state.snapshot = snap;
+        if(raw.cost_today != null) state.costToday = raw.cost_today;
+        setConn('live');
+        renderAll();
+      } catch(e) {
+        console.warn('Failed to parse Nostr snapshot:', e.message);
+      }
+    },
+    oneose: () => { console.log('Nostr EOSE'); },
+  });
 }
 
-async function poll(){
-  const isFirst = !state.snapshot;          // only show "connecting" on first load
+/* HTTP fallback poll — used when ?api=<url> is given (local testing). */
+async function pollHttp(){
+  const isFirst = !state.snapshot;
   let ok = false;
   try{
-    if(isFirst) setConn('connecting');        // keep last status on subsequent polls
-    let raw;
-    if(USE_NOSTR){
-      raw = await fetchSnapshotNostr();
-    } else {
-      const resp = await fetch(`${API_BASE}/snapshot`, {signal: AbortSignal.timeout(8000)});
-      if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      raw = await resp.json();
-    }
+    if(isFirst) setConn('connecting');
+    const resp = await fetch(`${API_BASE}/snapshot`, {signal: AbortSignal.timeout(8000)});
+    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const raw = await resp.json();
     if(!raw) throw new Error('no snapshot data');
     const snap = normalizeSnapshot(raw);
     if(!snap) throw new Error('invalid snapshot');
@@ -729,22 +738,20 @@ async function poll(){
     setConn('live');
     ok = true;
   }catch(e){
-    console.warn('Snapshot fetch failed:', e.message);
-    if(state.snapshot) setConn('stale');   // have prior data → keep it visible, mark stale
-    else setConn('offline');                // no data yet → genuinely offline
+    console.warn('HTTP snapshot fetch failed:', e.message);
+    if(state.snapshot) setConn('stale');
+    else setConn('offline');
   }
   renderAll();
-  // Self-scheduling poll with exponential backoff on failure (5s→10s→20s→30s),
-  // reset to 5s the moment a fetch succeeds. Replaces the fixed setInterval.
   let nextDelay;
   if(ok){
     nextDelay = POLL_MIN;
-    pollInterval = POLL_MIN;               // recover straight to the base rate
+    pollInterval = POLL_MIN;
   }else{
-    nextDelay = pollInterval;              // honour the current interval first...
-    pollInterval = Math.min(pollInterval * 2, POLL_MAX);   // ...then back off
+    nextDelay = pollInterval;
+    pollInterval = Math.min(pollInterval * 2, POLL_MAX);
   }
-  setTimeout(poll, nextDelay);
+  setTimeout(pollHttp, nextDelay);
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -781,7 +788,19 @@ async function init(){
       }
     } catch(e) { console.warn('Price history fetch failed (non-fatal):', e.message); }
   }
-  await poll();                     // poll() self-schedules subsequent polls (with backoff)
+  if(USE_NOSTR){
+    // Nostr mode: subscribe once, updates are pushed in real-time
+    setConn('connecting');
+    try {
+      await initNostr();
+    } catch(e) {
+      console.warn('Nostr init failed:', e.message);
+      setConn('offline');
+    }
+  } else {
+    // HTTP mode: poll with backoff
+    await pollHttp();
+  }
 }
 init();
 </script>
