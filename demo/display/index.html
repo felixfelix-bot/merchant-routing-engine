@@ -309,12 +309,12 @@ body{
 
   <!-- ═══ PANEL 3: PER-KEY PRICE CHARTS ═══ -->
   <div class="card col-charts">
-    <h2><span class="num">3</span> Per-Key Price Economics — cost basis · your price · margin%</h2>
+    <h2><span class="num">3</span> Per-Key Price Economics — cost basis · your price · MARGIN</h2>
     <div class="charts-grid" id="charts-grid"></div>
     <div class="legend-row">
       <span class="lg"><span class="swatch sw-cost"></span> Cost basis ($/M)</span>
       <span class="lg"><span class="swatch sw-price"></span> Your price + margin ($/M)</span>
-      <span class="lg"><span class="swatch sw-margin"></span> Margin % (right axis)</span>
+      <span class="lg"><span class="swatch sw-margin"></span> MARGIN % (right axis)</span>
     </div>
   </div>
 
@@ -492,7 +492,7 @@ function initMiniCharts(){
     Plotly.newPlot('mc-'+k,[
       {x:h.map(p=>p.t*1000),y:h.map(p=>p.cost_basis),name:'Cost basis',mode:'lines',line:{color:'#58a6ff',width:2},yaxis:'y'},
       {x:h.map(p=>p.t*1000),y:h.map(p=>p.your_price),name:'Your price',mode:'lines',line:{color:'#39d2c0',width:2,dash:'dash'},yaxis:'y'},
-      {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),name:'Margin %',mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)',yaxis:'y2'},
+      {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),name:'MARGIN %',mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)',yaxis:'y2'},
     ],{
       paper_bgcolor:PLOT_BG,plot_bgcolor:PLOT_BG,margin:{l:38,r:38,t:4,b:20},
       showlegend:false,
@@ -513,7 +513,7 @@ function updateMiniCharts(){
       {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)'},
     ],document.getElementById('mc-'+k).layout,{displayModeBar:false,responsive:true});
     const el=document.getElementById('mc-price-'+k);
-    if(el) el.textContent=fmt$(last.your_price,3)+'/M · '+last.margin_pct.toFixed(0)+'%';
+    if(el) el.textContent=fmt$(last.your_price,3)+'/M · MARGIN '+last.margin_pct.toFixed(0)+'%';
   }
 }
 

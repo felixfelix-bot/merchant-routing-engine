@@ -52,7 +52,7 @@ const CFG = {
   // Pricing model
   flatKeyCostPerM: 0.02,    // $/M for ours+friend (flat-rate keys)
   ollamaMonthlyUsd: 100.0,
-  margin: 0.30,             // 30% markup
+  margin: 0.266,            // 21% displayed margin (0.266 markup = 21% of sell price)
   btcPriceUsd: 100_000,
   demoModel: process.env.DEMO_MODEL || "glm-4.5-flash",
   proxyCacheMs: 2_000,
