@@ -381,8 +381,10 @@ const API_BASE = (param('api') || `http://${location.hostname}:3000`).replace(/\
 // Nostr-native transport: the CVM broadcasts its current snapshot as a
 // replaceable kind-30315 event. With no ?api= override the display reads it
 // straight from the relays — works from any nsite gateway, no localhost.
-const CVM_NPUB_HEX = '10814a5dc07e3e876867ffb9e8781af47fa599b677fb27e051f6b5261c1d4f35';
-const CVM_RELAYS = ['wss://relay.primal.net','wss://nos.lol','wss://nostr.mom'];
+const CVM_NPUB_HEX = param('npub') || '10814a5dc07e3e876867ffb9e8781af47fa599b677fb27e051f6b5261c1d4f35';
+const CVM_RELAYS = param('relays')
+  ? param('relays').split(',').map(s => s.trim()).filter(Boolean)
+  : ['wss://relay.primal.net','wss://nos.lol','wss://nostr.mom'];
 const USE_NOSTR = !param('api');   // ?api=<url> forces the local HTTP-testing path
 // Participant nsite URL for the QR code
 const DEFAULT_PARTICIPANT_URL = 'https://npub13h0eushvdzdrygm545zr5zxr3qvk7zaqhrzyyepprflcjdu3u0yskxz53m.nsite.lol';

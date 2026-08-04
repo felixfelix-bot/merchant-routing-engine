@@ -2,7 +2,9 @@ import { test, expect } from '@playwright/test';
 import * as path from 'path';
 import * as http from 'http';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { fileURLToPath } from 'url';
+import { generateSecretKey, getPublicKey, finalizeEvent } from 'nostr-tools/pure';
 
 /*
  * Display resilience + Nostr-native transport tests (DR1, Tasks 1-4).
@@ -502,4 +504,268 @@ test('Nostr snapshot bootstraps price-history charts on load (Task 13)', async (
     return el && Array.isArray(el.data) && el.data[0] ? el.data[0].x.length : 0;
   });
   expect(oursPoints, 'OURS chart did not bootstrap from price_history').toBeGreaterThanOrEqual(3);
+});
+
+/* ════════════════════════════════════════════════════════════════════════
+   MOCK NOSTR RELAY — a REAL WebSocket server speaking NIP-01 (Tasks 11, 12)
+   ════════════════════════════════════════════════════════════════════════
+   Tasks 9/10/13 inject a fake SimplePool (window.__testNostrPool) which proves
+   the display reacts to events but NEVER exercises the real Nostr wire protocol
+   — a bug in the WebSocket transport, the relay framing, or nostr-tools itself
+   would slip past. Tasks 11 & 12 close that gap: this is a minimal but genuine
+   RFC 6455 WebSocket server implementing the NIP-01 relay handshake (REQ/EVENT/
+   EOSE/OK). The display's authentic nostr-tools SimplePool opens a ws:// client
+   connection to it, sends a real REQ, and receives signed kind-30315 events.
+   Self-contained framing keeps the test free of any WebSocket-server dependency.
+   The display's SimplePool verifies signatures AND matches the filter client-side
+   (nostr-tools pool.js:573), so events are properly signed with a fresh keypair
+   whose pubkey is injected via the ?npub= test seam. */
+
+// Deterministic test keypair (fresh per run; pubkey passed to the display via
+// ?npub= so its authors-filter matches the events we sign).
+const TEST_SK: Uint8Array = generateSecretKey();
+const TEST_PUBKEY: string = getPublicKey(TEST_SK);
+
+// One WS connection: accumulates bytes, decodes RFC 6455 frames (unmasking
+// client→server frames), and encodes server→client text frames (unmasked).
+class WsConn {
+  buf: Buffer = Buffer.alloc(0);
+  private parts: Buffer[] = [];
+  constructor(public sock: any) {}
+  feed(chunk: Buffer): string[] {
+    this.buf = Buffer.concat([this.buf, chunk]);
+    const msgs: string[] = [];
+    while (this.buf.length >= 2) {
+      const b0 = this.buf[0], b1 = this.buf[1];
+      const fin = !!(b0 & 0x80);
+      const opcode = b0 & 0x0f;
+      const masked = !!(b1 & 0x80);
+      let len = b1 & 0x7f;
+      let off = 2;
+      if (len === 126) { if (this.buf.length < 4) break; len = this.buf.readUInt16BE(2); off = 4; }
+      else if (len === 127) { if (this.buf.length < 10) break; len = Number(this.buf.readBigUInt64BE(2)); off = 10; }
+      let mask: Buffer | null = null;
+      if (masked) { if (this.buf.length < off + 4) break; mask = this.buf.slice(off, off + 4); off += 4; }
+      if (this.buf.length < off + len) break;             // incomplete frame — wait for more
+      let payload = this.buf.slice(off, off + len);
+      if (mask) { const u = Buffer.allocUnsafe(len); for (let i = 0; i < len; i++) u[i] = payload[i] ^ mask[i & 3]; payload = u; }
+      this.buf = this.buf.slice(off + len);
+      if (opcode === 0x8) { try { this.sock.end(); } catch {} return msgs; }   // close
+      if (opcode === 0x9) { this.sendRaw(Buffer.from([0x8a, 0x00])); continue; } // ping → pong
+      if (opcode === 0x1) this.parts = [payload];           // text
+      else if (opcode === 0x0) this.parts.push(payload);    // continuation
+      else continue;                                         // ignore binary/0x2
+      if (fin) { msgs.push(Buffer.concat(this.parts).toString('utf8')); this.parts = []; }
+    }
+    return msgs;
+  }
+  private sendRaw(frame: Buffer) { try { this.sock.write(frame); } catch {} }
+  send(obj: any) {
+    const payload = Buffer.from(JSON.stringify(obj), 'utf8');
+    const len = payload.length;
+    let header: number[];
+    if (len < 126) header = [0x81, len];
+    else if (len < 65536) header = [0x81, 126, (len >> 8) & 0xff, len & 0xff];
+    else header = [0x81, 127, 0, 0, 0, 0, (len >>> 24) & 0xff, (len >>> 16) & 0xff, (len >>> 8) & 0xff, len & 0xff];
+    this.sendRaw(Buffer.concat([Buffer.from(header), payload]));
+  }
+  close() { try { this.sock.destroy(); } catch {} }
+}
+
+interface RelaySub { id: string; filter: any; }
+
+class MockRelay {
+  server: http.Server;
+  private conns = new Set<WsConn>();
+  private subs = new Map<WsConn, RelaySub[]>();
+  private events: any[] = [];
+  port = 0;
+  constructor() {
+    this.server = http.createServer((req, res) => { res.writeHead(404); res.end(); });
+    this.server.on('upgrade', (req, socket) => {
+      const key = req.headers['sec-websocket-key'];
+      if (!key) { try { socket.destroy(); } catch {} return; }
+      const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n');
+      const conn = new WsConn(socket);
+      this.conns.add(conn);
+      this.subs.set(conn, []);
+      socket.on('data', (c: Buffer) => { for (const m of conn.feed(c)) this.onMsg(conn, m); });
+      socket.on('close', () => { this.conns.delete(conn); this.subs.delete(conn); });
+      socket.on('error', () => { this.conns.delete(conn); this.subs.delete(conn); });
+    });
+  }
+  async start(): Promise<void> {
+    return new Promise((r) => this.server.listen(0, '127.0.0.1', () => {
+      this.port = (this.server.address() as any).port; r();
+    }));
+  }
+  url(): string { return `ws://127.0.0.1:${this.port}`; }
+  async stop(): Promise<void> {
+    for (const c of this.conns) c.close();
+    this.conns.clear(); this.subs.clear();
+    return new Promise((r) => this.server.close(() => r()));
+  }
+  /** Active subscription count across all connections (for synchronisation). */
+  subCount(): number { let n = 0; for (const l of this.subs.values()) n += l.length; return n; }
+  /** Resolve once the display has registered at least one REQ subscription. */
+  async waitForSubscriber(timeoutMs = 5000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) { if (this.subCount() > 0) return; await new Promise(r => setTimeout(r, 50)); }
+    throw new Error(`no subscriber connected within ${timeoutMs}ms`);
+  }
+  /** Sign a kind-30315 snapshot from the CVM/test npub, store it, and broadcast
+   *  to every active subscription whose filter it matches. Returns the event. */
+  publishSnapshot(snapshot: any): any {
+    const ev = finalizeEvent({
+      kind: 30315,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [['d', 'cvm-snapshot']],
+      content: JSON.stringify(snapshot),
+    }, TEST_SK);
+    this.events.push(ev);
+    for (const [c, list] of this.subs) for (const s of list) if (this.matches(ev, s.filter)) c.send(['EVENT', s.id, ev]);
+    return ev;
+  }
+  private onMsg(conn: WsConn, msg: string) {
+    let a: any; try { a = JSON.parse(msg); } catch { return; }
+    if (!Array.isArray(a)) return;
+    if (a[0] === 'REQ') {
+      const id = a[1], filter = a[2] || {};
+      (this.subs.get(conn) || []).push({ id, filter });
+      // Replay stored events matching the filter (respecting limit), then EOSE.
+      let matching = this.events.filter(e => this.matches(e, filter));
+      if (typeof filter.limit === 'number') matching = matching.slice(-filter.limit);
+      for (const ev of matching) conn.send(['EVENT', id, ev]);
+      conn.send(['EOSE', id]);
+    } else if (a[0] === 'EVENT') {
+      const ev = a[1];
+      if (ev && ev.id) { this.events.push(ev); conn.send(['OK', ev.id, true, '']); }
+      for (const [c, list] of this.subs) for (const s of list) if (this.matches(ev, s.filter)) c.send(['EVENT', s.id, ev]);
+    } else if (a[0] === 'CLOSE') {
+      const id = a[1];
+      this.subs.set(conn, (this.subs.get(conn) || []).filter(s => s.id !== id));
+    }
+  }
+  // Minimal but correct NIP-01 filter matching (kinds, authors, #d).
+  private matches(ev: any, f: any): boolean {
+    if (!f || typeof f !== 'object') return true;
+    if (Array.isArray(f.kinds) && !f.kinds.includes(ev.kind)) return false;
+    if (Array.isArray(f.authors) && !f.authors.includes(ev.pubkey)) return false;
+    if (Array.isArray(f['#d'])) {
+      const d = (ev.tags || []).find((t: any) => Array.isArray(t) && t[0] === 'd');
+      if (!d || !f['#d'].includes(d[1])) return false;
+    }
+    return true;
+  }
+}
+
+// A snapshot rich enough to populate every panel (mirrors the Task 5 fixture).
+function richSnapshot(costToday = 1.72): any {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    ts: now,
+    quota: { ours: { used_pct: 32.3, remaining: 1354000, locked: false }, friend: { used_pct: 91.0, remaining: 180000, locked: true } },
+    pricing: { ours: { cost_basis: 0.020, your_price: 0.030, margin_pct: 33 } },
+    routing_decisions: [{ ts: now - 5, provider: 'ours', model: 'glm-5.2', tokens: 3500, cost: 0.003, reason: 'flat-rate preferred' }],
+    dispatch_gate: { can_dispatch: true, recommended_model: 'glm-5.2', reason: 'sufficient headroom', effective_price_per_m: 0.03, safety_margin: 2 },
+    cost_today: costToday,
+    cost_hour: 0.45,
+    participants: { count: 1, total_prompts: 6, total_tokens: 16247 },
+    scarcity: { factor: 1.0, level: 'low', budget_used_pct: 26 },
+    system: { cpu_pct: 15, mem_pct: 50, load_per_core: 0.8 },
+    pricing_meta: {}, provider_dist: { ours: 60, friend: 40 }, ledger: [],
+  };
+}
+
+/* ───────────────────────── TASK 11: Positive Nostr E2E ─────────────────────────
+ * The existing "no HTTP calls" test (Task 1) passes even when Nostr is entirely
+ * broken — it only proves an absence of fetches. This test proves the positive:
+ * a real WebSocket relay pushes a signed kind-30315 event, the display's genuine
+ * nostr-tools SimplePool receives it over the wire, and EVERY panel actually
+ * populates with real data while the badge reads LIVE. No ?api= param is used —
+ * pure Nostr transport, end to end. */
+test('Nostr E2E: real relay pushes data, panels populate, badge LIVE (Task 11)', async ({ page }) => {
+  const relay = new MockRelay();
+  await relay.start();
+  try {
+    // Pre-store one signed snapshot so the REQ replay path delivers it the
+    // instant the display subscribes (no broadcast-timing race).
+    relay.publishSnapshot(richSnapshot(1.72));
+
+    // Count window.fetch calls — in Nostr mode there must be ZERO CVM HTTP calls.
+    await page.addInitScript(() => {
+      (window as any).__http_fetches = 0;
+      const of = window.fetch;
+      window.fetch = function (...a: any[]) {
+        const u = String(a[0]);
+        if (!u.includes('wss://') && !u.includes('nostr')) (window as any).__http_fetches++;
+        return (of as any).apply(this, a as any);
+      };
+    });
+
+    // No ?api= → pure Nostr. ?relays= + ?npub= point the display's real SimplePool
+    // at our mock relay and our test pubkey.
+    const url = `${baseUrl}/display-deploy/index.html?relays=${encodeURIComponent(relay.url())}&npub=${TEST_PUBKEY}&reconnect_ms=600000`;
+    await page.goto(url);
+
+    // Badge must reach LIVE on the relay-delivered snapshot.
+    await expect(page.locator('#conn-text')).toContainText('LIVE', { timeout: 8000 });
+
+    // Panel 5: cost meter — cost_today 1.72 renders "$1.72".
+    await expect(page.locator('#cost-big')).toContainText('$1');
+    await expect(page.locator('#burn-rate')).toContainText('$0.45');
+    // Panel 7: dispatch gate — CLEAR + recommended model.
+    await expect(page.locator('#gate-status')).toContainText('CLEAR');
+    await expect(page.locator('#gate-model')).toContainText('glm-5.2');
+    // Panel 4: quota — OURS key renders.
+    await expect(page.locator('#quota-wrap')).toContainText('OURS');
+    // Panel 6: request flow — one routing_decision → one flow card.
+    await expect(page.locator('#flow-list .flow-card')).toHaveCount(1);
+
+    // Pure Nostr transport: no CVM HTTP fetches occurred.
+    const httpFetches = await page.evaluate(() => (window as any).__http_fetches);
+    expect(httpFetches, 'Nostr mode must not issue CVM HTTP fetches').toBe(0);
+  } finally {
+    await relay.stop();
+  }
+});
+
+/* ───────────────────────── TASK 12: Nostr staleness transition ─────────────────────────
+ * With the display LIVE on a real relay, stop publishing events and assert the
+ * freshness watchdog transitions the badge LIVE → STALE while the last-known
+ * data stays on screen. This is the real-relay analogue of Task 9 (which used a
+ * fake pool). ?stale_ms= shrinks the 15s production threshold so the transition
+ * is observed in seconds; the assertion semantics are identical to production. */
+test('Nostr staleness: LIVE → STALE when relay stops publishing (Task 12)', async ({ page }) => {
+  const relay = new MockRelay();
+  await relay.start();
+  let publishTimer: NodeJS.Timeout | null = null;
+  try {
+    // Display connects to the relay with a short staleness window.
+    const url = `${baseUrl}/display-deploy/index.html?relays=${encodeURIComponent(relay.url())}&npub=${TEST_PUBKEY}&stale_ms=2000&reconnect_ms=600000`;
+    await page.goto(url);
+
+    // Wait for the display's REQ subscription to register, then start a live
+    // publish loop (every 500ms) so the display reaches and stays LIVE.
+    await relay.waitForSubscriber();
+    publishTimer = setInterval(() => relay.publishSnapshot(richSnapshot(2.34)), 500);
+
+    // Badge must be LIVE while events are flowing.
+    await expect(page.locator('#conn-text')).toContainText('LIVE', { timeout: 8000 });
+    await expect(page.locator('#cost-big')).toContainText('$2');
+
+    // Stop publishing — simulate the CVM dying / relay going silent.
+    if (publishTimer) { clearInterval(publishTimer); publishTimer = null; }
+
+    // The freshness watchdog must transition LIVE → STALE within the threshold.
+    await expect(page.locator('#conn-text')).toContainText('STALE', { timeout: 8000 });
+
+    // Last-known data must remain visible (not blanked).
+    const cost = (await page.locator('#cost-big').textContent()) || '';
+    expect(cost, 'cost panel blanked after going stale').toContain('$2');
+  } finally {
+    if (publishTimer) clearInterval(publishTimer);
+    await relay.stop();
+  }
 });
