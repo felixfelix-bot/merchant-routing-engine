@@ -689,15 +689,51 @@ function renderAll(){
 let nostrPool = null;
 let nostrSub = null;
 let pollInterval = POLL_MS;            // current delay; grows on failure, resets on success
+let lastNostrEventAt = 0;              // ts (ms) of the last received kind-30315 event
+let nostrWatchdog = null;             // setInterval handle for the freshness watchdog
+let nostrReconnectTimer = null;       // setInterval handle for the reconnect health check
+let priceHistSeeded = false;          // true once a snapshot's price_history was applied
 
-/* In Nostr mode the display subscribes once to the CVM's public kind-30315
+// Freshness / reconnect thresholds. ?stale_ms= and ?reconnect_ms= are test
+// seams that shrink the production windows for fast, deterministic tests.
+const STALE_THRESHOLD_MS = parseInt(param('stale_ms')) || 15_000;
+const NOSTR_RECONNECT_MS = parseInt(param('reconnect_ms')) || 60_000;
+
+/* Seed Panel 3 price-history charts from a snapshot's price_history array
+   (Task 13). Called once on the first snapshot that carries history, so the
+   charts start full instead of accruing 1 point per snapshot. */
+function seedPriceHistory(points){
+  if(!Array.isArray(points) || !points.length || priceHistSeeded) return;
+  const byKey = {};
+  for(const pt of points){
+    const k = pt.key;
+    if(!byKey[k]) byKey[k] = [];
+    byKey[k].push({t: pt.t ?? pt.ts, cost_basis: pt.cost_basis, your_price: pt.your_price, margin_pct: pt.margin_pct});
+  }
+  for(const k of KEYS){
+    const seeded = byKey[k];
+    if(seeded && seeded.length){
+      seeded.sort((a,b)=>a.t-b.t);
+      state.priceHist[k] = seeded.slice(-HIST_MAX);
+    }
+  }
+  priceHistSeeded = true;
+}
+
+/* In Nostr mode the display subscribes to the CVM's public kind-30315
    replaceable event. New snapshots are pushed in real-time — no polling
-   required. The subscription stays open for the lifetime of the page. */
+   required. Idempotent against re-subscribe: calling it again (e.g. from the
+   reconnect watchdog) closes the previous subscription first. */
 async function initNostr(){
-  if(nostrSub) return;                     // already subscribed
+  if(nostrSub){                        // close any prior sub before re-subscribing
+    try { nostrSub.close(); } catch(e){}
+    nostrSub = null;
+  }
   const N = window.NostrTools;
-  if(!N || !N.SimplePool) throw new Error('nostr-tools not loaded');
-  if(!nostrPool) nostrPool = new N.SimplePool();
+  // window.__testNostrPool lets tests inject a deterministic fake pool.
+  const PoolCtor = window.__testNostrPool || (N && N.SimplePool);
+  if(!PoolCtor) throw new Error('nostr-tools not loaded');
+  if(!nostrPool) nostrPool = new PoolCtor();
   nostrSub = nostrPool.subscribeMany(CVM_RELAYS, {
     kinds: [30315],
     authors: [CVM_NPUB_HEX],
@@ -705,10 +741,12 @@ async function initNostr(){
     limit: 1,
   }, {
     onevent: (event) => {
+      lastNostrEventAt = Date.now();
       try {
         const raw = JSON.parse(event.content);
         const snap = normalizeSnapshot(raw);
         if(!snap) throw new Error('invalid snapshot');
+        if(raw.price_history) seedPriceHistory(raw.price_history);   // Task 13
         state.snapshot = snap;
         if(raw.cost_today != null) state.costToday = raw.cost_today;
         setConn('live');
@@ -719,6 +757,31 @@ async function initNostr(){
     },
     oneose: () => { console.log('Nostr EOSE'); },
   });
+  startNostrWatchdog();
+}
+
+/* Freshness watchdog (Task 9) + reconnect health check (Task 10). Both are
+   started once and stay running for the page lifetime. */
+function startNostrWatchdog(){
+  if(nostrWatchdog) return;            // already armed — never stack intervals
+  // Task 9: if no kind-30315 event arrives within STALE_THRESHOLD_MS, transition
+  // LIVE → STALE while keeping the last-known data on screen.
+  nostrWatchdog = setInterval(() => {
+    if(!state.snapshot || !lastNostrEventAt) return;   // nothing received yet
+    if(Date.now() - lastNostrEventAt > STALE_THRESHOLD_MS){
+      setConn('stale');
+    }
+  }, Math.min(5_000, STALE_THRESHOLD_MS));
+  // Task 10: if no event arrives within NOSTR_RECONNECT_MS, the relay WebSocket
+  // is presumed dead — re-call initNostr() to re-subscribe.
+  nostrReconnectTimer = setInterval(() => {
+    const since = lastNostrEventAt ? Date.now() - lastNostrEventAt : Infinity;
+    if(since > NOSTR_RECONNECT_MS){
+      console.warn(`[nostr] no events in ${NOSTR_RECONNECT_MS}ms — reconnecting…`);
+      lastNostrEventAt = 0;            // give the new sub a fresh window
+      initNostr().catch(e => console.warn('[nostr] reconnect failed:', e.message));
+    }
+  }, Math.min(10_000, NOSTR_RECONNECT_MS));
 }
 
 /* HTTP fallback poll — used when ?api=<url> is given (local testing). */
@@ -733,6 +796,7 @@ async function pollHttp(){
     if(!raw) throw new Error('no snapshot data');
     const snap = normalizeSnapshot(raw);
     if(!snap) throw new Error('invalid snapshot');
+    if(raw.price_history) seedPriceHistory(raw.price_history);   // Task 13
     state.snapshot = snap;
     if(snap.cost_today!=null) state.costToday=snap.cost_today;
     setConn('live');

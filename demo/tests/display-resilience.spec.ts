@@ -357,3 +357,149 @@ test('QR code points to participant nsite URL, not localhost', async ({ page }) 
   expect(resolved).toContain('nsite.lol');
   expect(resolved).not.toContain('localhost');
 });
+
+/* ───────────────────────── TASK 9: Nostr freshness watchdog ─────────────────────────
+ * In Nostr mode the display subscribes to kind-30315 events. If the CVM dies the
+ * events stop arriving, but (before this fix) the badge stayed LIVE forever. The
+ * freshness watchdog must transition LIVE → STALE once no event has arrived
+ * within the staleness window. We mock SimplePool so the test is deterministic:
+ * the fake pool delivers exactly ONE event (so the display reaches LIVE), then
+ * goes silent. The display must then mark itself STALE within the (shortened)
+ * threshold. ?stale_ms= is a test seam that shrinks the 15s production threshold. */
+test('Nostr freshness watchdog marks badge STALE when events stop (Task 9)', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__sub_calls = 0;
+    let delivered = false;
+    (window as any).__testNostrPool = class {
+      subscribeMany(_relays: any, _filter: any, opts: any) {
+        (window as any).__sub_calls++;
+        if (!delivered) {
+          delivered = true;
+          const snap = {
+            ts: Math.floor(Date.now() / 1000),
+            quota: { ours: { used_pct: 30, remaining: 1400000, locked: false } },
+            pricing: {}, routing_decisions: [],
+            dispatch_gate: { can_dispatch: true, recommended_model: 'glm-5.2', reason: 'clear', effective_price_per_m: 0.03, safety_margin: 2 },
+            cost_today: 1.5, cost_hour: 0.3,
+            participants: { count: 1, total_prompts: 5, total_tokens: 10000 },
+            scarcity: { factor: 1, level: 'low', budget_used_pct: 20 },
+            system: {}, pricing_meta: {}, provider_dist: {}, ledger: [],
+          };
+          setTimeout(() => opts.onevent({
+            kind: 30315, content: JSON.stringify(snap), tags: [['d', 'cvm-snapshot']],
+          }), 50);
+        }
+        return { close() { /* noop */ } };
+      }
+    };
+  });
+
+  // stale_ms=1500 shrinks the 15s threshold; reconnect_ms left large so it
+  // doesn't revive the sub before we observe STALE.
+  await page.goto(`${baseUrl}/display-deploy/index.html?stale_ms=1500&reconnect_ms=600000`);
+
+  // First the badge must reach LIVE on the one delivered event.
+  await expect(page.locator('#conn-text')).toContainText('LIVE', { timeout: 5000 });
+
+  // No further events → must transition to STALE within the threshold window.
+  await expect(page.locator('#conn-text')).toContainText('STALE', { timeout: 6000 });
+
+  // Last-known data must still be visible (not blanked).
+  const cost = (await page.locator('#cost-big').textContent()) || '';
+  expect(cost, 'cost panel blanked after going stale').toContain('$1');
+});
+
+/* ───────────────────────── TASK 10: Nostr reconnect logic ─────────────────────────
+ * If a relay WebSocket drops, the subscription silently dies and no events ever
+ * arrive again. The display must detect the silence and re-subscribe
+ * (re-call initNostr). We prove it by having the fake pool deliver ONE event
+ * (reaching LIVE), then never again. After the reconnect window elapses with no
+ * events, subscribeMany must be called a second time. ?reconnect_ms= is the
+ * test seam that shrinks the 60s production window. */
+test('Nostr display re-subscribes after relay goes silent (Task 10)', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__sub_calls = 0;
+    let delivered = false;
+    (window as any).__testNostrPool = class {
+      subscribeMany(_relays: any, _filter: any, opts: any) {
+        (window as any).__sub_calls++;
+        if (!delivered) {
+          delivered = true;
+          const snap = {
+            ts: Math.floor(Date.now() / 1000),
+            quota: {}, pricing: {}, routing_decisions: [],
+            dispatch_gate: { can_dispatch: true }, cost_today: 0, cost_hour: 0,
+            participants: { count: 0 }, scarcity: {}, system: {},
+            pricing_meta: {}, provider_dist: {}, ledger: [],
+          };
+          setTimeout(() => opts.onevent({
+            kind: 30315, content: JSON.stringify(snap), tags: [['d', 'cvm-snapshot']],
+          }), 50);
+        }
+        return { close() { /* noop */ } };
+      }
+    };
+  });
+
+  // reconnect_ms=2000 → reconnect check every 2s; stale_ms large so STALE
+  // doesn't mask the reconnect behaviour.
+  await page.goto(`${baseUrl}/display-deploy/index.html?reconnect_ms=2000&stale_ms=600000`);
+
+  await expect(page.locator('#conn-text')).toContainText('LIVE', { timeout: 5000 });
+  const callsAfterLive = await page.evaluate(() => (window as any).__sub_calls);
+
+  // After the reconnect window with no events, subscribeMany must fire again.
+  await expect.poll(
+    async () => await page.evaluate(() => (window as any).__sub_calls),
+    { timeout: 10000, intervals: [500] },
+  ).toBeGreaterThan(callsAfterLive);
+});
+
+/* ───────────────────────── TASK 13: price history bootstrap in Nostr mode ─────────────────────────
+ * In Nostr mode the display used to skip the /price-history fetch, so Panel 3
+ * charts started empty and only grew 1 point per snapshot. The fix: the CVM
+ * includes a price_history array in the kind-30315 snapshot payload, and the
+ * display seeds its charts from it on the first snapshot. We deliver a snapshot
+ * carrying a 3-point ours history and assert the OURS mini-chart rendered
+ * multiple points (read straight off the Plotly figure on the DOM node). */
+test('Nostr snapshot bootstraps price-history charts on load (Task 13)', async ({ page }) => {
+  await page.addInitScript(() => {
+    (window as any).__testNostrPool = class {
+      subscribeMany(_relays: any, _filter: any, opts: any) {
+        const now = Math.floor(Date.now() / 1000);
+        const snap = {
+          ts: now,
+          quota: { ours: { used_pct: 30, remaining: 1400000, locked: false } },
+          pricing: { ours: { cost_basis: 0.020, your_price: 0.030, margin_pct: 33 } },
+          routing_decisions: [],
+          dispatch_gate: { can_dispatch: true },
+          cost_today: 0, cost_hour: 0,
+          participants: { count: 0 }, scarcity: {}, system: {},
+          pricing_meta: {}, provider_dist: {}, ledger: [],
+          price_history: [
+            { ts: now - 7200, key: 'ours', cost_basis: 0.020, your_price: 0.030, margin_pct: 33 },
+            { ts: now - 3600, key: 'ours', cost_basis: 0.021, your_price: 0.031, margin_pct: 32 },
+            { ts: now - 1800, key: 'ours', cost_basis: 0.019, your_price: 0.029, margin_pct: 34 },
+          ],
+        };
+        setTimeout(() => opts.onevent({
+          kind: 30315, content: JSON.stringify(snap), tags: [['d', 'cvm-snapshot']],
+        }), 50);
+        return { close() { /* noop */ } };
+      }
+    };
+  });
+
+  await page.goto(`${baseUrl}/display-deploy/index.html`);
+
+  // Snapshot must have landed.
+  await expect(page.locator('#conn-text')).toContainText('LIVE', { timeout: 5000 });
+
+  // The OURS mini-chart must carry ≥3 bootstrapped points (Plotly stores the
+  // figure on the DOM node as .data; trace 0 is the cost-basis line).
+  const oursPoints = await page.evaluate(() => {
+    const el = document.getElementById('mc-ours') as any;
+    return el && Array.isArray(el.data) && el.data[0] ? el.data[0].x.length : 0;
+  });
+  expect(oursPoints, 'OURS chart did not bootstrap from price_history').toBeGreaterThanOrEqual(3);
+});
