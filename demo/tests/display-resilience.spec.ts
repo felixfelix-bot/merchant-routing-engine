@@ -242,3 +242,118 @@ test('poll interval backs off exponentially during extended outage', async ({ pa
   // And clearly in the ~10s band (not still ~5s).
   expect(gap2).toBeGreaterThanOrEqual(8000);
 });
+
+/* ───────────────────────── TASK 5: all panels populate with real data ─────────────────────────
+ * Comprehensive integration test: after a successful CVM connection EVERY panel
+ * must show real data — cost meter, burn rate, quota bars, dispatch gate,
+ * request flow, token economy, connection badge. The mock snapshot exercises
+ * the full normalizeSnapshot() → render pipeline. routing_decisions is mapped to
+ * `requests` by normalizeSnapshot, so two flow-cards must render. */
+test('all panels populate with real data on successful connection', async ({ page }) => {
+  const now = Date.now() / 1000;
+  mockSnapshot = {
+    ts: now,
+    quota: {
+      ours:   { used_pct: 32.3, remaining: 1354000, locked: false },
+      friend: { used_pct: 91.0, remaining: 180000, locked: true },
+    },
+    pricing: {
+      ours:   { cost_basis: 0.020, your_price: 0.030, margin_pct: 33 },
+      friend: { cost_basis: 0.018, your_price: 0.025, margin_pct: 28 },
+      ollama: { cost_basis: 0.015, your_price: 0.022, margin_pct: 32 },
+      ppq:    { cost_basis: 0.040, your_price: 0.060, margin_pct: 33 },
+    },
+    routing_decisions: [
+      { ts: now - 5,  provider: 'ours',   model: 'glm-5.2',       tokens: 3500, cost: 0.003, reason: 'flat-rate preferred' },
+      { ts: now - 10, provider: 'friend', model: 'glm-4.5-flash', tokens: 2000, cost: 0.002, reason: 'sufficient headroom' },
+    ],
+    dispatch_gate: {
+      can_dispatch: true,
+      recommended_model: 'glm-5.2',
+      reason: 'sufficient headroom (ours key)',
+      effective_price_per_m: 0.03,
+      safety_margin: 2,
+      scarcity_factor: 1.0,
+    },
+    cost_today: 1.72,
+    cost_hour: 0.45,
+    participants: { count: 1, total_prompts: 6, total_tokens: 16247 },
+    scarcity: { factor: 1.0, level: 'low', budget_used_pct: 26 },
+    system: { cpu_pct: 15, mem_pct: 50, load_per_core: 0.8 },
+    pricing_meta: { margin: 0.41 },
+    provider_dist: { ours: 60, friend: 40 },
+    ledger: [{ npub: 'npub1test', prompts: 6, tokens: 16247 }],
+  };
+
+  await page.goto(`${baseUrl}/display-deploy/index.html?api=http://localhost:${mockCVMPort}`);
+
+  // Panel 5: cost meter — cost_today 1.72 renders "$1.72"; burn from cost_hour 0.45 → "$0.45".
+  await expect(page.locator('#cost-big')).toContainText('$1', { timeout: 5000 });
+  await expect(page.locator('#burn-rate')).toContainText('$0.45');
+
+  // Panel 7: dispatch gate — CLEAR light + recommended model populated.
+  await expect(page.locator('#gate-status')).toContainText('CLEAR');
+  await expect(page.locator('#gate-model')).toContainText('glm-5.2');
+
+  // Panel 4: quota bars — both provider keys render with their labels.
+  await expect(page.locator('#quota-wrap')).toContainText('OURS');
+  await expect(page.locator('#quota-wrap')).toContainText('FRIEND');
+
+  // Panel 6: request flow — routing_decisions maps to two flow cards.
+  await expect(page.locator('#flow-list .flow-card')).toHaveCount(2);
+
+  // Panel 8: token economy — participant count populated.
+  await expect(page.locator('#econ-participants')).toContainText('1');
+
+  // Connection badge — live, real data.
+  await expect(page.locator('#conn-text')).toContainText('LIVE');
+});
+
+/* ───────────────────────── TASK 6: QR points to participant nsite, not localhost ─────────────────────────
+ * The QR a participant scans must resolve to the live participant nsite
+ * (npub13h0…nsite.lol) — never localhost, a private IP, or the old dead
+ * participant.nsite.lol URL. renderQR() truncates the visible #qr-url label to
+ * 42 chars, so the trailing ".nsite.lol" never appears in the visible text;
+ * we therefore verify the full resolved URL via resolveParticipantUrl() (the
+ * value the QR actually encodes) in addition to the visible label, and confirm
+ * the QR <svg> rendered (qrcode lib is vendored locally, not a CDN dep). */
+test('QR code points to participant nsite URL, not localhost', async ({ page }) => {
+  mockSnapshot = {
+    ts: Date.now() / 1000, quota: {}, pricing: {}, routing_decisions: [],
+    dispatch_gate: { can_dispatch: true }, cost_today: 0, cost_hour: 0,
+    participants: { count: 0 }, scarcity: {}, system: {}, pricing_meta: {},
+    provider_dist: {}, ledger: [],
+  };
+
+  await page.goto(`${baseUrl}/display-deploy/index.html?api=http://localhost:${mockCVMPort}`);
+
+  const PARTICIPANT_NPUB = 'npub13h0eushvdzdrygm545zr5zxr3qvk7zaqhrzyyepprflcjdu3u0yskxz53m';
+  const PARTICIPANT_URL = `https://${PARTICIPANT_NPUB}.nsite.lol`;
+
+  // The QR <svg> must have rendered (qrcode lib is vendored, not a CDN fetch).
+  await expect(page.locator('#qr-box svg')).toHaveCount(1, { timeout: 5000 });
+
+  // Visible label: truncated to 42 chars, so it shows https:// + npub prefix but
+  // NOT the trailing domain. It must identify the participant npub and must never
+  // leak a localhost / private-IP / old-dead-url string.
+  const label = (await page.locator('#qr-url').textContent()) || '';
+  expect(label, 'qr-url label still at placeholder').not.toBe('—');
+  expect(label).toContain('npub13h0eushvdzdrygm545zr5zxr3qvk'); // unique participant prefix (within 42-char window)
+  expect(label).not.toContain('localhost');
+  expect(label).not.toContain('127.0.0.1');
+  expect(label).not.toContain('192.168');
+  expect(label).not.toContain('participant.nsite.lol');         // old dead URL (no npub prefix)
+
+  // Full resolved URL — what the QR actually encodes. resolveParticipantUrl is a
+  // top-level function declaration, so it is exposed on window. Must be the exact
+  // participant nsite, never localhost.
+  const resolved = await page.evaluate(() =>
+    typeof (window as any).resolveParticipantUrl === 'function'
+      ? (window as any).resolveParticipantUrl()
+      : null,
+  );
+  expect(resolved, 'resolveParticipantUrl not exposed on window').toBeTruthy();
+  expect(resolved).toBe(PARTICIPANT_URL);
+  expect(resolved).toContain('nsite.lol');
+  expect(resolved).not.toContain('localhost');
+});
