@@ -22,6 +22,10 @@ config.local.yaml
 # CVM server private key (never commit)
 demo/cvm-server-key.json
 
+# nsite deploy keys — NEVER commit (Task 15: no hardcoded nsec in repo)
+demo/*/.nsite/deploy-key.hex
+.nsite/deploy-key.hex
+
 # Node/Bun
 node_modules/
 *.sqlite3
