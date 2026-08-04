@@ -685,38 +685,7 @@ async function findRoutedCall(preId: number, startTs: number, model: string, max
 
 type ToolHandler = (args: any) => any | Promise<any>;
 
-// ── Synthetic price history fallback ─────────────────────────────────────────
-// When the CVM server runs standalone (no real proxy traffic in the api_calls
-// table), get_price_history returns []. To keep the display's Panel 3 charts
-// populated for demos, we synthesise 24h of hourly buckets from current
-// pricing values with ±5% random jitter so the lines look alive.
-function generateSyntheticPriceHistory(): any[] {
-  const points: any[] = [];
-  const now = Math.floor(Date.now() / 1000);
-  const pricing = computePricing();
-  for (let h = 23; h >= 0; h--) {
-    const ts = now - h * 3600;
-    for (const key of ["ours", "friend", "ollama", "ppq"]) {
-      const p = (pricing as any)[key];
-      if (!p) continue;
-      const variation = 1 + (Math.random() - 0.5) * 0.10; // ±5%
-      const costBasis = p.cost_basis * variation;
-      const yourPrice = costBasis * (1 + CFG.margin);
-      const marginPct = yourPrice > 0 ? (yourPrice - costBasis) / yourPrice * 100 : 0;
-      points.push({
-        ts,
-        key,
-        cost_basis: round(costBasis, 4),
-        your_price: round(yourPrice, 4),
-        margin_pct: round(marginPct, 2),
-        calls: 0,
-        tokens: 0,
-      });
-    }
-  }
-  return points;
-}
-
+// ── Snapshot builder ───────────────────────────────────────────────────────
 const TOOLS: Record<string, ToolHandler> = {
   // ── Tool 1: get_snapshot ──────────────────────────────────────────────────
   // Returns everything the display dashboard needs in one call.
@@ -729,11 +698,6 @@ const TOOLS: Record<string, ToolHandler> = {
     // separate /price-history HTTP fetch). Trimmed to the same 24h/1h-bucket
     // shape the dedicated tool returns.
     let priceHistory = (TOOLS.get_price_history({ hours: 24 })?.points) || [];
-    // Fallback: generate synthetic history when no real traffic data exists
-    // (standalone CVM without proxy traffic). Keeps Panel 3 charts populated.
-    if (priceHistory.length === 0) {
-      priceHistory = generateSyntheticPriceHistory();
-    }
     return {
       ts: Math.floor(Date.now() / 1000),
       quota: computeQuota(),
