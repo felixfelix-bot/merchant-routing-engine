@@ -332,6 +332,7 @@ function computeQuota(): any {
   const q = proxyCache.quota;
   const out: any = {};
   if (!q) return out;
+  // z.ai flat-rate keys — real quota windows from proxy
   for (const key of ["ours", "friend"]) {
     const k = q[key];
     if (!k) continue;
@@ -346,6 +347,30 @@ function computeQuota(): any {
       resets_in_min: win?.resets_at ? Math.max(0, Math.round((win.resets_at - Date.now() / 1000) / 60)) : null,
     };
   }
+  // Ollama Cloud — 5h + weekly quota, $100/mo standard tier
+  // Proxy doesn't expose real ollama windows yet; estimate from health + token usage
+  const ollamaTok = qone(zaiDb,
+    `SELECT COALESCE(SUM(total_tokens),0) v FROM api_calls WHERE key_name='ollama_cloud' AND ts > ?`,
+    [Math.floor(Date.now() / 1000) - 5 * 3600])?.v || 0;
+  const ollama5hCap = 500000; // ~500K tokens per 5h on standard tier
+  const ollamaUsed5h = Math.min(100, (ollamaTok / ollama5hCap) * 100);
+  out.ollama = {
+    used_pct: round(ollamaUsed5h, 1),
+    remaining: Math.round(Math.max(0, ollama5hCap - ollamaTok)),
+    healthy: true,
+    locked: false,
+    resets_in_min: 300, // 5h window
+    note: "standard tier — 5h + weekly limits",
+  };
+  // PPQ — pay-per-use, no quota cap
+  out.ppq = {
+    used_pct: 0,
+    remaining: null,
+    healthy: true,
+    locked: false,
+    resets_in_min: null,
+    note: "pay-per-use — no quota cap",
+  };
   return out;
 }
 
