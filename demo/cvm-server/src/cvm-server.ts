@@ -692,6 +692,11 @@ const TOOLS: Record<string, ToolHandler> = {
     const gate = computeGate();
     const pricing = computePricing();
     const econ = ledgerSnapshot();
+    // Task 13: include 24h price history in the snapshot so the display's
+    // Panel 3 charts can bootstrap immediately in Nostr mode (which skips the
+    // separate /price-history HTTP fetch). Trimmed to the same 24h/1h-bucket
+    // shape the dedicated tool returns.
+    const priceHistory = (TOOLS.get_price_history({ hours: 24 })?.points) || [];
     return {
       ts: Math.floor(Date.now() / 1000),
       quota: computeQuota(),
@@ -719,6 +724,7 @@ const TOOLS: Record<string, ToolHandler> = {
         total_tokens: econ.total_spent,
       },
       ledger: ledgerGetLedger().slice(0, 10),
+      price_history: priceHistory,
     };
   },
 
