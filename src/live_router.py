@@ -74,6 +74,7 @@ from src.ollama_extra_usage import fetch_ollama_usage, get_extra_usage_status
 from src.real_price_tracker import (
     get_real_rate,
     get_zai_amortized_rate,
+    get_all_trailing_rates_per_model,
     SEED_RATES as _RPT_SEED_RATES,
 )
 
@@ -226,6 +227,26 @@ _RATE_REFRESH_INTERVAL_SECONDS: float = float(
     os.environ.get("LIVE_ROUTER_RATE_REFRESH_INTERVAL_SECONDS", "1800")
 )
 
+# ── PM-T2: per-model pricing kill switch ─────────────────────────────────────
+# When ON, LiveRouter resolves a NESTED per-model rate dict
+# (``{provider: {model: $/M, '_default': $/M}}``) alongside the flat
+# ``_base_rates`` and exposes ``_resolve_model_rate()`` for the failover
+# path to price each model by its own cost (T3). Default OFF — with it off
+# the router keeps using the flat per-provider blend (the kimi-k3 blindspot
+# stays, by design, until an operator flips this after shadow validation).
+# See docs/plan-per-model-pricing.md §2 (Option A) / §6 T2.
+_PER_MODEL_PRICING_ENABLED: bool = (
+    os.environ.get("PER_MODEL_PRICING_ENABLED", "false").lower()
+    in ("1", "true", "yes")
+)
+
+#: Conservative floor for an unmeasured/unknown model ($/M). The exact failure
+#: behind the kimi-k3 485× cost blindspot was an expensive model priced at the
+#: cheap provider blend; for any model we cannot price, default to EXPENSIVE so
+#: the optimizer never floods traffic to an unmeasured model. Matches the
+#: ``UNKNOWN_PROVIDER_FALLBACK`` floor in real_price_tracker (plan §5.1/§5.4).
+_UNKNOWN_MODEL_FALLBACK: float = 1.0
+
 # Per-provider measurement window for the dynamic resolver (hours). Mirrors
 # real_price_tracker.PROVIDER_WINDOW_HOURS; duplicated here so the resolver
 # stays explicit and auditable even if the tracker table is reordered.
@@ -275,6 +296,58 @@ def _resolve_dynamic_base_rates(db_path: str | None = None) -> dict[str, float]:
         except Exception:
             rates[name] = fallback
     return rates
+
+
+def _resolve_dynamic_base_rates_per_model(
+    db_path: str | None = None,
+) -> dict[str, dict[str, float]]:
+    """Per-model base rates: ``{provider: {model: $/M, '_default': $/M}}``.
+
+    Thin, never-raising wrapper over
+    :func:`real_price_tracker.get_all_trailing_rates_per_model` (PM-T1) that
+    produces the nested shape the per-model pricing path consumes. Any failure
+    yields an empty dict so the router degrades to the flat ``_base_rates``
+    path rather than crashing. Safe to call from ``__init__`` and the refresh
+    thread (T2). See docs/plan-per-model-pricing.md §6 T2.
+    """
+    try:
+        return get_all_trailing_rates_per_model(db_path=db_path)
+    except Exception:
+        return {}
+
+
+def _resolve_model_rate(
+    rates: dict[str, dict[str, float]],
+    provider: str,
+    model: str | None,
+) -> float:
+    """Resolve ``(provider, model)`` → base rate $/M with a strict fallback chain.
+
+    Chain (docs/plan-per-model-pricing.md §3.6 / §5.4):
+
+      1. **Per-model measured rate** — ``rates[provider][model]``
+      2. **Provider-level ``_default``** — ``rates[provider]["_default"]``
+         (the current flat per-provider behavior, just less precise)
+      3. **Conservative fallback** — :data:`_UNKNOWN_MODEL_FALLBACK` ($1.0/M)
+
+    Step 3 fires when the provider is unknown (absent from ``rates``) or its
+    ``_default`` is missing/non-positive. The expensive floor means the
+    optimizer never under-prices an unmeasured model — the exact failure that
+    caused the kimi-k3 485× cost blindspot (an expensive model priced at the
+    cheap provider blend). When ``model`` is ``None`` step 1 is skipped and the
+    provider ``_default`` is returned, preserving the legacy per-provider path.
+
+    Pure function: no I/O, no side effects — trivially unit-testable (the T2
+    gate). Wired into the failover path by T3.
+    """
+    prov_rates = rates.get(provider, {})
+    if model and model in prov_rates:
+        return float(prov_rates[model])
+    default = prov_rates.get("_default")
+    if default is not None and default > 0:
+        return float(default)
+    return _UNKNOWN_MODEL_FALLBACK
+
 
 # ── Quota totals (approximate, for scarcity factor) ──────────────────────────
 _QUOTA_TOTALS: dict[str, float] = {
@@ -691,6 +764,22 @@ class LiveRouter:
         self._rate_refresh_stop: threading.Event = threading.Event()
         self._last_rate_refresh_ts: float = 0.0
 
+        # ── PM-T2: nested per-model base rates ─────────────────────────────
+        # ``{provider: {model: $/M, '_default': $/M}}``. Populated from
+        # _resolve_dynamic_base_rates_per_model() (PM-T1's resolver) and
+        # refreshed alongside the flat rates by refresh_base_rates(). Consumed
+        # by _resolve_model_rate() once T3 wires it into _do_select_failover.
+        # Empty dict when PER_MODEL_PRICING_ENABLED is off — the flat
+        # _base_rates path is unchanged (zero behavior change, by design).
+        self._base_rates_per_model: dict[str, dict[str, float]] = {}
+        if _PER_MODEL_PRICING_ENABLED:
+            try:
+                self._base_rates_per_model = _resolve_dynamic_base_rates_per_model(
+                    db_path
+                )
+            except Exception:
+                self._base_rates_per_model = {}
+
     # ── P5-RATES: dynamic base-rate refresh ──────────────────────────────
 
     def refresh_base_rates(self) -> dict[str, float]:
@@ -709,11 +798,28 @@ class LiveRouter:
         it is a cheap no-op-ish refresh against seeds). NEVER raises; any
         resolver error leaves the existing rates untouched. Thread-safe
         (acquires ``self._lock``). Returns the new ``_base_rates`` snapshot.
+
+        PM-T2: when :data:`_PER_MODEL_PRICING_ENABLED` is on, also refreshes
+        ``self._base_rates_per_model`` from
+        :func:`_resolve_dynamic_base_rates_per_model`. A failure resolving the
+        nested dict leaves the previous per-model snapshot untouched (the flat
+        path still refreshes normally).
         """
         try:
             fresh = _resolve_dynamic_base_rates(self._db_path)
         except Exception:
             return dict(self._base_rates)
+        # PM-T2: resolve the nested per-model dict alongside the flat rates.
+        # Computed outside the lock (it hits the cached tracker query); only
+        # the assignment to _base_rates_per_model happens under the lock.
+        fresh_per_model: dict[str, dict[str, float]] = {}
+        if _PER_MODEL_PRICING_ENABLED:
+            try:
+                fresh_per_model = _resolve_dynamic_base_rates_per_model(
+                    self._db_path
+                )
+            except Exception:
+                fresh_per_model = {}
         with self._lock:
             for name, rate in fresh.items():
                 self._base_rates[name] = rate
@@ -723,6 +829,10 @@ class LiveRouter:
                         kalman.update(max(rate, MIN_EFFECTIVE_PRICE))
                     except Exception:
                         pass  # never let a Kalman update break the refresh
+            # PM-T2: swap in the fresh per-model snapshot (only when non-empty,
+            # so a transient resolver error never wipes a good snapshot).
+            if fresh_per_model:
+                self._base_rates_per_model = fresh_per_model
             self._last_rate_refresh_ts = time.time()
         return dict(self._base_rates)
 
