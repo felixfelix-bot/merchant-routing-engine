@@ -51,6 +51,7 @@ from src.pricing_engine import (
     extra_usage_multiplier,
     EXTRA_USAGE_MULTIPLIER,
     quota_pressure_factor,
+    quota_pressure_factor_superimposed,
 )
 from src.quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
 from src.cpvo_calculator import CPVOCalculator
@@ -497,12 +498,19 @@ class LiveRouter:
         #   "normal"   — below _THROTTLE_THRESHOLD, no action
         #   "throttle" — between threshold and block: deprioritise ollama
         #   "block"    — at/above block threshold: exclude ollama entirely
-        session_usage_frac = 0.0
+        # ── Capture the two Ollama usage windows SEPARATELY ───────────────
+        # The 5-hour session and 7-day weekly windows are independent signals.
+        # The throttle/block threshold logic (binary safety net) still uses the
+        # worst (max) window; but the continuous quota-pressure (RP-SUPERIMPOSE)
+        # evaluates a SEPARATE exponential for each window and MULTIPLIES them —
+        # both windows depleting at once is the genuine worst case.
+        session_usage = 0.0
+        weekly_usage = 0.0
         if extra_usage_status is not None:
-            session_usage_frac = max(
-                extra_usage_status.session_usage,
-                extra_usage_status.weekly_usage,
-            )
+            session_usage = extra_usage_status.session_usage
+            weekly_usage = extra_usage_status.weekly_usage
+        # Throttle/block thresholds use the worst window (max) — fail-safe.
+        session_usage_frac = max(session_usage, weekly_usage)
         self._last_session_usage = session_usage_frac
 
         throttle_state = "normal"
@@ -513,18 +521,22 @@ class LiveRouter:
                 throttle_state = "throttle"
         self._last_throttle_state = throttle_state
 
-        # ── RP-PRICING: Continuous quota-pressure ──────────────────────────
-        # When the kill switch is on, compute the smooth pressure multiplier
-        # from the live session/weekly usage fractions. This is the continuous
-        # replacement for the binary extra_usage multiplier and the RP-5
-        # throttle price bump: ollama_cloud's price rises smoothly until the
-        # optimizer reroutes to z.ai. ``session_usage_frac`` already holds the
-        # max(session, weekly) fraction, so passing it as ``usage`` (with
-        # weekly=None) reproduces the same worst-case-governs behaviour.
+        # ── RP-PRICING / RP-SUPERIMPOSE: continuous quota-pressure ─────────
+        # Two independent quota_pressure_factor curves (session + weekly), then
+        # MULTIPLIED. Both windows depleting is much steeper than a single
+        # max-based curve: at 90%/90% the product is ~curve(0.90)² instead of
+        # curve(0.90). When EITHER window hits 100% ollama_cloud's price caps
+        # at the extra-usage asymptote (~4.17x, hard_limit=False — Ollama
+        # allows extra usage so kimi-k3 stays reachable); with hard_limit=True
+        # (z.ai/PPQ) it becomes +inf so the optimizer reroutes to a cheaper
+        # alternative. Ollama-exclusive models are still protected by the
+        # short-circuit below (fires before the price comparison).
         quota_pressure = 1.0
-        if _QUOTA_PRESSURE_ENABLED and session_usage_frac > 0:
+        if _QUOTA_PRESSURE_ENABLED and (session_usage > 0 or weekly_usage > 0):
             try:
-                quota_pressure = quota_pressure_factor(session_usage_frac)
+                quota_pressure = quota_pressure_factor(
+                    session_usage, weekly_usage,
+                )
             except Exception:
                 # Any error in the pressure calc must never break routing.
                 quota_pressure = 1.0

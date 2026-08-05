@@ -25,7 +25,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.live_router import LiveRouter
-from src.pricing_engine import quota_pressure_factor
+from src.pricing_engine import quota_pressure_factor, EXTRA_USAGE_MULTIPLIER
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -237,9 +237,9 @@ class TestPressureRerouteToZai:
                 < pressures[0.95]
                 < pressures[0.99]
             )
-            # At 100% usage, pressure is +inf (RP-EXP asymptote — provider
-            # unreachable to the optimizer, which reroutes to a cheaper alt).
-            assert pressures[1.0] == math.inf
+            # At 100% usage, pressure caps at the extra-usage rate (asymptote).
+            # hard_limit=False for Ollama (extra usage available).
+            assert pressures[1.0] == pytest.approx(EXTRA_USAGE_MULTIPLIER)
         finally:
             os.unlink(db_path)
 

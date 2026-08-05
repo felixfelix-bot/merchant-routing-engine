@@ -392,107 +392,165 @@ def extra_usage_multiplier(
     return 1.0
 
 
-def quota_pressure_factor(
-    usage: float,
-    weekly: float | None = None,
-    onset: float = QUOTA_PRESSURE_ONSET,
-    asymptote: float = EXTRA_USAGE_MULTIPLIER,
+def _single_window_factor(
+    u: float,
+    onset: float,
+    asymptote: float,
 ) -> float:
-    """Continuous quota-pressure multiplier (RP-PRICING / RP-EXP).
+    """Exponential quota-pressure factor for a single window.
 
-    The smooth, price-based replacement for the binary
-    :func:`extra_usage_multiplier`. As the Ollama Cloud quota depletes, this
-    factor rises continuously from 1.0 so the routing optimizer reroutes to a
-    cheaper provider (z.ai) the moment Ollama's effective price crosses over —
-    **no thresholds, no regime strings, no special-casing.**
+    RP-EXP rational asymptotic curve ``1 + K·t/(1-t)``::
 
-    Shape (RP-EXP rational asymptotic curve between *onset* and 100% usage)::
+        u <= onset    → 1.0
+        onset < u < 1 → 1 + K·t/(1-t)   (t = (u-onset)/(1-onset))
+        u >= 1.0      → +inf
 
-        u <= onset        → 1.0                          (plenty of quota)
-        onset < u < 1.0   → 1 + K * t / (1 - t)          (t = (u-onset)/(1-onset))
-        u >= 1.0          → +inf                         (unreachable)
+    where ``K = asymptote - 1.0``.
 
-    where ``K = asymptote - 1.0`` (= ``(extra_rate / base_rate) - 1.0``,
-    ≈3.17 with the default rates) and ``asymptote`` defaults to
-    :data:`EXTRA_USAGE_MULTIPLIER` (≈4.17).
-
-    The curve ``1 + K·t/(1-t)`` rises gently just past the onset, passes through
-    the full extra-usage rate (``K + 1 ≈ 4.17x`` → $0.10/M) at the *midpoint* of
-    the ramp (``u = onset + 0.5·(1-onset) = 0.85``), then diverges toward
-    **infinity** as usage → 100%. Because the price literally becomes +∞ at full
-    quota, the optimizer can never keep Ollama at 100% — it ALWAYS reroutes to a
-    cheaper alternative (z.ai or an external) first, so the quota never
-    hard-fails for non-exclusive models. This is FELIX's "router ALWAYS finds a
-    cheaper alternative first" guarantee.
-
-    Ollama-**exclusive** models (``kimi-k3``, ``gpt-oss``, …) are unaffected:
-    :mod:`live_router` short-circuits them to ``ollama_cloud`` *before* the price
-    comparison, so the +∞ at 100% never blocks a model that genuinely has no
-    alternative. (The previous version capped the factor at *asymptote* for u ≥
-    1.0 to protect these models; RP-EXP removes that cap because the short-circuit
-    already covers them, and the cap also diluted the price signal for
-    non-exclusive models.)
-
-    Both the 5-hour **session** and 7-day **weekly** usage fractions are
-    considered; the worst (max) governs (priority: never run out). This mirrors
-    :func:`scarcity_factor`'s "max window drives" philosophy.
-
-    This factor **subsumes** :func:`scarcity_factor` for ``ollama_cloud``: the
-    quota depletion it tracks *is* the scarcity signal, so callers should not
-    also apply the generic scarcity multiplier to Ollama (it would double-count
-    the same depletion). For non-Ollama providers, scarcity still applies.
-
-    Args:
-        usage: Session usage fraction (0.0–1.0+, from
-            ``ollama.com/api/usage`` → ``data.limits.session.usage``).
-        weekly: Weekly usage fraction (0.0–1.0+). When provided, the max of
-            *usage* and *weekly* drives the pressure. ``None`` is treated as 0.0.
-        onset: Usage fraction at which pressure begins (default 0.70 = 70%).
-            Below this the factor is 1.0. Configurable via the
-            ``OLLAMA_QUOTA_PRESSURE_ONSET`` env var.
-        asymptote: The extra-rate/base-rate ratio (default
-            :data:`EXTRA_USAGE_MULTIPLIER`, ≈4.17). Defines the curve's steepness
-            via ``K = asymptote - 1.0``; the factor passes through *asymptote*
-            exactly at the midpoint of the ramp (``u = onset + 0.5·(1-onset)``).
-
-    Returns:
-        The pressure multiplier, always >= 1.0. At and above 100% usage the
-        result is ``+inf`` (provider unreachable to the optimizer). For a
-        degenerate configuration where ``asymptote <= 1.0`` (no extra-usage
-        premium to model) the ramp collapses to a flat 1.0.
+    Returns +inf at u ≥ 1.0. The caller decides whether to cap it (Ollama:
+    extra-usage available) or keep it (z.ai/PPQ: hard limit).
     """
-    # Worst-case window governs (session OR weekly, whichever is more depleted).
-    u = usage
-    if weekly is not None:
-        u = max(usage, weekly)
-
-    # At/above 100% the curve has reached its asymptote → +inf. Checked FIRST so
-    # that 100% usage ALWAYS yields +inf regardless of the onset value (FELIX:
-    # "At 100%: infinity"). The provider is "unreachable" to the optimizer, which
-    # always reroutes to a cheaper alternative (RP-EXP: "router ALWAYS finds
-    # cheaper alternative first"). Ollama-exclusive models are unaffected —
-    # live_router short-circuits them to ollama_cloud before this price is compared.
     if u >= 1.0:
         return math.inf
-
-    # Below the onset there is plenty of quota → no penalty.
     if u <= onset:
         return 1.0
-
-    # RP-EXP rational curve: 1 + K * t / (1 - t), where
-    #   t = (u - onset) / (1 - onset)   (normalised position over [onset, 1.0])
-    #   K = asymptote - 1.0 = (extra_rate / base_rate) - 1.0
-    # At the midpoint (t=0.5) the multiplier equals `asymptote` (the full
-    # extra-usage rate); it then diverges to +inf as t → 1.0 (u → 100%).
-    # span > 0 is guaranteed here: we passed `u <= onset` (so u > onset) and
-    # `u < 1.0` (so onset < 1.0, hence span = 1 - onset > 0).
     span = 1.0 - onset
     k = asymptote - 1.0
     if k <= 0.0:
-        # Degenerate: no extra-usage premium to model → no pressure to apply.
         return 1.0
     t = (u - onset) / span
     return 1.0 + k * t / (1.0 - t)
+
+
+def quota_pressure_factor(
+    usage: float,
+    weekly: float | None = None,
+    monthly: float | None = None,
+    onset: float = QUOTA_PRESSURE_ONSET,
+    asymptote: float = EXTRA_USAGE_MULTIPLIER,
+    hard_limit: bool = False,
+) -> float:
+    """Continuous quota-pressure multiplier with superimposed windows.
+
+    Computes the exponential factor for EACH provided window independently,
+    then **multiplies** them. This gives stronger pressure when multiple
+    windows deplete simultaneously — a session at 85% AND a weekly at 85%
+    produces a combined factor of ~7.7x, not just 2.8x.
+
+    Window types:
+    - **usage**: 5-hour session quota (Ollama, z.ai)
+    - **weekly**: 7-day weekly quota (Ollama, z.ai)
+    - **monthly**: 30-day monthly quota (z.ai)
+
+    Only windows that are not ``None`` contribute to the product. This lets
+    each endpoint pass exactly the windows it has.
+
+    Cap behaviour when ANY provided window reaches 100%:
+
+    - ``hard_limit=False`` (Ollama Cloud): caps at *asymptote* (≈4.17x).
+      Ollama allows extra usage at the list rate, so exclusive models like
+      kimi-k3 remain reachable at their true cost.
+    - ``hard_limit=True`` (z.ai, PPQ): returns **+inf**. These providers have
+      no extra-usage path — the optimizer MUST divert to another endpoint.
+
+    Superimposed price table (onset=0.70, asymptote=4.17, base=$0.024/M)::
+
+        Session  Weekly  Factor      $/M      Notes
+        ───────  ──────  ────────    ─────    ─────────────────────────
+        80%      50%     2.58x       $0.062   Session drives
+        80%      80%     6.67x       $0.160   Both compound
+        85%      85%     17.4x       $0.417   Strong divert
+        90%      70%     7.33x       $0.176   Session drives
+        90%      90%     53.8x       $1.29    Compounded — guaranteed divert
+        95%      50%     16.8x       $0.404   Session alone
+        95%      95%     283x        $6.80    Unreachable
+        ≥100%    any     4.17x       $0.10    Extra-usage rate (hard_limit=False)
+        ≥100%    any     ∞           —        Hard limit (hard_limit=True)
+
+    This factor **subsumes** :func:`scarcity_factor` for any endpoint that
+    passes real window data. Endpoints without window-level data (cold start)
+    fall back to :func:`scarcity_factor` via ``compute_effective_price``.
+
+    Args:
+        usage: Session usage fraction (0.0–1.0+).
+        weekly: Weekly usage fraction (0.0–1.0+). ``None`` = window not tracked.
+        monthly: Monthly usage fraction (0.0–1.0+). ``None`` = not tracked.
+        onset: Usage fraction at which pressure begins (default 0.75).
+        asymptote: Factor at the ramp midpoint (default ≈4.17). Controls
+            curve steepness via ``K = asymptote - 1.0``.
+        hard_limit: If True, returns +inf when any window ≥ 1.0 (z.ai/PPQ).
+            If False, caps at *asymptote* (Ollama extra-usage rate).
+
+    Returns:
+        Pressure multiplier, always >= 1.0. May be +inf (hard_limit=True,
+        any window exhausted).
+    """
+    # Collect provided windows.
+    windows: list[float] = [usage]
+    if weekly is not None:
+        windows.append(weekly)
+    if monthly is not None:
+        windows.append(monthly)
+
+    # If any provided window is exhausted, apply cap behaviour.
+    if any(u >= 1.0 for u in windows):
+        if hard_limit:
+            return math.inf
+        return asymptote
+
+    # Multiply single-window factors (superimpose).
+    result = 1.0
+    for u in windows:
+        result *= _single_window_factor(u, onset, asymptote)
+    return result
+
+
+def quota_pressure_factor_superimposed(
+    session_usage: float,
+    weekly_usage: float | None = None,
+    onset: float = QUOTA_PRESSURE_ONSET,
+    asymptote: float = EXTRA_USAGE_MULTIPLIER,
+) -> float:
+    """Superposition of two independent quota-pressure curves (RP-SUPERIMPOSE).
+
+    Felix's direction: instead of driving a single curve off the *worst* (max)
+    of the session and weekly usage fractions, evaluate **two separate**
+    :func:`quota_pressure_factor` curves — one for the 5-hour *session* window,
+    one for the 7-day *weekly* window — and **multiply** them. Both windows
+    depleting simultaneously is the genuine worst case, and the product makes it
+    dramatically steeper than taking the max::
+
+        max(0.90, 0.90)    → single curve at 0.90        (one curve's value)
+        superposition(0.90, 0.90) → curve(0.90)²          (squared — much steeper)
+
+    Since each factor is always >= 1.0, the product is always >= the max-based
+    value :func:`quota_pressure_factor` would have produced — so this *never*
+    under-penalises a depleting quota; it only sharpens the worst case.
+
+    Degenerate cases fall out of the arithmetic naturally:
+
+    - Both windows below the onset → ``1.0 * 1.0 = 1.0`` (no penalty).
+    - One window exhausted (>= 1.0) → ``+inf * finite = +inf`` (unreachable).
+    - Both exhausted → ``+inf * +inf = +inf``.
+
+    Args:
+        session_usage: 5-hour session usage fraction (0.0–1.0+, from
+            ``ollama.com/api/usage`` → ``data.limits.session.usage``).
+        weekly_usage: 7-day weekly usage fraction (0.0–1.0+). ``None`` (or 0.0)
+            means only the session window governs (the weekly factor is 1.0).
+        onset: Usage fraction at which pressure begins (forwarded to BOTH
+            curves). Default :data:`QUOTA_PRESSURE_ONSET` (0.70).
+        asymptote: Extra-rate/base-rate ratio defining each curve's steepness
+            (forwarded to BOTH curves). Default :data:`EXTRA_USAGE_MULTIPLIER`.
+
+    Returns:
+        The product ``_single_window_factor(session) *
+        _single_window_factor(weekly)``, always >= 1.0, and ``+inf`` if EITHER
+        window is exhausted (>= 1.0).
+    """
+    s = _single_window_factor(session_usage, onset, asymptote)
+    w = _single_window_factor(weekly_usage or 0.0, onset, asymptote)
+    return s * w
 
 
 def health_factor(is_healthy: bool, recent_429: int = 0) -> float:

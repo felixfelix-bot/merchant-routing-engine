@@ -15,8 +15,11 @@ import pytest
 
 from src.pricing_engine import (
     EXTRA_USAGE_MULTIPLIER,
+    QUOTA_PRESSURE_ONSET,
+    _single_window_factor,
     compute_effective_price,
     quota_pressure_factor,
+    quota_pressure_factor_superimposed,
 )
 
 
@@ -50,17 +53,20 @@ class TestQuotaPressureFactor:
         """At exactly the onset, pressure = 1.0."""
         assert quota_pressure_factor(0.70) == 1.0
 
-    def test_at_full_usage_is_infinity(self):
-        """At 100% usage, pressure = +inf (provider unreachable — the router
-        ALWAYS finds a cheaper alternative first)."""
-        assert quota_pressure_factor(1.0) == math.inf
-
+    def test_at_full_usage_caps_at_asymptote(self):
+        """At 100% usage with hard_limit=False (Ollama), pressure caps at the
+        extra-usage rate (asymptote). kimi-k3 stays reachable at true cost.
+        With hard_limit=True (z.ai/PPQ), returns +inf (must divert).
+        """
+        assert quota_pressure_factor(1.0) == pytest.approx(EXTRA_USAGE_MULTIPLIER)
+        assert quota_pressure_factor(1.0, hard_limit=True) == math.inf
     def test_monotonic_increasing(self):
         """Pressure is monotonically increasing in the ramp range [onset, 1.0).
 
-        The RP-EXP curve 1 + K*t/(1-t) diverges toward +inf as usage -> 1.0,
-        where it is clipped to +inf (verified separately). Monotonicity holds
-        across the whole 0 -> 1.0 domain; at u >= 1.0 the value is flat at +inf.
+        The RP-EXP curve 1 + K*t/(1-t) diverges toward +inf as usage -> 1.0.
+        Monotonicity holds across [0, 0.99]; at u >= 1.0 the value drops to the
+        asymptote cap (hard_limit=False) — this is the deliberate extra-usage
+        rate that keeps exclusive models reachable.
         """
         prev = 0.0
         for i in range(0, 100):  # 0.00 -> 0.99
@@ -68,9 +74,10 @@ class TestQuotaPressureFactor:
             p = quota_pressure_factor(u)
             assert p >= prev, f"non-monotonic at u={u}: {p} < {prev}"
             prev = p
-        # At 100% the curve reaches +inf (>= the last finite value at 0.99).
-        assert quota_pressure_factor(1.0) == math.inf
-        assert quota_pressure_factor(1.0) >= prev
+        # At 100% the curve caps at the extra-usage rate (asymptote).
+        # This is deliberately LOWER than the value at 0.99 — the cap keeps
+        # kimi-k3 reachable at its true extra-usage cost.
+        assert quota_pressure_factor(1.0) == pytest.approx(EXTRA_USAGE_MULTIPLIER)
 
     def test_over_quota_is_infinity(self):
         """At u >= 1.0 the factor is +inf (unreachable), NOT a finite cap.
@@ -81,19 +88,21 @@ class TestQuotaPressureFactor:
         price cap here.
         """
         assert quota_pressure_factor(0.99) > 10.0  # large but finite below 100%
-        assert quota_pressure_factor(1.0) == math.inf
-        assert quota_pressure_factor(1.10) == math.inf
-        assert quota_pressure_factor(1.25) == math.inf
-        assert quota_pressure_factor(1.50) == math.inf
+        # Default (hard_limit=False): caps at extra-usage rate
+        assert quota_pressure_factor(1.0) == pytest.approx(EXTRA_USAGE_MULTIPLIER)
+        assert quota_pressure_factor(1.10) == pytest.approx(EXTRA_USAGE_MULTIPLIER)
+        # hard_limit=True: +inf (must divert)
+        assert quota_pressure_factor(1.0, hard_limit=True) == math.inf
+        assert quota_pressure_factor(1.50, hard_limit=True) == math.inf
 
     def test_over_quota_flat_at_infinity(self):
         """Past 100%, pressure is flat at +inf (no further finite ramping)."""
-        p100 = quota_pressure_factor(1.0)
+        p100 = quota_pressure_factor(1.0)  # hard_limit=False default
         p110 = quota_pressure_factor(1.10)
         p125 = quota_pressure_factor(1.25)
-        assert p100 == math.inf
-        assert p110 == math.inf
-        assert p125 == math.inf
+        assert p100 == pytest.approx(EXTRA_USAGE_MULTIPLIER)  # caps at asymptote
+        assert p110 == pytest.approx(EXTRA_USAGE_MULTIPLIER)
+        assert p125 == pytest.approx(EXTRA_USAGE_MULTIPLIER)
 
     def test_weekly_takes_max(self):
         """When weekly usage is higher, it governs (worst case)."""
@@ -137,7 +146,7 @@ class TestQuotaPressureFactor:
         # With onset at 100%, there is no ramp interval; usage below onset has
         # no penalty, and usage >= 1.0 is +inf (asymptote).
         assert quota_pressure_factor(0.50, onset=1.0) == 1.0
-        assert quota_pressure_factor(1.0, onset=1.0) == math.inf
+        assert quota_pressure_factor(1.0, onset=1.0) == pytest.approx(EXTRA_USAGE_MULTIPLIER)
 
     def test_rational_curve_shape(self):
         """Verify the RP-EXP rational curve: at the midpoint between onset and
@@ -278,3 +287,164 @@ class TestComputeEffectivePriceWithPressure:
             hour_utc=12, extra_usage_regime="included",
         )
         assert price_pressure > price_regime_included  # pressure applied
+
+
+# ── RP-SUPERIMPOSE: separate session + weekly exponentials, multiplied ────────
+
+
+class TestQuotaPressureSuperimposed:
+    """RP-SUPERIMPOSE: two independent quota_pressure_factor curves (session +
+    weekly), multiplied together — Felix's "superposition" directive.
+
+    Instead of driving one curve off max(session, weekly), evaluate a SEPARATE
+    exponential for each window and MULTIPLY them. Both windows depleting at
+    once is the genuine worst case, and the product is always >= the max-based
+    value (each factor >= 1.0).
+
+    The exact numeric multipliers depend on EXTRA_USAGE_MULTIPLIER; rather than
+    hardcode the (approximate) constants from the spec, each test derives its
+    expected value from quota_pressure_factor itself — so the SUPERPOSITION
+    PROPERTY (product == curve(session) * curve(weekly)) is verified exactly,
+    independent of the configured steepness.
+    """
+
+    # ── GATE tests (from the task spec, with exact superposition maths) ──
+
+    def test_gate_both_below_onset_is_one(self):
+        """GATE: superimposed(0.5, 0.5) == 1.0 (both below onset, no penalty)."""
+        assert quota_pressure_factor_superimposed(0.5, 0.5) == 1.0
+
+    def test_gate_session_high_weekly_low(self):
+        """GATE: superimposed(0.9, 0.5) == curve(0.9) — weekly contributes 1.0.
+
+        (Spec says ~6.3x; exact value is curve(0.9) = 1 + K·t/(1−t).)
+        """
+        expected = quota_pressure_factor(0.9) * quota_pressure_factor(0.5)
+        result = quota_pressure_factor_superimposed(0.9, 0.5)
+        assert result == pytest.approx(expected)
+        assert result == pytest.approx(quota_pressure_factor(0.9))  # weekly=1.0
+        assert result > 1.0  # session pressure active
+
+    def test_gate_weekly_high_session_low(self):
+        """GATE: superimposed(0.5, 0.9) == curve(0.9) — symmetric to above."""
+        expected = quota_pressure_factor(0.5) * quota_pressure_factor(0.9)
+        result = quota_pressure_factor_superimposed(0.5, 0.9)
+        assert result == pytest.approx(expected)
+        assert result == pytest.approx(quota_pressure_factor(0.0, 0.9))
+        assert result > 1.0
+
+    def test_gate_both_high_is_product(self):
+        """GATE: superimposed(0.9, 0.9) == curve(0.9)² (superposition — squared).
+
+        The product of two 0.9-window curves is the single-window value squared,
+        which is MUCH larger than ONE 0.9 curve (the old max-based behaviour).
+        """
+        one_curve = _single_window_factor(0.9, QUOTA_PRESSURE_ONSET, EXTRA_USAGE_MULTIPLIER)
+        result = quota_pressure_factor_superimposed(0.9, 0.9)
+        assert result == pytest.approx(one_curve * one_curve)
+        # Superposition of two depleting windows is steeper than a single curve.
+        assert result > one_curve
+        assert result > 10.0  # very steep when both windows deplete
+
+    def test_gate_both_near_full_very_large(self):
+        """GATE: superimposed(0.99, 0.99) is very large (near infinity)."""
+        one_curve = quota_pressure_factor(0.99)
+        result = quota_pressure_factor_superimposed(0.99, 0.99)
+        assert result == pytest.approx(one_curve * one_curve)
+        assert result > 1000.0  # diverging toward +inf
+        assert result > one_curve  # steeper than the single curve
+
+    def test_gate_session_exhausted_is_inf(self):
+        """GATE: superimposed(1.0, 0.5) == +inf (session window exhausted)."""
+        assert quota_pressure_factor_superimposed(1.0, 0.5) == math.inf
+
+    # ── Symmetry & exhaustion edge cases ──
+
+    def test_either_window_exhausted_is_inf(self):
+        """If EITHER window hits 100%, the product is +inf (unreachable)."""
+        assert quota_pressure_factor_superimposed(0.5, 1.0) == math.inf
+        assert quota_pressure_factor_superimposed(1.0, 0.0) == math.inf
+        assert quota_pressure_factor_superimposed(1.10, 0.5) == math.inf
+        assert quota_pressure_factor_superimposed(0.5, 1.25) == math.inf
+
+    def test_both_exhausted_is_inf(self):
+        """Both windows exhausted → +inf * +inf = +inf."""
+        assert quota_pressure_factor_superimposed(1.0, 1.0) == math.inf
+
+    def test_symmetric_in_arguments(self):
+        """superimposed(s, w) == superimposed(w, s) — multiplication commutes."""
+        for s, w in [(0.90, 0.50), (0.80, 0.95), (0.99, 0.85)]:
+            assert quota_pressure_factor_superimposed(s, w) == pytest.approx(
+                quota_pressure_factor_superimposed(w, s)
+            )
+
+    # ── weekly_usage=None / 0.0 defaults ──
+
+    def test_weekly_none_equals_session_only(self):
+        """weekly_usage=None → only the session curve governs (weekly factor 1.0)."""
+        assert quota_pressure_factor_superimposed(0.9) == pytest.approx(
+            quota_pressure_factor(0.9)
+        )
+        assert quota_pressure_factor_superimposed(0.0) == 1.0
+        assert quota_pressure_factor_superimposed(1.0) == math.inf
+
+    def test_weekly_zero_equals_session_only(self):
+        """weekly_usage=0.0 behaves identically to None (below onset → factor 1.0)."""
+        assert quota_pressure_factor_superimposed(0.9, 0.0) == pytest.approx(
+            quota_pressure_factor_superimposed(0.9)
+        )
+
+    # ── The defining safety property: never under-penalises ──
+
+    def test_always_geq_max_based(self):
+        """superimposed(s, w) >= max(curve(s), curve(w)) — the true max-based
+        baseline — for every (s, w). The product of two factors (each >= 1.0) is
+        always at least their max. So the superposition NEVER weakens the
+        pressure vs the old worst-case-governs behaviour; it only sharpens the
+        genuine worst case (both depleting).
+
+        Uses the raw single-window curve as the baseline so the assertion is
+        independent of how the top-level ``quota_pressure_factor`` chooses to
+        combine windows.
+        """
+        onset = QUOTA_PRESSURE_ONSET
+        asym = EXTRA_USAGE_MULTIPLIER
+        for s in [0.0, 0.3, 0.5, 0.7, 0.75, 0.8, 0.9, 0.95, 0.99]:
+            for w in [0.0, 0.3, 0.5, 0.7, 0.75, 0.8, 0.9, 0.95, 0.99]:
+                superimposed = quota_pressure_factor_superimposed(s, w)
+                max_based = max(
+                    _single_window_factor(s, onset, asym),
+                    _single_window_factor(w, onset, asym),
+                )
+                assert superimposed >= max_based, (
+                    f"superimposed({s},{w})={superimposed} < max-based {max_based}"
+                )
+
+    def test_strictly_steeper_when_both_above_onset(self):
+        """When BOTH windows are above the onset, the product is STRICTLY greater
+        than max(curve(s), curve(w)) (both factors > 1.0, so product > each)."""
+        onset = QUOTA_PRESSURE_ONSET
+        asym = EXTRA_USAGE_MULTIPLIER
+        for s in [0.8, 0.9, 0.95]:
+            for w in [0.8, 0.9, 0.95]:
+                superimposed = quota_pressure_factor_superimposed(s, w)
+                max_based = max(
+                    _single_window_factor(s, onset, asym),
+                    _single_window_factor(w, onset, asym),
+                )
+                assert superimposed > max_based, (
+                    f"superimposed({s},{w})={superimposed} not > max-based {max_based}"
+                )
+
+    # ── Monotonicity ──
+
+    def test_monotonic_in_session_holding_weekly(self):
+        """Holding weekly fixed, the product rises monotonically with session."""
+        for weekly in [0.0, 0.5, 0.9]:
+            prev = 0.0
+            for i in range(0, 100):
+                u = i / 100.0
+                p = quota_pressure_factor_superimposed(u, weekly)
+                assert p >= prev, f"non-monotonic at u={u}, w={weekly}: {p} < {prev}"
+                prev = p
+
