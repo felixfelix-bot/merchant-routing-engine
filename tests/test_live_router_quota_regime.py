@@ -268,22 +268,10 @@ class TestExtraRegimeReroute:
     ollama_cloud, because the extra-usage multiplier raises ollama_cloud's
     effective rate.
 
-    Note: With $0.10/M target rate (4.17x), ollama_cloud at $0.10/M is still
-    cheaper than PPQ ($0.14) and OpenRouter ($0.135). So the reroute only
-    happens because the tier is lowered to "low" in extra regime, making
-    ollama_cloud compete at the "low" difficulty level where it might not
-    be chosen depending on the optimizer's tier gating.
-
-    However, since the tier relaxation goes high→medium→low and ollama_cloud
-    is set to "low" tier in extra mode, at "high" difficulty it will be
-    filtered out, and the external providers (also "low" tier) will also be
-    filtered out. At "low" difficulty they all compete — ollama at $0.10
-    would be cheapest. So the reroute depends on the tier logic.
-
-    With the old $0.15/M (6.25x), ollama was more expensive than PPQ/OpenRouter.
-    With $0.10/M (4.17x), ollama is cheaper. The test verifies the regime
-    is detected and the multiplier is applied — the actual reroute may not
-    happen with $0.10/M since ollama is still cheapest.
+    Note: With $0.15/M target rate (6.25x), ollama_cloud at $0.15/M is more
+    expensive than PPQ ($0.14) and OpenRouter ($0.135). So the reroute
+    to a cheaper external provider should happen in extra regime, provided
+    the tier and model availability allow it.
     """
 
     def test_extra_regime_detected(
@@ -311,6 +299,11 @@ class TestExtraRegimeReroute:
             assert router.last_quota_regime == "extra"
             # A provider should be chosen
             assert chosen is not None
+            # M1 fix: With $0.15/M (> PPQ $0.14, > OpenRouter $0.135),
+            # ollama_cloud should be rerouted away in extra regime
+            assert chosen != "ollama_cloud", (
+                f"Expected reroute from ollama_cloud in extra regime, got {chosen}"
+            )
         finally:
             qt._CONFIG_PATH = orig_config
             os.unlink(db_path)
@@ -743,16 +736,16 @@ class TestReasonFieldIncludesRegime:
 class TestExtraUsageMultiplierValue:
     """Verify the extra-usage multiplier produces the right effective rate."""
 
-    def test_multiplier_is_approx_4_17(self):
-        """EXTRA_USAGE_MULTIPLIER should be ≈4.17 ($0.024 * 4.17 = $0.10)."""
-        assert EXTRA_USAGE_MULTIPLIER == pytest.approx(4.17, abs=0.01)
+    def test_multiplier_is_approx_6_25(self):
+        """EXTRA_USAGE_MULTIPLIER should be ≈6.25 ($0.024 * 6.25 = $0.15)."""
+        assert EXTRA_USAGE_MULTIPLIER == pytest.approx(6.25, abs=0.01)
 
-    def test_ollama_extra_rate_is_0_10(self):
-        """In extra mode, ollama_cloud's effective rate ($0.024 * 4.17 = $0.10)
-        should be approximately $0.10/M."""
+    def test_ollama_extra_rate_is_0_15(self):
+        """In extra mode, ollama_cloud's effective rate ($0.024 * 6.25 = $0.15)
+        should be approximately $0.15/M."""
         ollama_base = 0.024
         extra_rate = ollama_base * EXTRA_USAGE_MULTIPLIER
-        assert extra_rate == pytest.approx(0.10, abs=0.001)
+        assert extra_rate == pytest.approx(0.15, abs=0.001)
 
     def test_included_multiplier_is_1(self):
         assert extra_usage_multiplier("included") == 1.0

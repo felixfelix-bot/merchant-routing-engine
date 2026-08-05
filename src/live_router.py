@@ -1178,7 +1178,7 @@ class LiveRouter:
         # MULTIPLIED. Both windows depleting is much steeper than a single
         # max-based curve: at 90%/90% the product is ~curve(0.90)² instead of
         # curve(0.90). When EITHER window hits 100% ollama_cloud's price caps
-        # at the extra-usage asymptote (~4.17x, hard_limit=False — Ollama
+        # at the extra-usage asymptote (~6.25x, hard_limit=False — Ollama
         # allows extra usage so kimi-k3 stays reachable); with hard_limit=True
         # (z.ai/PPQ) it becomes +inf so the optimizer reroutes to a cheaper
         # alternative. Ollama-exclusive models are still protected by the
@@ -1216,8 +1216,8 @@ class LiveRouter:
 
         # ── EU-R3: Compute extra-usage multiplier for ollama_cloud ──────
         # When the regime is "extra", ollama_cloud's effective rate gets
-        # multiplied by EXTRA_USAGE_MULTIPLIER (≈4.17x → $0.024 * 4.17 =
-        # $0.10/M). When "exhausted", the multiplier is +inf —
+        # multiplied by EXTRA_USAGE_MULTIPLIER (≈6.25x → $0.024 * 6.25 =
+        # $0.15/M). When "exhausted", the multiplier is +inf —
         # ollama_cloud becomes unreachable to the optimizer.
         # When the kill switch is off, quota_regime is "included" so
         # extra_mult = 1.0 (no penalty).

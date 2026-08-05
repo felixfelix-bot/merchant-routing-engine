@@ -314,6 +314,8 @@ class TestSnapshotWithRealData:
     """Integration test: _snapshot_quota() with a real temp DB."""
 
     def test_snapshot_reflects_real_usage(self, proxy_module, tmp_usage_db, monkeypatch):
+        # Enable extra-usage tracking (default is false — shadow mode)
+        monkeypatch.setattr(proxy_module, "_OLLAMA_EXTRA_USAGE_ENABLED", True)
         # Insert 300M tokens in the last hour (within 5h window)
         now = time.time()
         for i in range(300):
@@ -332,6 +334,8 @@ class TestSnapshotWithRealData:
         assert oc["regime"] == "included"  # 60% < 100%
 
     def test_snapshot_extra_regime_at_100pct(self, proxy_module, tmp_usage_db, monkeypatch):
+        # Enable extra-usage tracking (default is false — shadow mode)
+        monkeypatch.setattr(proxy_module, "_OLLAMA_EXTRA_USAGE_ENABLED", True)
         # Insert 500M tokens (exactly 100% of session limit)
         now = time.time()
         for i in range(500):
@@ -347,6 +351,8 @@ class TestSnapshotWithRealData:
         assert oc["session_used_pct"] >= 100.0
 
     def test_snapshot_exhausted_regime_both_windows(self, proxy_module, tmp_usage_db, monkeypatch):
+        # Enable extra-usage tracking (default is false — shadow mode)
+        monkeypatch.setattr(proxy_module, "_OLLAMA_EXTRA_USAGE_ENABLED", True)
         # Insert 3.5B tokens spread across 7 days (exhausts weekly)
         # and 500M in the last 5h (exhausts session)
         now = time.time()

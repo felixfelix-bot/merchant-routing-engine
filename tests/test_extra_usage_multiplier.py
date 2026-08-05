@@ -2,9 +2,9 @@
 
 Covers the required scenarios from the EU-R3 task spec:
   1. Included regime → multiplier = 1.0 (no change)
-  2. Extra regime → price = base * 4.17 ($0.024 * 4.17 = $0.10/M)
+  2. Extra regime → price = base * 6.25 ($0.024 * 6.25 = $0.15/M)
   3. Exhausted regime → provider filtered out (+inf)
-  4. Multiplier stacks correctly with peak (3x * 4.17x = 12.51x)
+  4. Multiplier stacks correctly with peak (3x * 6.25x = 18.75x)
 
 Also covers:
   - Config-derived multiplier override
@@ -39,9 +39,9 @@ class TestExtraUsageMultiplier:
         assert extra_usage_multiplier("included") == 1.0
 
     def test_extra_regime_uses_default_multiplier(self):
-        """When regime='extra', multiplier = EXTRA_USAGE_MULTIPLIER (≈4.17)."""
+        """When regime='extra', multiplier = EXTRA_USAGE_MULTIPLIER (≈6.25)."""
         assert extra_usage_multiplier("extra") == EXTRA_USAGE_MULTIPLIER
-        assert extra_usage_multiplier("extra") == pytest.approx(4.17, abs=0.01)
+        assert extra_usage_multiplier("extra") == pytest.approx(6.25, abs=0.01)
 
     def test_extra_regime_with_override(self):
         """Config-derived multiplier override is respected in extra mode."""
@@ -54,7 +54,7 @@ class TestExtraUsageMultiplier:
 
     def test_exhausted_ignores_override(self):
         """Exhausted regime is always +inf, regardless of multiplier override."""
-        assert extra_usage_multiplier("exhausted", multiplier=4.17) == math.inf
+        assert extra_usage_multiplier("exhausted", multiplier=6.25) == math.inf
         assert extra_usage_multiplier("exhausted", multiplier=0.0) == math.inf
 
     def test_unknown_regime_fails_safe_to_one(self):
@@ -64,15 +64,15 @@ class TestExtraUsageMultiplier:
         assert extra_usage_multiplier("something_else") == 1.0
 
     def test_default_multiplier_matches_plan(self):
-        """EXTRA_USAGE_MULTIPLIER = 0.10 / 0.024 ≈ 4.17 (per EU-R3 spec)."""
+        """EXTRA_USAGE_MULTIPLIER = 0.15 / 0.024 = 6.25 (per EU-R3 spec)."""
         assert EXTRA_USAGE_MULTIPLIER == pytest.approx(
             EXTRA_USAGE_TARGET_RATE / EXTRA_USAGE_BASE_RATE, abs=0.01
         )
-        assert EXTRA_USAGE_MULTIPLIER == pytest.approx(4.17, abs=0.01)
+        assert EXTRA_USAGE_MULTIPLIER == pytest.approx(6.25, abs=0.01)
 
-    def test_target_rate_is_0_10(self):
-        """Target effective rate is $0.10/M (per EU-R3 spec)."""
-        assert EXTRA_USAGE_TARGET_RATE == pytest.approx(0.10, abs=0.001)
+    def test_target_rate_is_0_15(self):
+        """Target effective rate is $0.15/M (per EU-R3 spec)."""
+        assert EXTRA_USAGE_TARGET_RATE == pytest.approx(0.15, abs=0.001)
 
 
 # ── compute_effective_price with extra_usage_regime ─────────────────────────
@@ -104,23 +104,23 @@ class TestComputeEffectivePriceExtraUsage:
         )
         assert price_with == pytest.approx(price_without)
 
-    # ── 2. Extra regime → price = base * 4.17 = $0.10/M ───────────────────
+    # ── 2. Extra regime → price = base * 6.25 = $0.15/M ───────────────────
 
-    def test_extra_regime_effective_rate_is_0_10(self):
-        """KEY GATE: extra_usage=True → price = base * 4.17 = $0.10/M.
+    def test_extra_regime_effective_rate_is_0_15(self):
+        """KEY GATE: extra_usage=True → price = base * 6.25 = $0.15/M.
 
-        $0.024 * 4.17 ≈ $0.10/M
+        $0.024 * 6.25 = $0.15/M
         """
         price = compute_effective_price(
             0.024, "ollama_cloud", 50, True,
             hour_utc=12, extra_usage_regime="extra",
         )
-        assert price == pytest.approx(0.10, abs=0.001)
+        assert price == pytest.approx(0.15, abs=0.001)
 
     def test_extra_regime_with_custom_base_rate(self):
         """Extra regime with a different base rate still applies multiplier.
 
-        If base_rate = $0.03/M, effective = 0.03 * 4.17 ≈ $0.125/M.
+        If base_rate = $0.03/M, effective = 0.03 * 6.25 = $0.1875/M.
         """
         price = compute_effective_price(
             0.03, "ollama_cloud", 50, True,
@@ -167,12 +167,12 @@ class TestComputeEffectivePriceExtraUsage:
         assert not math.isnan(price)
         assert price == MIN_EFFECTIVE_PRICE
 
-    # ── 4. Multiplier stacks with peak (3x * 4.17x ≈ 12.51x) ──────────────
+    # ── 4. Multiplier stacks with peak (3x * 6.25x = 18.75x) ──────────────
 
     def test_extra_stacks_with_peak(self):
-        """Peak (3x) * extra (≈4.17x) during peak extra usage.
+        """Peak (3x) * extra (≈6.25x) during peak extra usage.
 
-        $0.024 * 3.0 * 4.17 ≈ $0.30/M.
+        $0.024 * 3.0 * 6.25 = $0.45/M.
         Note: ollama_cloud is NOT a z.ai provider, so peak_multiplier returns
         1.0 for it. To test the stacking arithmetic we use a z.ai provider
         with the extra-usage regime set explicitly.
@@ -185,9 +185,9 @@ class TestComputeEffectivePriceExtraUsage:
         assert price == pytest.approx(expected, abs=0.001)
 
     def test_extra_stacks_with_peak_and_scarcity(self):
-        """Full stack: peak(3x) * scarcity(2x) * extra(≈4.17x).
+        """Full stack: peak(3x) * scarcity(2x) * extra(≈6.25x).
 
-        $0.024 * 3.0 * 2.0 * 4.17 ≈ $0.60/M.
+        $0.024 * 3.0 * 2.0 * 6.25 = $0.90/M.
         """
         price = compute_effective_price(
             0.024, "zai", 100, True,
@@ -197,9 +197,9 @@ class TestComputeEffectivePriceExtraUsage:
         assert price == pytest.approx(expected, abs=0.001)
 
     def test_extra_stacks_with_health_penalty(self):
-        """Extra(≈4.17x) * health_severe(10x).
+        """Extra(≈6.25x) * health_severe(10x).
 
-        $0.024 * 10.0 * 4.17 ≈ $1.00/M.
+        $0.024 * 10.0 * 6.25 = $1.50/M.
         """
         price = compute_effective_price(
             0.024, "ollama_cloud", 50,
@@ -210,9 +210,9 @@ class TestComputeEffectivePriceExtraUsage:
         assert price == pytest.approx(expected, abs=0.001)
 
     def test_extra_stacks_with_pace(self):
-        """Extra(≈4.17x) * pace(2.0x).
+        """Extra(≈6.25x) * pace(2.0x).
 
-        $0.024 * 2.0 * 4.17 ≈ $0.20/M.
+        $0.024 * 2.0 * 6.25 = $0.30/M.
         """
         price = compute_effective_price(
             0.024, "ollama_cloud", 50, True,

@@ -94,7 +94,7 @@ PACE_CAP: float = 3.0      # maximum pace_factor (strong slowdown, but finite)
 # ── Extra-usage multiplier (ollama Cloud quota regime) ──────────────────────
 # When the Ollama Cloud quota is exceeded (regime='extra'), the effective
 # rate is multiplied by the extra-usage multiplier. The default multiplier
-# of 4.17x maps the $0.024/M base rate to $0.10/M ($0.024 * 4.17 = $0.10).
+# of 6.25x maps the $0.024/M base rate to $0.15/M ($0.024 * 6.25 = $0.15).
 #
 # The multiplier can be overridden via the OLLAMA_EXTRA_USAGE_MULTIPLIER env
 # var (EU-R3). This allows tuning without code changes.
@@ -105,12 +105,12 @@ PACE_CAP: float = 3.0      # maximum pace_factor (strong slowdown, but finite)
 #
 # Config source: config/providers.yaml → ollama_cloud.extra_usage_rate_per_m
 # The multiplier is derived as: extra_usage_rate_per_m / base_rate.
-# Default: 0.10 / 0.024 ≈ 4.17.
+# Default: 0.15 / 0.024 = 6.25.
 EXTRA_USAGE_BASE_RATE: float = 0.024   # $/M — ollama_cloud base rate
-EXTRA_USAGE_TARGET_RATE: float = 0.10  # $/M — target effective rate in extra mode
+EXTRA_USAGE_TARGET_RATE: float = 0.15  # $/M — target effective rate in extra mode
 # Recompute default multiplier from the rate values so they stay in sync.
 # Allow override via env var (EU-R3: OLLAMA_EXTRA_USAGE_MULTIPLIER).
-_DEFAULT_EXTRA_USAGE_MULT = EXTRA_USAGE_TARGET_RATE / EXTRA_USAGE_BASE_RATE  # ≈4.17
+_DEFAULT_EXTRA_USAGE_MULT = EXTRA_USAGE_TARGET_RATE / EXTRA_USAGE_BASE_RATE  # ≈6.25
 EXTRA_USAGE_MULTIPLIER: float = float(
     os.environ.get("OLLAMA_EXTRA_USAGE_MULTIPLIER", _DEFAULT_EXTRA_USAGE_MULT)
 )
@@ -129,9 +129,9 @@ EXTRA_USAGE_MULTIPLIER: float = float(
 #                                                      alternative first)
 #
 #   where K = (extra_rate / base_rate) - 1.0 = EXTRA_USAGE_MULTIPLIER - 1.0
-#   (≈3.17 with the default $0.10/$0.024 rates).
+#   (≈5.25 with the default $0.15/$0.024 rates).
 #
-# The curve passes through the full extra-usage rate (K+1 ≈ 4.17x → $0.10/M) at
+# The curve passes through the full extra-usage rate (K+1 = 6.25x → $0.15/M) at
 # the midpoint of the ramp (u = onset + 0.5*(1-onset) = 0.85), then diverges
 # toward INFINITY as usage → 100%. Because the price literally becomes +∞ at full
 # quota, the optimizer can never keep Ollama at 100% — it always reroutes to z.ai
@@ -144,13 +144,13 @@ EXTRA_USAGE_MULTIPLIER: float = float(
 # Both the 5h session and 7d weekly usage fractions are considered; the WORST
 # (max) governs (priority: never run out).
 #
-# Price table (onset=0.70, base=$0.024/M, K≈3.17):
+# Price table (onset=0.70, base=$0.024/M, K≈5.25):
 #   u=0.70 → 1.0x   → $0.024/M   (onset — no penalty)
-#   u=0.80 → 2.58x  → $0.062/M
-#   u=0.85 → 4.17x  → $0.100/M   (midpoint = extra-usage rate)
-#   u=0.90 → 7.33x  → $0.176/M   (> openrouter $0.135)
-#   u=0.95 → 16.8x  → $0.404/M   (> deepinfra)
-#   u=0.99 → ~93x   → $2.23/M    (unreachable for optimizer)
+#   u=0.80 → 3.63x  → $0.087/M
+#   u=0.85 → 6.25x  → $0.150/M   (midpoint = extra-usage rate)
+#   u=0.90 → 11.5x  → $0.276/M   (> openrouter $0.135)
+#   u=0.95 → 27.3x  → $0.654/M   (> deepinfra)
+#   u=0.99 → ~153x  → $3.68/M    (unreachable for optimizer)
 #   u≥1.00 → +∞     → unreachable (always rerouted to a cheaper alternative)
 QUOTA_PRESSURE_ONSET: float = float(
     os.environ.get("OLLAMA_QUOTA_PRESSURE_ONSET", "0.70")
@@ -438,8 +438,8 @@ def extra_usage_multiplier(
     :func:`ollama_quota_tracker.get_quota_status`) to a price multiplier:
 
         regime == "included"  → 1.0   (no change — within free quota)
-        regime == "extra"     → EXTRA_USAGE_MULTIPLIER (default ≈4.17x,
-                                 raising $0.024/M base to $0.10/M)
+        regime == "extra"     → EXTRA_USAGE_MULTIPLIER (default ≈6.25x,
+                                 raising $0.024/M base to $0.15/M)
         regime == "exhausted" → +inf  (provider unreachable, filtered out)
 
     The *multiplier* override allows callers to supply a config-derived
@@ -453,7 +453,7 @@ def extra_usage_multiplier(
             ``"extra"``, or ``"exhausted"`` (as returned by
             :func:`ollama_quota_tracker.get_quota_status`).
         multiplier: Optional override for the extra-mode multiplier.
-            If None, uses :data:`EXTRA_USAGE_MULTIPLIER` (≈4.17).
+            If None, uses :data:`EXTRA_USAGE_MULTIPLIER` (≈6.25).
 
     Returns:
         Multiplier: 1.0 for included, the configured multiplier (>= 1.0)
@@ -523,7 +523,7 @@ def quota_pressure_factor(
 
     Cap behaviour when ANY provided window reaches 100%:
 
-    - ``hard_limit=False`` (Ollama Cloud): caps at *asymptote* (≈4.17x).
+    - ``hard_limit=False`` (Ollama Cloud): caps at *asymptote* (≈6.25x).
       Ollama allows extra usage at the list rate, so exclusive models like
       kimi-k3 remain reachable at their true cost.
     - ``hard_limit=True`` (z.ai, PPQ): returns **+inf**. These providers have
@@ -533,14 +533,14 @@ def quota_pressure_factor(
 
         Session  Weekly  Factor      $/M      Notes
         ───────  ──────  ────────    ─────    ─────────────────────────
-        80%      50%     2.58x       $0.062   Session drives
-        80%      80%     6.67x       $0.160   Both compound
-        85%      85%     17.4x       $0.417   Strong divert
-        90%      70%     7.33x       $0.176   Session drives
-        90%      90%     53.8x       $1.29    Compounded — guaranteed divert
-        95%      50%     16.8x       $0.404   Session alone
-        95%      95%     283x        $6.80    Unreachable
-        ≥100%    any     4.17x       $0.10    Extra-usage rate (hard_limit=False)
+        80%      50%     3.63x       $0.087   Session drives
+        80%      80%     13.1x       $0.315   Both compound
+        85%      85%     39.1x       $0.937   Strong divert
+        90%      70%     11.5x       $0.276   Session drives
+        90%      90%     132x        $3.17    Compounded — guaranteed divert
+        95%      50%     27.3x       $0.654   Session alone
+        95%      95%     743x        $17.8    Unreachable
+        ≥100%    any     6.25x       $0.15    Extra-usage rate (hard_limit=False)
         ≥100%    any     ∞           —        Hard limit (hard_limit=True)
 
     This factor **subsumes** :func:`scarcity_factor` for any endpoint that
@@ -552,7 +552,7 @@ def quota_pressure_factor(
         weekly: Weekly usage fraction (0.0–1.0+). ``None`` = window not tracked.
         monthly: Monthly usage fraction (0.0–1.0+). ``None`` = not tracked.
         onset: Usage fraction at which pressure begins (default 0.75).
-        asymptote: Factor at the ramp midpoint (default ≈4.17). Controls
+        asymptote: Factor at the ramp midpoint (default ≈6.25). Controls
             curve steepness via ``K = asymptote - 1.0``.
         hard_limit: If True, returns +inf when any window ≥ 1.0 (z.ai/PPQ).
             If False, caps at *asymptote* (Ollama extra-usage rate).
@@ -779,7 +779,7 @@ def compute_effective_price(
             :func:`ollama_quota_tracker.get_quota_status`). Default
             "included" (no penalty — non-Ollama providers unaffected).
         extra_usage_mult: Optional override for the extra-mode multiplier.
-            If None, uses :data:`EXTRA_USAGE_MULTIPLIER` (≈4.17).
+            If None, uses :data:`EXTRA_USAGE_MULTIPLIER` (≈6.25).
         quota_pressure: Optional continuous quota-pressure multiplier from
             :func:`quota_pressure_factor`. When provided (not None), it
             **overrides** the legacy *extra_usage_regime* path — use this for

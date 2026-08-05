@@ -153,7 +153,7 @@ class TestQuotaPressureFactor:
         1.0, the multiplier equals EXTRA_USAGE_MULTIPLIER (= K + 1).
 
         At the midpoint of [0.70, 1.0] = 0.85, the normalised position
-        t = (0.85-0.70)/0.30 = 0.5, so 1 + K*0.5/0.5 = 1 + K = 4.17x — the full
+        t = (0.85-0.70)/0.30 = 0.5, so 1 + K*0.5/0.5 = 1 + K = 6.25x — the full
         extra-usage rate. Past the midpoint the curve diverges toward +inf.
         """
         u_mid = 0.70 + 0.5 * (1.0 - 0.70)  # 0.85
@@ -198,15 +198,15 @@ class TestCrossoverPoints:
         # Just above crossover (~72%): Ollama more expensive
         assert self.OLLAMA_BASE * quota_pressure_factor(0.73) > self.ZAI_FRIEND
 
-    def test_crossover_peak_around_84pct(self):
-        """Around 84% usage, Ollama crosses z.ai peak price.
+    def test_crossover_peak_around_80pct(self):
+        """Around 80% usage, Ollama crosses z.ai peak price.
 
-        0.024 * (1 + K*t/(1-t)) = 0.087  ->  t ~ 0.453  ->  u ~ 0.836.
+        0.024 * (1 + K*t/(1-t)) = 0.087  ->  t ~ 0.333  ->  u ~ 0.80.
         """
-        # Below crossover (~84%): Ollama still cheaper than peak z.ai
-        assert self.OLLAMA_BASE * quota_pressure_factor(0.83) < self.ZAI_PEAK
-        # Above crossover (~84%): Ollama more expensive than peak z.ai
-        assert self.OLLAMA_BASE * quota_pressure_factor(0.85) > self.ZAI_PEAK
+        # Below crossover (~80%): Ollama still cheaper than peak z.ai
+        assert self.OLLAMA_BASE * quota_pressure_factor(0.79) < self.ZAI_PEAK
+        # Above crossover (~80%): Ollama more expensive than peak z.ai
+        assert self.OLLAMA_BASE * quota_pressure_factor(0.81) > self.ZAI_PEAK
 
     def test_scarcity_cancels_in_comparison(self):
         """Scarcity applies to both providers equally, so it doesn't change

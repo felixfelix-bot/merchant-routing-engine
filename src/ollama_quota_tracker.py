@@ -59,7 +59,7 @@ def _load_limits(
 
     try:
         with open(path) as f:
-            cfg = yaml.safe_load(f)
+            cfg = yaml.safe_load(f) or {}
         oc = cfg.get("ollama_cloud", {}) or {}
         session_limit = int(
             oc.get("included_quota_tokens_session", session_limit)
