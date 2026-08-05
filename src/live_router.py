@@ -46,7 +46,12 @@ from src.price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
 from src.consumption_kalman import ConsumptionKalman
 from src.routing_optimizer import RoutingOptimizer
 from src.provider_names import normalize_provider_name
-from src.pricing_engine import pace_factor_multi, extra_usage_multiplier, EXTRA_USAGE_MULTIPLIER
+from src.pricing_engine import (
+    pace_factor_multi,
+    extra_usage_multiplier,
+    EXTRA_USAGE_MULTIPLIER,
+    quota_pressure_factor,
+)
 from src.quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
 from src.cpvo_calculator import CPVOCalculator
 from src.model_mapping import get_model
@@ -61,6 +66,62 @@ __all__ = ["LiveRouter"]
 # When disabled, the regime is always treated as "included" (no penalty).
 _EXTRA_USAGE_ENABLED: bool = (
     os.environ.get("OLLAMA_EXTRA_USAGE_ENABLED", "false").lower() in ("1", "true", "yes")
+)
+
+# ── RP-PRICING: Continuous quota-pressure (price-based rerouting) ──────────
+# When enabled, ollama_cloud's price rises SMOOTHLY as its quota depletes via
+# quota_pressure_factor() — the continuous replacement for both the binary
+# extra_usage_multiplier (EU-R3) and the RP-5 throttle tier/price logic. The
+# optimizer reroutes GLM-5.2 to z.ai the moment Ollama's effective price
+# crosses over. No thresholds, no regime strings.
+#
+# Per Felix's directive: price-based rerouting, not special-casing.
+#
+# Kill switch: OLLAMA_QUOTA_PRESSURE_ENABLED=false (default) keeps the legacy
+# binary extra_usage + throttle paths intact (backward compatible).
+#
+# When this is ON it SUPERCEDS the binary extra_usage multiplier and the RP-5
+# throttle price/tier effects for ollama_cloud: the pressure factor alone
+# drives the reroute. The scarcity_factor is also neutralised for ollama_cloud
+# (quota_total=None → scarcity=1.0) so the depletion signal isn't double-counted
+# (RP-PRICING option C).
+_QUOTA_PRESSURE_ENABLED: bool = (
+    os.environ.get("OLLAMA_QUOTA_PRESSURE_ENABLED", "false").lower() in ("1", "true", "yes")
+)
+
+# ── RP-5: Proactive GLM-5.2 throttling ──────────────────────────────────────
+# When Ollama session.usage approaches the 5h limit, proactively reroute
+# GLM-5.2 (and other non-exclusive models) to per-token externals so the
+# remaining Ollama quota is preserved for exclusive models (kimi, gpt-oss)
+# that have no alternative provider.
+#
+# Kill switch: OLLAMA_THROTTLE_ENABLED=false (default) disables ALL proactive
+# throttling — routing behaves exactly as before.
+#
+# Throttle zones (based on session_usage fraction from ollama.com/api/usage):
+#   < _THROTTLE_THRESHOLD (0.85):  Normal — ollama_cloud cheapest, chosen freely
+#   0.85 – 0.99:                   THROTTLE — ollama_cloud deprioritised (low
+#                                  tier + price bump so externals win; ollama
+#                                  remains viable as last-resort fallback)
+#   >= _BLOCK_THRESHOLD (1.0):     BLOCK — ollama_cloud excluded entirely for
+#                                  non-exclusive models (breaker tripped)
+#
+# Exclusive models (kimi-*, gpt-oss, etc.) ALWAYS bypass throttling — they
+# short-circuit to ollama_cloud in _OLLAMA_EXCLUSIVE_MODELS above.
+_THROTTLE_ENABLED: bool = (
+    os.environ.get("OLLAMA_THROTTLE_ENABLED", "false").lower() in ("1", "true", "yes")
+)
+_THROTTLE_THRESHOLD: float = float(
+    os.environ.get("OLLAMA_THROTTLE_THRESHOLD", "0.85")
+)
+_BLOCK_THRESHOLD: float = float(
+    os.environ.get("OLLAMA_BLOCK_THRESHOLD", "1.0")
+)
+# Price multiplier applied during throttle.  At base $0.024/M, a 6× multiplier
+# gives $0.144/M — just above PPQ ($0.14) and OpenRouter ($0.135) — so those
+# externals are chosen first and ollama_cloud is the fallback.
+_THROTTLE_PRICE_MULT: float = float(
+    os.environ.get("OLLAMA_THROTTLE_PRICE_MULT", "6.0")
 )
 
 # ── Ollama-exclusive models (EU-R3 Step 3) ───────────────────────────────────
@@ -199,6 +260,20 @@ class LiveRouter:
         # to the key_decisions / routing_live_decisions table.
         self._last_quota_regime: str = "included"
         self._last_quota_status: dict | None = None
+
+        # ── RP-5: proactive throttle state from the last routing decision ──
+        # One of "normal", "throttle", or "block". Set inside
+        # _do_select_failover under self._lock. Read via the
+        # ``last_throttle_state`` property for logging to the
+        # routing_live_decisions table.
+        self._last_throttle_state: str = "normal"
+        self._last_session_usage: float = 0.0
+
+        # ── RP-PRICING: continuous quota-pressure from the last decision ──
+        # The smooth multiplier (quota_pressure_factor) applied to ollama_cloud's
+        # base rate when _QUOTA_PRESSURE_ENABLED is on. Read via the
+        # ``last_quota_pressure`` property for logging to routing_live_decisions.
+        self._last_quota_pressure: float = 1.0
 
         # ── CPVO quality-aware effective rates (Phase 2.5.4) ───────────────
         # Queries the provider_telemetry table to inflate the base rate of
@@ -380,13 +455,19 @@ class LiveRouter:
         extra_usage_status = None
         try:
             db_path = self._db_path
-            if db_path and _EXTRA_USAGE_ENABLED:
-                # Primary: query the quota tracker (DB-based token counting)
-                quota_status = get_quota_status(db_path)
-                quota_regime = quota_status.get("regime", "included")
+            if db_path and (_EXTRA_USAGE_ENABLED or _THROTTLE_ENABLED
+                            or _QUOTA_PRESSURE_ENABLED):
+                # Primary: query the quota tracker (DB-based token counting).
+                # Only needed for the reactive extra-usage multiplier.
+                if _EXTRA_USAGE_ENABLED:
+                    quota_status = get_quota_status(db_path)
+                    quota_regime = quota_status.get("regime", "included")
 
                 # Secondary: fetch usage fractions from ollama.com/api/usage
                 # and build a full ExtraUsageStatus for real quota fractions.
+                # Needed by the extra-usage multiplier, the proactive throttle
+                # (RP-5), AND the continuous quota-pressure (RP-PRICING), so we
+                # fetch when ANY of these features is enabled.
                 try:
                     api_response = fetch_ollama_usage()
                     if api_response is not None:
@@ -406,7 +487,50 @@ class LiveRouter:
         self._last_quota_regime = quota_regime
         self._last_quota_status = quota_status
 
-        # ── EU-R3: Ollama-exclusive model short-circuit ──────────────────
+        # ── RP-5: Proactive GLM-5.2 throttling ──────────────────────────
+        # Determine the session_usage fraction from the Ollama API (0-1).
+        # This is the PRIMARY signal for proactive throttling — we act BEFORE
+        # the limit is hit, unlike the reactive extra-usage multiplier which
+        # only kicks in at usage >= 1.0.
+        #
+        # throttle_state values:
+        #   "normal"   — below _THROTTLE_THRESHOLD, no action
+        #   "throttle" — between threshold and block: deprioritise ollama
+        #   "block"    — at/above block threshold: exclude ollama entirely
+        session_usage_frac = 0.0
+        if extra_usage_status is not None:
+            session_usage_frac = max(
+                extra_usage_status.session_usage,
+                extra_usage_status.weekly_usage,
+            )
+        self._last_session_usage = session_usage_frac
+
+        throttle_state = "normal"
+        if _THROTTLE_ENABLED and model is not None and model not in _OLLAMA_EXCLUSIVE_MODELS:
+            if session_usage_frac >= _BLOCK_THRESHOLD:
+                throttle_state = "block"
+            elif session_usage_frac >= _THROTTLE_THRESHOLD:
+                throttle_state = "throttle"
+        self._last_throttle_state = throttle_state
+
+        # ── RP-PRICING: Continuous quota-pressure ──────────────────────────
+        # When the kill switch is on, compute the smooth pressure multiplier
+        # from the live session/weekly usage fractions. This is the continuous
+        # replacement for the binary extra_usage multiplier and the RP-5
+        # throttle price bump: ollama_cloud's price rises smoothly until the
+        # optimizer reroutes to z.ai. ``session_usage_frac`` already holds the
+        # max(session, weekly) fraction, so passing it as ``usage`` (with
+        # weekly=None) reproduces the same worst-case-governs behaviour.
+        quota_pressure = 1.0
+        if _QUOTA_PRESSURE_ENABLED and session_usage_frac > 0:
+            try:
+                quota_pressure = quota_pressure_factor(session_usage_frac)
+            except Exception:
+                # Any error in the pressure calc must never break routing.
+                quota_pressure = 1.0
+        self._last_quota_pressure = quota_pressure
+
+        # ── RP-5: Ollama-exclusive model short-circuit ──────────────────
         # If the requested model is Ollama-exclusive (kimi, gpt-oss, etc.),
         # it MUST route to ollama_cloud regardless of regime. No other
         # provider serves these models.
@@ -485,13 +609,20 @@ class LiveRouter:
                 prov_peak = _ZAI_PEAK
                 prov_peak_mult = 3.0
             elif name == "ollama_cloud":
-                # ── EU-R3: In "extra" regime, lower ollama_cloud's tier to
-                # "low" so it competes with per-token externals (ppq,
-                # openrouter) on PRICE rather than being auto-chosen at
-                # "high" difficulty.  In "included" regime it stays "high"
-                # (cheapest high-tier, preferred over externals).  In
-                # "exhausted" it gets filtered (breaker tripped below).
-                if quota_regime == "extra":
+                # ── RP-PRICING: When continuous pressure is ON, keep ollama at
+                # "high" tier — rerouting is driven by PRICE (the pressure
+                # factor), not by tier lowering. The optimizer reroutes GLM-5.2
+                # to z.ai the moment Ollama's effective price crosses over.
+                #
+                # ── EU-R3: (legacy, pressure OFF) In "extra" regime, lower
+                # ollama_cloud's tier to "low" so it competes with per-token
+                # externals on PRICE. In "included" regime it stays "high".
+                #
+                # ── RP-5: (legacy, pressure OFF) In "throttle" zone also lower
+                # tier to "low".
+                if _QUOTA_PRESSURE_ENABLED:
+                    tier = "high"
+                elif quota_regime == "extra" or throttle_state == "throttle":
                     tier = "low"
                 else:
                     tier = "high"
@@ -510,29 +641,52 @@ class LiveRouter:
             else:
                 fc = 0 if healthy else 999
 
-            # ── EU-R3: Apply extra-usage multiplier to ollama_cloud ──────
-            # In "extra" regime, ollama_cloud's base rate is multiplied by
-            # EXTRA_USAGE_MULTIPLIER (≈4.17x) so the optimizer sees $0.10/M
-            # instead of $0.024/M. In "exhausted" regime, extra_mult is
-            # +inf, which makes the effective price infinite — the
-            # optimizer filters it out as unreachable.
-            # When the kill switch is off, extra_mult = 1.0 (no change).
+            # ── Base-rate adjustment for ollama_cloud quota regime ───────────
+            # RP-PRICING (preferred): when continuous pressure is ON, multiply
+            #   ollama_cloud's base rate by the smooth quota_pressure factor.
+            #   This SUPERSEDES the legacy binary extra_usage multiplier and the
+            #   RP-5 throttle/block price logic — rerouting is purely price-based.
+            # EU-R3 (legacy, pressure OFF): binary extra_usage multiplier.
+            # RP-5  (legacy, pressure OFF): throttle/block tier+price effects.
             base_rate = float(effective_rates.get(
                 name, self._base_rates.get(name, 0.001)))
-            if name == "ollama_cloud" and extra_mult != 1.0:
+            if name == "ollama_cloud" and _QUOTA_PRESSURE_ENABLED:
+                # Continuous pressure drives the reroute; skip legacy paths.
+                base_rate = base_rate * quota_pressure
+            elif name == "ollama_cloud" and extra_mult != 1.0:
                 if math.isinf(extra_mult):
                     # Exhausted: force breaker tripped so optimizer filters it
                     healthy = False
                 else:
                     base_rate = base_rate * extra_mult
 
+            # ── RP-5: Proactive throttle / block (legacy — pressure OFF only) ─
+            # When continuous pressure is ON this block is skipped entirely:
+            # the pressure factor already raises the price smoothly.
+            if name == "ollama_cloud" and not _QUOTA_PRESSURE_ENABLED:
+                if throttle_state == "throttle":
+                    base_rate = base_rate * _THROTTLE_PRICE_MULT
+                elif throttle_state == "block":
+                    healthy = False
+
+            # RP-PRICING option C: when continuous pressure is ON for
+            # ollama_cloud, the pressure factor already encodes the quota
+            # depletion. Pass quota_total=None so the optimizer's
+            # scarcity_factor stays at 1.0 (no double-penalty). Scarcity still
+            # applies to other providers normally.
+            oc_pressure_on = (name == "ollama_cloud" and _QUOTA_PRESSURE_ENABLED)
+            prov_quota_total = (
+                None if oc_pressure_on
+                else (total if total != float("inf") else None)
+            )
+
             optimizer.add_provider(
                 name=name,
                 # Quality-aware base rate: a throwaway PriceKalman seeded with
-                # the CPVO effective rate (further adjusted by the extra-usage
-                # multiplier for ollama_cloud).  Keeps the optimizer's
-                # multiplier pipeline (peak/scarcity/health/pace) intact
-                # while making the base reflect provider quality and quota
+                # the CPVO effective rate (further adjusted by the quota-pressure
+                # / extra-usage multiplier for ollama_cloud).  Keeps the
+                # optimizer's multiplier pipeline (peak/scarcity/health/pace)
+                # intact while making the base reflect provider quality and quota
                 # regime.  Falls back to the live PriceKalman when CPVO has
                 # no entry for this provider.
                 price_kalman=PriceKalman(
@@ -545,7 +699,7 @@ class LiveRouter:
                 breaker_tripped=not healthy,
                 model_tier=tier,
                 model=prov_model,
-                quota_total=total if total != float("inf") else None,
+                quota_total=prov_quota_total,
                 peak_hours_utc=prov_peak,
                 peak_mult=prov_peak_mult,
                 failure_count=fc,
@@ -594,12 +748,26 @@ class LiveRouter:
         if chosen == "fallback":
             chosen = None
 
-        # ── EU-R3: Log quota regime in the reason field ─────────────────
-        # Augment the routing reason with the current quota regime so it
-        # appears in the key_decisions / routing_live_decisions table when
-        # the production proxy logs this decision.
-        if "reason" in result and quota_regime != "included":
-            result["reason"] = f"{result['reason']} (quota_regime={quota_regime})"
+        # ── EU-R3 / RP-5: Log quota regime + throttle state in reason ──────
+        # Augment the routing reason with the current quota regime and
+        # proactive throttle state so it appears in the key_decisions /
+        # routing_live_decisions table when the production proxy logs this
+        # decision.
+        _regime_note = ""
+        if quota_regime != "included":
+            _regime_note = f" (quota_regime={quota_regime})"
+        if throttle_state != "normal":
+            _regime_note += (
+                f" (throttle={throttle_state},"
+                f" session_usage={session_usage_frac:.1%})"
+            )
+        if _QUOTA_PRESSURE_ENABLED and quota_pressure != 1.0:
+            _regime_note += (
+                f" (quota_pressure={quota_pressure:.2f}x,"
+                f" session_usage={session_usage_frac:.1%})"
+            )
+        if "reason" in result and _regime_note:
+            result["reason"] = f"{result['reason']}{_regime_note}"
 
         # Find fallback: second viable provider from candidates
         fallback = None
@@ -643,6 +811,52 @@ class LiveRouter:
             return self._last_quota_status
         except Exception:
             return None
+
+    @property
+    def last_throttle_state(self) -> str:
+        """Proactive throttle state from the most recent failover (RP-5).
+
+        Returns one of:
+          - ``"normal"``  — below throttle threshold, no action
+          - ``"throttle"`` — session_usage 0.85-0.99, ollama deprioritised
+          - ``"block"``   — session_usage >= 1.0, ollama excluded
+
+        Read by the production proxy to log the throttle decision alongside
+        the routing decision in ``routing_live_decisions``.
+        """
+        try:
+            return self._last_throttle_state
+        except Exception:
+            return "normal"
+
+    @property
+    def last_session_usage(self) -> float:
+        """Ollama session usage fraction (0-1) from the most recent failover.
+
+        Returns the max(session_usage, weekly_usage) fraction observed from
+        the Ollama API during the last routing decision. 0.0 when the API
+        was unreachable or no failover has been attempted.
+        """
+        try:
+            return self._last_session_usage
+        except Exception:
+            return 0.0
+
+    @property
+    def last_quota_pressure(self) -> float:
+        """Continuous quota-pressure multiplier from the most recent failover.
+
+        Returns the ``quota_pressure_factor`` value applied to ollama_cloud's
+        base rate during the last routing decision (RP-PRICING). Equals 1.0
+        when ``OLLAMA_QUOTA_PRESSURE_ENABLED`` is off (the legacy binary
+        extra_usage / throttle paths run instead) or when the Ollama API was
+        unreachable. Read by the production proxy to log the pressure value
+        alongside the routing decision in ``routing_live_decisions``.
+        """
+        try:
+            return self._last_quota_pressure
+        except Exception:
+            return 1.0
 
     @property
     def last_pace_mults(self) -> dict[str, float]:

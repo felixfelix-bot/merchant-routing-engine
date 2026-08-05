@@ -115,44 +115,45 @@ EXTRA_USAGE_MULTIPLIER: float = float(
     os.environ.get("OLLAMA_EXTRA_USAGE_MULTIPLIER", _DEFAULT_EXTRA_USAGE_MULT)
 )
 
-# ── Continuous quota-pressure multiplier (RP-PRICING) ────────────────────────
+# ── Continuous quota-pressure multiplier (RP-PRICING / RP-EXP) ───────────────
 # The continuous, price-based replacement for the binary extra_usage_multiplier.
 # As the Ollama Cloud quota depletes, this factor rises smoothly from 1.0 so the
 # routing optimizer reroutes to a cheaper provider (z.ai) the moment Ollama's
 # effective price crosses over — NO thresholds, NO regime strings.
 #
-# Shape: an exponential ramp between ONSET and 100% usage.
-#   usage <= ONSET                    → 1.0  (plenty of quota, Ollama cheapest)
-#   ONSET < usage < 1.0               → 1 / (1-t)^k  where t = (u-onset)/(1-onset)
-#   usage >= 1.0                      → capped at the asymptote (≈4.17)
+# Shape (RP-EXP: rational asymptotic curve between ONSET and 100% usage):
+#   usage <= ONSET    → 1.0                          (plenty of quota)
+#   ONSET < u < 1.0   → 1 + K * t / (1 - t)          (t = (u-onset)/(1-onset))
+#   usage >= 1.0      → +inf                         (unreachable — the router
+#                                                      ALWAYS finds a cheaper
+#                                                      alternative first)
 #
-# The exponential curve rises gently near the onset and asymptotically toward
-# infinity as usage → 100%, so the optimizer ALWAYS finds a cheaper alternative
-# (z.ai) before the quota actually exhausts. At u >= 1.0 the factor is capped at
-# the asymptote (the actual extra-usage rate multiplier) so models with no
-# alternative (e.g. kimi-k3) remain reachable at their true cost.
+#   where K = (extra_rate / base_rate) - 1.0 = EXTRA_USAGE_MULTIPLIER - 1.0
+#   (≈3.17 with the default $0.10/$0.024 rates).
 #
-# k (steepness) controls how aggressively the curve bends toward infinity.
-# Default 2.0; configurable via OLLAMA_QUOTA_PRESSURE_STEEPNESS.
+# The curve passes through the full extra-usage rate (K+1 ≈ 4.17x → $0.10/M) at
+# the midpoint of the ramp (u = onset + 0.5*(1-onset) = 0.85), then diverges
+# toward INFINITY as usage → 100%. Because the price literally becomes +∞ at full
+# quota, the optimizer can never keep Ollama at 100% — it always reroutes to z.ai
+# (or an external) first, so the quota never hard-fails for non-exclusive models.
 #
-# Price table (onset=0.75, k=2.0, base=$0.024/M):
-#   u=0.80 → 1.56x → $0.037/M
-#   u=0.85 → 2.78x → $0.067/M
-#   u=0.90 → 6.25x → $0.150/M  (PPQ parity)
-#   u=0.95 → 25x   → $0.600/M  (6x PPQ, 600x z.ai)
-#   u=0.99 → 625x  → $15.00/M  (unreachable for optimizer)
-#   u≥1.00 → 4.17x → $0.100/M  (extra-usage rate, kimi-k3 stays here)
+# Ollama-EXCLUSIVE models (kimi-k3, gpt-oss, …) are unaffected: live_router
+# short-circuits them to ollama_cloud BEFORE the price comparison, so the +∞ at
+# 100% never blocks a model that genuinely has no alternative.
 #
 # Both the 5h session and 7d weekly usage fractions are considered; the WORST
 # (max) governs (priority: never run out).
+#
+# Price table (onset=0.70, base=$0.024/M, K≈3.17):
+#   u=0.70 → 1.0x   → $0.024/M   (onset — no penalty)
+#   u=0.80 → 2.58x  → $0.062/M
+#   u=0.85 → 4.17x  → $0.100/M   (midpoint = extra-usage rate)
+#   u=0.90 → 7.33x  → $0.176/M   (> openrouter $0.135)
+#   u=0.95 → 16.8x  → $0.404/M   (> deepinfra)
+#   u=0.99 → ~93x   → $2.23/M    (unreachable for optimizer)
+#   u≥1.00 → +∞     → unreachable (always rerouted to a cheaper alternative)
 QUOTA_PRESSURE_ONSET: float = float(
-    os.environ.get("OLLAMA_QUOTA_PRESSURE_ONSET", "0.75")
-)
-# Steepness k of the exponential ramp: 1 / (1-t)^k. Higher k → sharper bend
-# toward infinity near 100% usage. Default 2.0 (parabola-shaped divergence).
-# Configurable via env var for tuning without code changes.
-QUOTA_PRESSURE_STEEPNESS: float = float(
-    os.environ.get("OLLAMA_QUOTA_PRESSURE_STEEPNESS", "2.0")
+    os.environ.get("OLLAMA_QUOTA_PRESSURE_ONSET", "0.70")
 )
 
 
@@ -397,7 +398,7 @@ def quota_pressure_factor(
     onset: float = QUOTA_PRESSURE_ONSET,
     asymptote: float = EXTRA_USAGE_MULTIPLIER,
 ) -> float:
-    """Continuous quota-pressure multiplier (RP-PRICING).
+    """Continuous quota-pressure multiplier (RP-PRICING / RP-EXP).
 
     The smooth, price-based replacement for the binary
     :func:`extra_usage_multiplier`. As the Ollama Cloud quota depletes, this
@@ -405,29 +406,32 @@ def quota_pressure_factor(
     cheaper provider (z.ai) the moment Ollama's effective price crosses over —
     **no thresholds, no regime strings, no special-casing.**
 
-    Shape (exponential ramp between *onset* and 100% usage)::
+    Shape (RP-EXP rational asymptotic curve between *onset* and 100% usage)::
 
         u <= onset        → 1.0                          (plenty of quota)
-        onset < u < 1.0   → 1 / (1-t)^k                  (t = (u-onset)/(1-onset))
-        u >= 1.0          → capped at asymptote          (extra-usage rate)
+        onset < u < 1.0   → 1 + K * t / (1 - t)          (t = (u-onset)/(1-onset))
+        u >= 1.0          → +inf                         (unreachable)
 
-    where ``k = QUOTA_PRESSURE_STEEPNESS`` (default 2.0) and ``A = asymptote``
-    (default :data:`EXTRA_USAGE_MULTIPLIER`, ≈4.17).
+    where ``K = asymptote - 1.0`` (= ``(extra_rate / base_rate) - 1.0``,
+    ≈3.17 with the default rates) and ``asymptote`` defaults to
+    :data:`EXTRA_USAGE_MULTIPLIER` (≈4.17).
 
-    The exponential curve ``1 / (1-t)^k`` rises gently near the onset (a gentle
-    nudge that keeps Ollama cheapest while there is still headroom) and rises
-    asymptotically toward **infinity** as usage → 100%. This means the routing
-    optimizer ALWAYS sees Ollama's price diverge to infinity near 100% and so
-    diverts to a cheaper provider (z.ai) before the quota actually exhausts —
-    the quota never hard-fails, the optimizer simply reroutes first.
+    The curve ``1 + K·t/(1-t)`` rises gently just past the onset, passes through
+    the full extra-usage rate (``K + 1 ≈ 4.17x`` → $0.10/M) at the *midpoint* of
+    the ramp (``u = onset + 0.5·(1-onset) = 0.85``), then diverges toward
+    **infinity** as usage → 100%. Because the price literally becomes +∞ at full
+    quota, the optimizer can never keep Ollama at 100% — it ALWAYS reroutes to a
+    cheaper alternative (z.ai or an external) first, so the quota never
+    hard-fails for non-exclusive models. This is FELIX's "router ALWAYS finds a
+    cheaper alternative first" guarantee.
 
-    At ``u >= 1.0`` (already in extra-usage territory) the factor is **capped at
-    the asymptote** (the actual extra-usage rate multiplier, ≈4.17, mapping the
-    $0.024/M base rate to the extra-usage $0.10/M rate). This is deliberate: some
-    models (e.g. ``kimi-k3``) are exclusive to Ollama Cloud and have no z.ai
-    fallback. Capping at the asymptote keeps them reachable at their true cost
-    instead of pricing them out at +∞. The optimizer will only keep them when no
-    alternative exists — exactly the desired last-resort behaviour.
+    Ollama-**exclusive** models (``kimi-k3``, ``gpt-oss``, …) are unaffected:
+    :mod:`live_router` short-circuits them to ``ollama_cloud`` *before* the price
+    comparison, so the +∞ at 100% never blocks a model that genuinely has no
+    alternative. (The previous version capped the factor at *asymptote* for u ≥
+    1.0 to protect these models; RP-EXP removes that cap because the short-circuit
+    already covers them, and the cap also diluted the price signal for
+    non-exclusive models.)
 
     Both the 5-hour **session** and 7-day **weekly** usage fractions are
     considered; the worst (max) governs (priority: never run out). This mirrors
@@ -443,44 +447,51 @@ def quota_pressure_factor(
             ``ollama.com/api/usage`` → ``data.limits.session.usage``).
         weekly: Weekly usage fraction (0.0–1.0+). When provided, the max of
             *usage* and *weekly* drives the pressure. ``None`` is treated as 0.0.
-        onset: Usage fraction at which pressure begins (default 0.75 = 75%).
+        onset: Usage fraction at which pressure begins (default 0.70 = 70%).
             Below this the factor is 1.0. Configurable via the
             ``OLLAMA_QUOTA_PRESSURE_ONSET`` env var.
-        asymptote: Factor value at u >= 1.0 (default
-            :data:`EXTRA_USAGE_MULTIPLIER`, ≈4.17). At and above 100% usage the
-            factor is capped at this value (the extra-usage rate multiplier) so
-            exclusive models stay reachable.
+        asymptote: The extra-rate/base-rate ratio (default
+            :data:`EXTRA_USAGE_MULTIPLIER`, ≈4.17). Defines the curve's steepness
+            via ``K = asymptote - 1.0``; the factor passes through *asymptote*
+            exactly at the midpoint of the ramp (``u = onset + 0.5·(1-onset)``).
 
     Returns:
-        The pressure multiplier, always >= 1.0. For a degenerate configuration
-        where ``onset >= 1.0`` (no ramp room), returns *asymptote*.
+        The pressure multiplier, always >= 1.0. At and above 100% usage the
+        result is ``+inf`` (provider unreachable to the optimizer). For a
+        degenerate configuration where ``asymptote <= 1.0`` (no extra-usage
+        premium to model) the ramp collapses to a flat 1.0.
     """
     # Worst-case window governs (session OR weekly, whichever is more depleted).
     u = usage
     if weekly is not None:
         u = max(usage, weekly)
 
-    span = 1.0 - onset
-    # Degenerate: onset at/above 100% leaves no room for a ramp — treat every
-    # usage level as "at full pressure".
-    if span <= 0:
-        return asymptote
-
     # Below the onset there is plenty of quota → no penalty.
     if u <= onset:
         return 1.0
 
-    # Exponential ramp: price rises asymptotically toward infinity as usage
-    # approaches 100%, so the optimizer ALWAYS finds a cheaper alternative
-    # before the quota actually exhausts. Formula: 1 / (1-t)^k.
+    # At/above 100% the curve has reached its asymptote → +inf. The provider is
+    # "unreachable" to the optimizer, which always reroutes to a cheaper
+    # alternative (RP-EXP: "router ALWAYS finds cheaper alternative first").
+    # Ollama-exclusive models are unaffected — live_router short-circuits them
+    # to ollama_cloud before this price is ever compared.
     if u >= 1.0:
-        # Already in extra-usage territory. Return the asymptote (actual
-        # extra-usage rate multiplier) so models with no alternative
-        # (e.g. kimi-k3) remain reachable at their true cost.
-        return asymptote
+        return math.inf
+
+    # RP-EXP rational curve: 1 + K * t / (1 - t), where
+    #   t = (u - onset) / (1 - onset)   (normalised position over [onset, 1.0])
+    #   K = asymptote - 1.0 = (extra_rate / base_rate) - 1.0
+    # At the midpoint (t=0.5) the multiplier equals `asymptote` (the full
+    # extra-usage rate); it then diverges to +inf as t → 1.0 (u → 100%).
+    # span > 0 is guaranteed here: we passed `u <= onset` (so u > onset) and
+    # `u < 1.0` (so onset < 1.0, hence span = 1 - onset > 0).
+    span = 1.0 - onset
+    k = asymptote - 1.0
+    if k <= 0.0:
+        # Degenerate: no extra-usage premium to model → no pressure to apply.
+        return 1.0
     t = (u - onset) / span
-    t = min(t, 0.999)  # safety clamp — never divide by zero
-    return 1.0 / (1.0 - t) ** QUOTA_PRESSURE_STEEPNESS
+    return 1.0 + k * t / (1.0 - t)
 
 
 def health_factor(is_healthy: bool, recent_429: int = 0) -> float:
