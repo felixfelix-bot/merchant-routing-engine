@@ -414,3 +414,128 @@ class TestNewMeasuredRows:
             assert row[1] == SOURCE_MEASURED
         finally:
             cleanup()
+
+
+# ── DeepInfra / OpenRouter cost-logging verification (P2-VERIFY) ─────────────
+
+
+class TestDeepInfraOpenRouterCostLogging:
+    """Regression test for the P2-VERIFY finding (verified 2026-08-05).
+
+    Production snapshot of ~/.hermes/bot/zai_usage.db::
+
+        deepinfra:  81 rows, ALL cost_usd populated (source='backfilled'), $6.42 total
+        openrouter: 426 rows, ALL cost_usd NULL, cost_source NULL
+
+    Root cause (documented in add_cost_column.py docstring): the backfill joins
+    api_calls against daily_spend on (local date, key_name == daily_spend.tier).
+    DeepInfra WAS aggregated into daily_spend by the proxy's ``_spend_tier()``,
+    so its rows get an honest per-token backfill. OpenRouter was NEVER aggregated
+    (the proxy never wrote a daily_spend row with tier='openrouter'), so there is
+    no spend basis to backfill from — rows stay NULL by design.
+
+    Additionally, OpenRouter has been out of rotation since before the RP-2 live
+    cost-extraction (src/cost_extraction.py) shipped, so no 'measured' cost was
+    ever written either. These tests lock in BOTH halves of that asymmetry so a
+    future change to the backfill join doesn't silently start fabricating costs
+    for un-aggregated providers, and so the forward (live) path is verified.
+    """
+
+    def test_deepinfra_backfilled_when_daily_spend_exists(self):
+        """DeepInfra is aggregated into daily_spend -> rows get a real cost.
+
+        Mirrors production: 81/81 deepinfra rows carry a backfilled cost_usd.
+        """
+        ts = _utc_ts("2026-07-20 12:00:00")
+        local_date = datetime.datetime.fromtimestamp(ts).date().isoformat()
+        api_rows = [
+            (ts, "deepinfra", "deepinfra", "deepseek/deepseek-v4-flash", 8_064),
+        ]
+        # daily_spend row for 'deepinfra' exists -> backfillable.
+        spend_rows = [(local_date, "deepinfra", 6.42, 81, 50_000_000)]
+        path, cleanup = _mkdb(api_rows, spend_rows)
+        try:
+            add_cost_column.add_columns(path)
+            res = add_cost_column.backfill_from_daily_spend(path)
+            assert res["backfilled"] == 1
+            conn = sqlite3.connect(path)
+            row = conn.execute(
+                "SELECT cost_usd, cost_source FROM api_calls WHERE key_name='deepinfra'"
+            ).fetchone()
+            conn.close()
+            assert row[0] is not None and row[0] > 0
+            assert row[1] == SOURCE_BACKFILLED
+        finally:
+            cleanup()
+
+    def test_openrouter_stays_null_when_not_aggregated(self):
+        """OpenRouter was never aggregated into daily_spend -> cost stays NULL.
+
+        Mirrors production: 426/426 openrouter rows are NULL. This is the explicit
+        exclusion noted in add_cost_column.py: 'ppq/openrouter keys that were
+        never aggregated are left with cost_usd = NULL — there is no honest basis
+        to estimate them.'
+        """
+        ts = _utc_ts("2026-07-20 12:00:00")
+        local_date = datetime.datetime.fromtimestamp(ts).date().isoformat()
+        # openrouter call exists, but NO daily_spend row for 'openrouter'.
+        api_rows = [
+            (ts, "openrouter", "openrouter", "deepseek/deepseek-v4-flash", 26_527),
+        ]
+        spend_rows = [(local_date, "deepinfra", 6.42, 81, 50_000_000)]
+        path, cleanup = _mkdb(api_rows, spend_rows)
+        try:
+            add_cost_column.add_columns(path)
+            res = add_cost_column.backfill_from_daily_spend(path)
+            assert res["backfilled"] == 0  # nothing matched openrouter
+            conn = sqlite3.connect(path)
+            row = conn.execute(
+                "SELECT cost_usd, cost_source FROM api_calls WHERE key_name='openrouter'"
+            ).fetchone()
+            conn.close()
+            assert row[0] is None
+            assert row[1] is None
+        finally:
+            cleanup()
+
+    def test_openrouter_measured_cost_not_clobbered_by_backfill(self):
+        """Forward path: when OpenRouter returns usage.cost (RP-2 live extraction),
+        the cost is stored as 'measured' and is NEVER overwritten by the backfill.
+
+        This verifies the mechanism that WILL populate cost_usd once OpenRouter
+        re-enters rotation: src/cost_extraction.extract_cost('openrouter', ...)
+        parses usage.cost and the proxy writes it as 'measured'. The backfill's
+        cost_source-IS-NULL guard leaves such rows untouched.
+        """
+        ts = _utc_ts("2026-07-20 12:00:00")
+        local_date = datetime.datetime.fromtimestamp(ts).date().isoformat()
+        api_rows = [
+            (ts, "openrouter", "openrouter", "deepseek/deepseek-v4-flash", 26_527),
+        ]
+        # Even with a daily_spend row present, the backfill must skip the
+        # already-'measured' row.
+        spend_rows = [(local_date, "openrouter", 0.05, 1, 26_527)]
+        path, cleanup = _mkdb(api_rows, spend_rows)
+        try:
+            add_cost_column.add_columns(path)
+            # simulate RP-2 live extraction writing a real measured cost
+            conn = sqlite3.connect(path)
+            conn.execute(
+                "UPDATE api_calls SET cost_usd=?, cost_source=? "
+                "WHERE key_name='openrouter'",
+                (0.00358, SOURCE_MEASURED),
+            )
+            conn.commit()
+            conn.close()
+            # backfill must NOT clobber the measured value
+            res = add_cost_column.backfill_from_daily_spend(path)
+            assert res["backfilled"] == 0
+            conn = sqlite3.connect(path)
+            row = conn.execute(
+                "SELECT cost_usd, cost_source FROM api_calls WHERE key_name='openrouter'"
+            ).fetchone()
+            conn.close()
+            assert row[0] == pytest.approx(0.00358, rel=1e-9)
+            assert row[1] == SOURCE_MEASURED
+        finally:
+            cleanup()
