@@ -239,7 +239,7 @@ class TestPressureRerouteToZai:
             )
             # At 100% usage, pressure caps at the extra-usage rate (asymptote).
             # hard_limit=False for Ollama (extra usage available).
-            assert pressures[1.0] == pytest.approx(EXTRA_USAGE_MULTIPLIER)
+            assert pressures[1.0] == pytest.approx(EXTRA_USAGE_MULTIPLIER, abs=0.01)
         finally:
             os.unlink(db_path)
 

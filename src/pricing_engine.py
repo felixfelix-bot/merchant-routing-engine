@@ -156,6 +156,48 @@ QUOTA_PRESSURE_ONSET: float = float(
     os.environ.get("OLLAMA_QUOTA_PRESSURE_ONSET", "0.70")
 )
 
+# ── Per-provider pressure parameters (universal endpoint pressure) ──────────
+# Each quota-based endpoint gets its own onset, asymptote, and kill switch.
+# The RP-EXP curve is the same; only the parameters and the window sources
+# differ. See docs/endpoint-universal-pressure.md for the full design.
+#
+# FELIX DECISION (Aug 5): ALL quota endpoints get a UNIFORM asymptote of 5.0.
+# Strategy: flee from exhaustion early on every endpoint to keep all keys
+# healthy under high load. Different onset points stagger pressure activation
+# (z.ai first at 60%, then ollama at 70%, then PPQ at 80%). High asymptote on
+# all = once any key enters the ramp, router bails FAST. DeepInfra/OpenRouter
+# (infinite quota) catch overflow at flat rates. Base_rate still determines
+# preference at normal load; asymptote just controls urgency of fleeing.
+#
+# Ollama Cloud: paid extra-usage available, so extra_usage_multiplier stays
+# separate for the legacy path. The pressure curve uses its own asymptote.
+# Asymptote 4.17 = measured extra_rate / base_rate (objective cost ratio).
+OLLAMA_QUOTA_PRESSURE_ASYMPTOTE: float = float(
+    os.environ.get("OLLAMA_QUOTA_PRESSURE_ASYMPTOTE", "4.17")
+)
+
+# z.ai: 3 windows (5h × weekly × monthly) multiplied via superposition.
+#   Onset 0.60 (earlier than Ollama — z.ai's 5h window is ~2M tokens, tiny).
+#   Asymptote 2.0 (PREFERRED endpoint — low asymptote keeps it cheap longer).
+#   hard_limit=True (z.ai has no extra-usage path — at 100% you get 429s).
+ZAI_QUOTA_PRESSURE_ONSET: float = float(
+    os.environ.get("ZAI_QUOTA_PRESSURE_ONSET", "0.60")
+)
+ZAI_QUOTA_PRESSURE_ASYMPTOTE: float = float(
+    os.environ.get("ZAI_QUOTA_PRESSURE_ASYMPTOTE", "2.0")
+)
+
+# PPQ: credit-based (single fraction, no time windows).
+#   Onset 0.80 (credits deplete slowly; don't spike on fresh top-up).
+#   Asymptote 5.0 (LAST RESORT — high asymptote makes price spike fast).
+#   hard_limit=True (no credits = no service).
+PPQ_QUOTA_PRESSURE_ONSET: float = float(
+    os.environ.get("PPQ_QUOTA_PRESSURE_ONSET", "0.80")
+)
+PPQ_QUOTA_PRESSURE_ASYMPTOTE: float = float(
+    os.environ.get("PPQ_QUOTA_PRESSURE_ASYMPTOTE", "5.0")
+)
+
 
 def peak_multiplier(provider: str, hour_utc: int | None = None) -> float:
     """Deterministic peak-hour step function (ADR-003).
@@ -586,6 +628,9 @@ def compute_effective_price(
     extra_usage_regime: str = "included",
     extra_usage_mult: float | None = None,
     quota_pressure: float | None = None,
+    zai_session_usage: float | None = None,
+    zai_weekly_usage: float | None = None,
+    zai_monthly_usage: float | None = None,
 ) -> float:
     """Effective price = base_rate * peak * scarcity * health * pace * extra.
 
@@ -650,6 +695,18 @@ def compute_effective_price(
             the smooth, price-based Ollama rerouting (RP-PRICING). When None
             (default), the regime-based :func:`extra_usage_multiplier` is used
             (backward compatible).
+        zai_session_usage: 5-hour session usage fraction (0.0–1.0) for a z.ai
+            key. When *provider* is a z.ai endpoint (``"zai"`` prefix, or
+            ``"ours"``/``"friend"``) AND this is not None, the SCARCITY slot
+            switches from the linear :func:`scarcity_factor` to the exponential
+            :func:`quota_pressure_factor` with 3 superimposed windows and a
+            HARD limit (``hard_limit=True``, ``asymptote``=2.0). At 100% in any
+            provided window the result is +inf (must divert). ``None`` (default)
+            → cold-start fallback to linear scarcity.
+        zai_weekly_usage: 7-day weekly usage fraction (0.0–1.0) for a z.ai key,
+            or ``None`` when the window is not tracked.
+        zai_monthly_usage: 30-day monthly usage fraction (0.0–1.0) for a z.ai
+            key, or ``None`` when not tracked.
 
     Returns:
         Effective price in $/M. Always > 0: finite results are >= 0.001, and
@@ -663,7 +720,34 @@ def compute_effective_price(
             failure_count = max(failure_count, recent_429)
 
     peak = peak_multiplier(provider, hour_utc)
-    scarcity = scarcity_factor(quota_pct)
+
+    # Scarcity / quota pressure.
+    #
+    # z.ai endpoints (provider starts with "zai", or the canonical key names
+    # "ours"/"friend") get the EXPONENTIAL RP-EXP quota-pressure curve with
+    # 3 superimposed windows (5h session × 7d weekly × 30d monthly) and a HARD
+    # limit — at 100% in ANY window the factor diverges to +inf (z.ai has no
+    # extra-usage path; the optimizer must divert to friend/ollama/externals).
+    # asymptote=2.0 keeps z.ai cheap long into the ramp — it is the preferred
+    # endpoint (docs/asymptote-preference-analysis.md §0/§1.2).
+    #
+    # All other providers (and z.ai at cold start, when no window data is
+    # available) fall back to the legacy LINEAR scarcity_factor(quota_pct).
+    # The peak multiplier stays a separate concern — it is applied on top,
+    # never folded into the pressure curve.
+    prov_lower = str(provider).lower()
+    is_zai = prov_lower.startswith("zai") or prov_lower in ("ours", "friend")
+    if is_zai and zai_session_usage is not None:
+        scarcity = quota_pressure_factor(
+            zai_session_usage,
+            zai_weekly_usage,
+            zai_monthly_usage,
+            onset=ZAI_QUOTA_PRESSURE_ONSET,
+            asymptote=ZAI_QUOTA_PRESSURE_ASYMPTOTE,
+            hard_limit=True,
+        )
+    else:
+        scarcity = scarcity_factor(quota_pct)
     health = health_pricing_factor(failure_count, breaker_tripped)
 
     # Extra-usage multiplier: prefer the continuous quota-pressure value when

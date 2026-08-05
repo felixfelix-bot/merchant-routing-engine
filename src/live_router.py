@@ -52,6 +52,11 @@ from src.pricing_engine import (
     EXTRA_USAGE_MULTIPLIER,
     quota_pressure_factor,
     quota_pressure_factor_superimposed,
+    ZAI_QUOTA_PRESSURE_ONSET,
+    ZAI_QUOTA_PRESSURE_ASYMPTOTE,
+    PPQ_QUOTA_PRESSURE_ONSET,
+    PPQ_QUOTA_PRESSURE_ASYMPTOTE,
+    OLLAMA_QUOTA_PRESSURE_ASYMPTOTE,
 )
 from src.quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
 from src.cpvo_calculator import CPVOCalculator
@@ -88,6 +93,22 @@ _EXTRA_USAGE_ENABLED: bool = (
 # (RP-PRICING option C).
 _QUOTA_PRESSURE_ENABLED: bool = (
     os.environ.get("OLLAMA_QUOTA_PRESSURE_ENABLED", "false").lower() in ("1", "true", "yes")
+)
+
+# ── Universal endpoint pressure: z.ai + PPQ ────────────────────────────────
+# Each quota endpoint gets its own exponential curve with per-provider onset,
+# asymptote, and kill switch. When ON, the provider's base rate is multiplied
+# by quota_pressure_factor() computed from its live quota windows. See
+# docs/endpoint-universal-pressure.md.
+#
+# z.ai: 3 windows (5h x weekly x monthly) multiplied via superposition.
+# PPQ:  single credit-depletion fraction.
+# Ollama: already wired above (OLLAMA_QUOTA_PRESSURE_ENABLED).
+_ZAI_QUOTA_PRESSURE_ENABLED: bool = (
+    os.environ.get("ZAI_QUOTA_PRESSURE_ENABLED", "false").lower() in ("1", "true", "yes")
+)
+_PPQ_QUOTA_PRESSURE_ENABLED: bool = (
+    os.environ.get("PPQ_QUOTA_PRESSURE_ENABLED", "false").lower() in ("1", "true", "yes")
 )
 
 # ── RP-5: Proactive GLM-5.2 throttling ──────────────────────────────────────
@@ -164,6 +185,136 @@ _QUOTA_TOTALS: dict[str, float] = {
 
 # z.ai peak hours (UTC) — Ollama/PPQ/OpenRouter/DeepInfra have no peak
 _ZAI_PEAK: tuple[int, int] = (6, 10)
+
+
+# ── Universal pressure helpers ──────────────────────────────────────────────
+
+# Window-name aliases: the z.ai quota API returns names like "5-hour", "weekly",
+# "monthly". Map them to the (session, weekly, monthly) tuple positions.
+_ZAI_WINDOW_ALIASES: dict[str, str] = {
+    "5-hour": "session", "5h": "session", "session": "session",
+    "weekly": "weekly", "7-day": "weekly", "7d": "weekly",
+    "monthly": "monthly", "30-day": "monthly", "month": "monthly",
+}
+
+
+def _zai_window_usages(
+    quota_entry: dict,
+) -> tuple[float | None, float | None, float | None]:
+    """Extract (session_5h, weekly, monthly) usage fractions from a z.ai quota entry.
+
+    Returns 0.0-1.0 fractions for each window, or None if the window is not
+    tracked. Two data shapes are supported (backward-compatible):
+
+    1. **Per-window** (preferred): the entry has a ``"windows"`` list of dicts,
+       each with ``"name"`` and ``"used_pct"`` — the same structure the z.ai
+       quota API returns via quota_window_extractor. Each window dict's
+       used_pct (0-100) is divided by 100 to get a fraction.
+
+    2. **Flat** (fallback): the entry only has ``"used_pct"`` (0-100). This is
+       treated as the session/5h window only — the most restrictive window.
+       Weekly and monthly return None.
+
+    Args:
+        quota_entry: The provider's entry in the ``quota_state`` dict.
+
+    Returns:
+        ``(session_frac, weekly_frac, monthly_frac)`` — each 0.0-1.0 or None.
+    """
+    result: dict[str, float | None] = {"session": None, "weekly": None, "monthly": None}
+
+    windows = quota_entry.get("windows")
+    if isinstance(windows, list):
+        for w in windows:
+            if not isinstance(w, dict):
+                continue
+            name = str(w.get("name", "")).lower().strip()
+            slot = _ZAI_WINDOW_ALIASES.get(name)
+            if slot is None or result[slot] is not None:
+                continue
+            pct = w.get("used_pct")
+            if pct is None:
+                continue
+            try:
+                val = float(pct)
+            except (TypeError, ValueError):
+                continue
+            # Skip error sentinels (used_pct=999).
+            if val >= 900:
+                continue
+            result[slot] = max(0.0, val / 100.0)
+
+    # Fallback: flat used_pct → session window only.
+    if result["session"] is None:
+        flat_pct = quota_entry.get("used_pct")
+        if flat_pct is not None:
+            try:
+                val = float(flat_pct)
+                if val < 900:  # skip error sentinel
+                    result["session"] = max(0.0, val / 100.0)
+            except (TypeError, ValueError):
+                pass
+
+    return (result["session"], result["weekly"], result["monthly"])
+
+
+def _compute_zai_pressure(quota_entry: dict) -> float:
+    """Compute the z.ai exponential quota-pressure factor from quota_state.
+
+    Uses z.ai-specific parameters (onset=0.60, asymptote=5.0, hard_limit=True)
+    and superimposes all available windows (5h x weekly x monthly). Returns
+    1.0 if no usage data is available (no penalty — cold start).
+
+    At 100% in ANY window, returns +inf (z.ai has no extra-usage path — the
+    optimizer must divert to friend key, ollama, or externals).
+
+    Never raises — on any error returns 1.0.
+    """
+    try:
+        session, weekly, monthly = _zai_window_usages(quota_entry)
+        # Need at least one window to compute pressure.
+        if session is None and weekly is None and monthly is None:
+            return 1.0
+        return quota_pressure_factor(
+            session or 0.0,
+            weekly=weekly,
+            monthly=monthly,
+            onset=ZAI_QUOTA_PRESSURE_ONSET,
+            asymptote=ZAI_QUOTA_PRESSURE_ASYMPTOTE,
+            hard_limit=True,
+        )
+    except Exception:
+        return 1.0
+
+
+def _compute_ppq_pressure(quota_entry: dict) -> float:
+    """Compute the PPQ credit-depletion pressure factor.
+
+    Uses PPQ-specific parameters (onset=0.80, asymptote=5.0, hard_limit=True).
+    PPQ is credit-based (no time windows): the usage fraction is derived from
+    ``used_pct`` in the quota_state entry. Returns 1.0 if no usage data
+    (cold start — fresh credits). At 100% credit depletion returns +inf
+    (no credits = no service).
+
+    Never raises — on any error returns 1.0.
+    """
+    try:
+        used_pct = quota_entry.get("used_pct")
+        if used_pct is None:
+            return 1.0
+        val = float(used_pct)
+        if val >= 900:  # error sentinel
+            return 1.0
+        u = max(0.0, val / 100.0)
+        return quota_pressure_factor(
+            u,
+            onset=PPQ_QUOTA_PRESSURE_ONSET,
+            asymptote=PPQ_QUOTA_PRESSURE_ASYMPTOTE,
+            hard_limit=True,
+        )
+    except Exception:
+        return 1.0
+
 
 # All providers that are NOT z.ai — these are the failover candidates
 _EXTERNAL_PROVIDERS = ("ollama_cloud", "ppq", "openrouter", "deepinfra")
@@ -275,6 +426,17 @@ class LiveRouter:
         # base rate when _QUOTA_PRESSURE_ENABLED is on. Read via the
         # ``last_quota_pressure`` property for logging to routing_live_decisions.
         self._last_quota_pressure: float = 1.0
+
+        # ── Universal pressure: per-key z.ai pressure from the last decision ──
+        # Maps key name ("ours", "friend") to its z.ai pressure factor. Populated
+        # in _do_select_failover when _ZAI_QUOTA_PRESSURE_ENABLED is on. Read via
+        # the ``last_zai_pressures`` property for logging/diagnostics.
+        self._last_zai_pressures: dict[str, float] = {}
+
+        # ── Universal pressure: PPQ credit pressure from the last decision ──
+        # Populated in _do_select_failover when _PPQ_QUOTA_PRESSURE_ENABLED is
+        # on. Read via the ``last_ppq_pressure`` property for logging/diagnostics.
+        self._last_ppq_pressure: float = 1.0
 
         # ── CPVO quality-aware effective rates (Phase 2.5.4) ───────────────
         # Queries the provider_telemetry table to inflate the base rate of
@@ -442,6 +604,10 @@ class LiveRouter:
     ) -> tuple[tuple[str | None, str | None], tuple[str | None, str | None]]:
         """Internal failover selection — may raise (wrapped by caller)."""
 
+        # Reset per-key z.ai pressure tracking for this decision.
+        self._last_zai_pressures = {}
+        self._last_ppq_pressure = 1.0
+
         # ── EU-R3: Query Ollama Cloud quota regime ───────────────────────
         # On each routing decision, query the quota tracker to determine
         # whether ollama_cloud is in "included", "extra", or "exhausted"
@@ -531,11 +697,14 @@ class LiveRouter:
         # (z.ai/PPQ) it becomes +inf so the optimizer reroutes to a cheaper
         # alternative. Ollama-exclusive models are still protected by the
         # short-circuit below (fires before the price comparison).
+        #
+        # FELIX DECISION (Aug 5): uniform asymptote 5.0 for ALL quota endpoints.
         quota_pressure = 1.0
         if _QUOTA_PRESSURE_ENABLED and (session_usage > 0 or weekly_usage > 0):
             try:
                 quota_pressure = quota_pressure_factor(
                     session_usage, weekly_usage,
+                    asymptote=OLLAMA_QUOTA_PRESSURE_ASYMPTOTE,
                 )
             except Exception:
                 # Any error in the pressure calc must never break routing.
@@ -681,6 +850,33 @@ class LiveRouter:
                 else:
                     base_rate = base_rate * extra_mult
 
+            # ── Universal pressure: z.ai keys (ours, friend) ───────────────
+            # Same RP-EXP curve as Ollama but with z.ai-specific parameters
+            # (onset=0.60, asymptote=5.0, hard_limit=True). 3 windows (5h x
+            # weekly x monthly) are multiplied via superposition. At 100% in
+            # ANY window the factor is +inf → breaker tripped (z.ai has no
+            # extra-usage path; the optimizer diverts to friend key, ollama,
+            # or externals before the 429).
+            if name in ("ours", "friend") and _ZAI_QUOTA_PRESSURE_ENABLED:
+                zai_pressure = _compute_zai_pressure(qs)
+                self._last_zai_pressures[name] = zai_pressure
+                if math.isinf(zai_pressure):
+                    healthy = False
+                elif zai_pressure != 1.0:
+                    base_rate = base_rate * zai_pressure
+
+            # ── Universal pressure: PPQ (credit-based) ─────────────────────
+            # Same RP-EXP curve but from credit depletion (no time windows).
+            # onset=0.80, asymptote=5.0, hard_limit=True. At 100% credit
+            # depletion → +inf → breaker tripped (no credits = no service).
+            if name == "ppq" and _PPQ_QUOTA_PRESSURE_ENABLED:
+                ppq_pressure = _compute_ppq_pressure(qs)
+                self._last_ppq_pressure = ppq_pressure
+                if math.isinf(ppq_pressure):
+                    healthy = False
+                elif ppq_pressure != 1.0:
+                    base_rate = base_rate * ppq_pressure
+
             # ── RP-5: Proactive throttle / block (legacy — pressure OFF only) ─
             # When continuous pressure is ON this block is skipped entirely:
             # the pressure factor already raises the price smoothly.
@@ -690,14 +886,18 @@ class LiveRouter:
                 elif throttle_state == "block":
                     healthy = False
 
-            # RP-PRICING option C: when continuous pressure is ON for
-            # ollama_cloud, the pressure factor already encodes the quota
-            # depletion. Pass quota_total=None so the optimizer's
-            # scarcity_factor stays at 1.0 (no double-penalty). Scarcity still
-            # applies to other providers normally.
-            oc_pressure_on = (name == "ollama_cloud" and _QUOTA_PRESSURE_ENABLED)
+            # RP-PRICING: when continuous pressure is ON for any provider,
+            # the pressure factor already encodes the quota depletion. Pass
+            # quota_total=None so the optimizer's scarcity_factor stays at
+            # 1.0 (no double-penalty). Scarcity still applies to providers
+            # without pressure normally.
+            prov_has_pressure = (
+                (name == "ollama_cloud" and _QUOTA_PRESSURE_ENABLED)
+                or (name in ("ours", "friend") and _ZAI_QUOTA_PRESSURE_ENABLED)
+                or (name == "ppq" and _PPQ_QUOTA_PRESSURE_ENABLED)
+            )
             prov_quota_total = (
-                None if oc_pressure_on
+                None if prov_has_pressure
                 else (total if total != float("inf") else None)
             )
 
@@ -876,6 +1076,34 @@ class LiveRouter:
         """
         try:
             return self._last_quota_pressure
+        except Exception:
+            return 1.0
+
+    @property
+    def last_zai_pressures(self) -> dict[str, float]:
+        """Per-key z.ai pressure multipliers from the most recent failover.
+
+        Returns a dict mapping key names ("ours", "friend") to their
+        ``quota_pressure_factor`` values. Empty when
+        ``ZAI_QUOTA_PRESSURE_ENABLED`` is off or no failover attempted.
+        Read by the production proxy for logging/diagnostics.
+        """
+        try:
+            return dict(self._last_zai_pressures)
+        except Exception:
+            return {}
+
+    @property
+    def last_ppq_pressure(self) -> float:
+        """PPQ credit-depletion pressure from the most recent failover.
+
+        Returns the ``quota_pressure_factor`` value applied to PPQ's base
+        rate during the last routing decision. Equals 1.0 when
+        ``PPQ_QUOTA_PRESSURE_ENABLED`` is off or when no credits data was
+        available. Read by the production proxy for logging/diagnostics.
+        """
+        try:
+            return self._last_ppq_pressure
         except Exception:
             return 1.0
 

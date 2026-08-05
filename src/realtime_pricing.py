@@ -391,27 +391,35 @@ class RealtimePricing:
     # ── Per-source collectors (private) ──────────────────────────────────
 
     def _measure_zai_amortized(self) -> dict[tuple[str, str | None], RateObservation]:
-        """z.ai flat-rate: monthly_fee_usd / (SUM(total_tokens this month)/1e6).
+        """z.ai flat-rate: annualized cost from trailing data (up to 365d).
 
-        Query:  SELECT key_name, SUM(total_tokens) FROM api_calls
-                WHERE key_name IN ('ours','friend') AND ts >= month_start
+        Uses ALL available data (trailing 365 days, or less if the DB is
+        younger). This replaces the old month-to-date approach, which reset
+        monthly and was noisy at month boundaries. The trailing window gives
+        a smoother base rate that converges as more data accumulates.
+
+        Query:  SELECT key_name, SUM(total_tokens), MIN(ts) FROM api_calls
+                WHERE key_name IN ('ours','friend') AND ts >= trailing_cutoff
                 GROUP BY key_name
+        Annualized: annual_fee / (trailing_tokens * (365/trailing_days) / 1e6)
+
         Source: 'zai_amortized' (is_measured=False). friend gets fee=0 → floored
         at MIN_EFFECTIVE_PRICE.
         """
         now = time.time()
-        month_start = _month_start_ts(now)
+        trailing_cutoff = now - 365 * 86400  # 365-day trailing window
         result: dict[tuple[str, str | None], RateObservation] = {}
 
         try:
             conn = sqlite3.connect(self._zai_db, timeout=2)
             try:
                 rows = conn.execute(
-                    "SELECT key_name, COALESCE(SUM(total_tokens), 0) "
+                    "SELECT key_name, COALESCE(SUM(total_tokens), 0), "
+                    "MIN(ts) "
                     "FROM api_calls "
                     "WHERE key_name IN ('ours', 'friend') AND ts >= ? "
                     "GROUP BY key_name",
-                    (month_start,),
+                    (trailing_cutoff,),
                 ).fetchall()
             finally:
                 conn.close()
@@ -419,14 +427,20 @@ class RealtimePricing:
             _log.debug("zai amortized query failed", exc_info=True)
             return result
 
-        for key_name, tokens in rows:
+        for key_name, tokens, min_ts in rows:
             tokens = int(tokens or 0)
-            fee = _ZAI_FEES.get(key_name, 0.0)
-            # Require minimum sample to avoid month-boundary explosion (R3).
+            monthly_fee = _ZAI_FEES.get(key_name, 0.0)
+            annual_fee = monthly_fee * 12.0
+            # Require minimum sample to avoid cold-start explosion.
             if tokens < self.MIN_SAMPLE_TOKENS:
                 result[(key_name, None)] = self._cold_start_obs(key_name, now)
                 continue
-            rate = _floor_rate(fee / (tokens / 1e6))
+            # Compute trailing_days from the actual data span.
+            # min_ts is the earliest record in the trailing window.
+            trailing_days = max(1.0, (now - float(min_ts or now)) / 86400.0)
+            # Annualize: extrapolate trailing tokens to a full 365-day year.
+            annualized_tokens = tokens * (365.0 / trailing_days)
+            rate = _floor_rate(annual_fee / (annualized_tokens / 1e6))
             result[(key_name, None)] = RateObservation(
                 provider=key_name,
                 model=None,
@@ -435,7 +449,7 @@ class RealtimePricing:
                 is_measured=False,
                 confidence=_confidence(tokens, False),
                 sample_tokens=tokens,
-                sample_cost_usd=fee,
+                sample_cost_usd=annual_fee,
                 ts=now,
             )
         return result

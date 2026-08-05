@@ -165,18 +165,47 @@ class TestColdStart:
 
 class TestZaiAmortized:
     def test_ours_amortized_rate(self):
-        """ours: 155 / (tokens/1e6). With 1B tokens → 0.155 $/M."""
+        """ours: annualized from trailing data.
+
+        1B tokens over 30 days, $155/mo → annual_fee=$1860.
+        annualized_tokens = 1e9 * (365/30) = 12.167e9
+        rate = 1860 / (12.167e9 / 1e6) = 1860 / 12167 ≈ 0.153 $/M.
+        """
         now = time.time()
-        # 1 billion tokens for 'ours' this month
-        rows = [(now - 100, "ours", "glm-5.2", 1_000_000_000)]
+        # 1 billion tokens for 'ours' over 30 days (within trailing 365d window)
+        rows = [(now - 30 * 86400, "ours", "glm-5.2", 1_000_000_000)]
         zai = _make_zai_db(api_calls_rows=rows)
         rp = _make_instance(zai_db=zai)
         rp.refresh()
         ob = rp.get_rate("ours")
         assert ob.source == SRC_ZAI_AMORTIZED
         assert ob.is_measured is False
-        # 155 / 1000 = 0.155
-        assert ob.rate_per_m == pytest.approx(0.155, rel=0.01)
+        # 1860 / (1e9 * 365/30 / 1e6) ≈ 0.1529
+        assert ob.rate_per_m == pytest.approx(0.1529, rel=0.01)
+
+    def test_ours_trailing_uses_all_data_not_month(self):
+        """Trailing window includes data from previous months, not just current.
+
+        Data: 1B tokens 60 days ago + 1B tokens 1 day ago = 2B total.
+        trailing_days ≈ 60, annualized_tokens = 2e9 * (365/60) = 12.17e9.
+        rate = 1860 / 12167 ≈ 0.153. With month-to-date (old behavior) only
+        the 1-day-ago record would count → 1B tokens → rate ≈ 0.155 (monthly).
+        The trailing approach gives a different (more stable) result.
+        """
+        now = time.time()
+        rows = [
+            (now - 60 * 86400, "ours", "glm-5.2", 1_000_000_000),
+            (now - 1 * 86400, "ours", "glm-5.2", 1_000_000_000),
+        ]
+        zai = _make_zai_db(api_calls_rows=rows)
+        rp = _make_instance(zai_db=zai)
+        rp.refresh()
+        ob = rp.get_rate("ours")
+        assert ob.source == SRC_ZAI_AMORTIZED
+        # Both records are within 365d trailing → sum = 2B tokens over ~60 days
+        # annualized_tokens = 2e9 * (365/60) ≈ 12.167e9
+        # rate = 1860 / 12167 ≈ 0.1529
+        assert ob.rate_per_m == pytest.approx(0.1529, rel=0.02)
 
     def test_friend_floored_at_min(self):
         """friend: fee=0, so rate floored at MIN_EFFECTIVE_PRICE."""
