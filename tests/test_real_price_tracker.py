@@ -34,12 +34,20 @@ from src.real_price_tracker import (
     CHANGE_THRESHOLD,
     LAST_RESORT_RATES,
     MIN_CALLS_FOR_RATE,
+    PROVIDER_WINDOW_HOURS,
+    REQUIRED_RATE_PROVIDERS,
+    SEED_RATES,
     UNKNOWN_PROVIDER_FALLBACK,
     clear_cache,
     detect_price_change,
+    gate_all_rates_have_data,
     get_all_rates,
+    get_all_trailing_rates,
+    get_rate_readiness,
     get_rate_with_fallback,
     get_real_rate,
+    get_trailing_rate,
+    get_trailing_rate_with_seed,
 )
 
 
@@ -516,6 +524,293 @@ class TestNeverRaises:
             rate = get_rate_with_fallback("ppq", db_path=missing, _now=_now_utc())
             assert isinstance(rate, float)
             assert rate == LAST_RESORT_RATES["ppq"]
+        finally:
+            if os.path.exists(missing):
+                os.unlink(missing)
+
+
+# ── T6: trailing-rate API (Ollama 90d + paid-endpoint 30d) ────────────────────
+
+
+class _OllamaBillingNeutered:
+    """Base class: prevent real network calls to the Ollama billing API.
+
+    ``get_trailing_rate`` falls back to ``fetch_ollama_usage`` whenever
+    ``ollama_cloud`` has no local ``cost_usd``. In tests with an empty DB that
+    would make a real HTTP request. This autouse fixture pins the function to a
+    no-op (empty dict → ``_ollama_api_rate`` returns ``None``). Tests that WANT
+    billing-API data override ``fetch_ollama_usage`` again in their own body
+    (the later ``monkeypatch.setattr`` wins).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _no_billing_api(self, monkeypatch):
+        import src.ollama_extra_usage as oeu
+        monkeypatch.setattr(oeu, "fetch_ollama_usage", lambda: {})
+
+
+class TestProviderWindowHours:
+    def test_ollama_is_90_days(self):
+        assert PROVIDER_WINDOW_HOURS["ollama_cloud"] == 90 * 24  # 2160
+
+    @pytest.mark.parametrize("provider", ["ppq", "deepinfra", "openrouter"])
+    def test_paid_endpoints_are_30_days(self, provider):
+        assert PROVIDER_WINDOW_HOURS[provider] == 30 * 24  # 720
+
+    @pytest.mark.parametrize("provider", ["ours", "friend"])
+    def test_zai_keys_are_365_days(self, provider):
+        assert PROVIDER_WINDOW_HOURS[provider] == 365 * 24  # 8760
+
+    def test_seed_rates_cover_all_windowed_providers(self):
+        # Every provider with a trailing window must have a cold-start seed.
+        for provider in PROVIDER_WINDOW_HOURS:
+            assert provider in SEED_RATES, provider
+
+    def test_seed_rates_positive(self):
+        for provider, rate in SEED_RATES.items():
+            assert rate > 0, provider
+
+    def test_required_providers_are_the_paid_endpoints(self):
+        assert set(REQUIRED_RATE_PROVIDERS) == {"ollama_cloud", "ppq",
+                                                "deepinfra", "openrouter"}
+
+
+class TestGetTrailingRate(_OllamaBillingNeutered):
+    def test_ollama_90d_window_excludes_older_calls(self, db):
+        """Ollama rate is measured over 90d; calls older than 90d are dropped."""
+        now = _now_utc()
+        # 100 calls 10d ago (inside 90d) @ $0.0001 / 1000 tok → 0.1 $/M
+        inside = [(now - 10 * 86400, "ollama_cloud", "m", 1000, 0.0001)
+                  for _ in range(100)]
+        # 100 calls 100d ago (outside 90d) @ $0.0009 / 1000 tok → 0.9 $/M
+        outside = [(now - 100 * 86400, "ollama_cloud", "m", 1000, 0.0009)
+                   for _ in range(100)]
+        _seed(db, inside + outside)
+        rate = get_trailing_rate("ollama_cloud", "m", db_path=db, _now=now)
+        assert rate == pytest.approx(0.1, rel=1e-9)
+
+    @pytest.mark.parametrize("provider", ["ppq", "deepinfra", "openrouter"])
+    def test_paid_30d_window_excludes_older_calls(self, db, provider):
+        now = _now_utc()
+        inside = [(now - 5 * 86400, provider, "m", 1000, 0.0001)
+                  for _ in range(100)]   # → 0.1 $/M
+        outside = [(now - 40 * 86400, provider, "m", 1000, 0.0009)
+                   for _ in range(100)]  # → 0.9 $/M, outside 30d
+        _seed(db, inside + outside)
+        rate = get_trailing_rate(provider, "m", db_path=db, _now=now)
+        assert rate == pytest.approx(0.1, rel=1e-9)
+
+    def test_below_min_calls_returns_none(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 100, "ppq", "m", 1000, 0.0001)
+                   for _ in range(MIN_CALLS_FOR_RATE - 1)])
+        assert get_trailing_rate("ppq", "m", db_path=db, _now=now) is None
+
+    def test_no_data_returns_none(self, db):
+        assert get_trailing_rate("ppq", "m", db_path=db, _now=_now_utc()) is None
+        # ollama_cloud with no cost_usd AND neutered billing API → None
+        assert get_trailing_rate("ollama_cloud", db_path=db,
+                                 _now=_now_utc()) is None
+
+    def test_ollama_falls_back_to_billing_api(self, db, monkeypatch):
+        """When cost_usd is empty, ollama's measured rate comes from the API."""
+        clear_cache()
+        import src.ollama_extra_usage as oeu
+        monkeypatch.setattr(oeu, "fetch_ollama_usage", lambda: {
+            "activity": {"glm-5.2": {"cost": 0.0155, "total_tokens": 1_000_000}}
+        })
+        rate = get_trailing_rate("ollama_cloud", "glm-5.2", db_path=db,
+                                 _now=_now_utc())
+        assert rate == pytest.approx(0.0155, rel=1e-9)
+
+    def test_ollama_billing_api_failure_returns_none(self, db, monkeypatch):
+        clear_cache()
+
+        def _boom():
+            raise RuntimeError("network down")
+
+        import src.ollama_extra_usage as oeu
+        monkeypatch.setattr(oeu, "fetch_ollama_usage", _boom)
+        assert get_trailing_rate("ollama_cloud", db_path=db,
+                                 _now=_now_utc()) is None
+
+    def test_trailing_cache_served_within_ttl(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 100, "ppq", "m", 1000, 0.0001) for _ in range(100)])
+        first = get_trailing_rate("ppq", "m", db_path=db, _now=now)
+        assert first == pytest.approx(0.1, rel=1e-9)
+        # Mutate DB; cache should serve the old value at the same instant.
+        _seed(db, [(now - 100, "ppq", "m", 1000, 0.05) for _ in range(100)])
+        second = get_trailing_rate("ppq", "m", db_path=db, _now=now)
+        assert second == first  # cached
+
+    def test_trailing_cache_recomputes_after_ttl(self, db):
+        t0 = _now_utc()
+        _seed(db, [(t0 - 100, "ppq", "m", 1000, 0.0001) for _ in range(100)])
+        first = get_trailing_rate("ppq", "m", db_path=db, _now=t0)
+        _seed(db, [(t0 - 100, "ppq", "m", 1000, 0.05) for _ in range(100)])
+        later = t0 + CACHE_TTL_SECONDS + 1
+        second = get_trailing_rate("ppq", "m", db_path=db, _now=later)
+        assert second != pytest.approx(first, rel=1e-3)
+        # SUM(cost)=0.01+5.0=5.01, SUM(tokens)=200000 → 25.05 $/M
+        assert second == pytest.approx(5.01 / 200000 * 1e6, rel=1e-9)
+
+
+class TestTrailingRateWithSeed(_OllamaBillingNeutered):
+    def test_seeds_when_cold_per_provider(self, db):
+        now = _now_utc()
+        for provider, expected in SEED_RATES.items():
+            rate = get_trailing_rate_with_seed(provider, db_path=db, _now=now)
+            assert rate == pytest.approx(expected, rel=1e-12), provider
+
+    def test_returns_measured_when_data_present(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 100, "ppq", "m", 1000, 0.0001) for _ in range(100)])
+        rate = get_trailing_rate_with_seed("ppq", "m", db_path=db, _now=now)
+        assert rate == pytest.approx(0.1, rel=1e-9)
+        assert rate != SEED_RATES["ppq"]
+
+    def test_unknown_provider_returns_conservative_fallback(self, db):
+        rate = get_trailing_rate_with_seed("never_seen", db_path=db,
+                                           _now=_now_utc())
+        assert rate == UNKNOWN_PROVIDER_FALLBACK
+
+    def test_always_returns_float(self, db):
+        for provider in ("ours", "friend", "ollama_cloud", "ppq",
+                         "openrouter", "deepinfra", "mystery"):
+            rate = get_trailing_rate_with_seed(provider, db_path=db,
+                                               _now=_now_utc())
+            assert isinstance(rate, float), provider
+
+
+class TestGetAllTrailingRates(_OllamaBillingNeutered):
+    def test_cold_returns_all_seeds(self, db):
+        rates = get_all_trailing_rates(db_path=db, _now=_now_utc())
+        assert set(rates) == set(PROVIDER_WINDOW_HOURS)
+        for provider, rate in rates.items():
+            assert rate == pytest.approx(SEED_RATES[provider], rel=1e-12), provider
+
+    def test_mixed_measured_and_seed(self, db):
+        now = _now_utc()
+        # Only ppq has measured data.
+        _seed(db, [(now - 100, "ppq", "m", 1000, 0.0001) for _ in range(100)])
+        rates = get_all_trailing_rates(db_path=db, _now=now)
+        assert rates["ppq"] == pytest.approx(0.1, rel=1e-9)
+        # Everyone else is still on its seed.
+        for provider in PROVIDER_WINDOW_HOURS:
+            if provider == "ppq":
+                continue
+            assert rates[provider] == pytest.approx(SEED_RATES[provider],
+                                                    rel=1e-12), provider
+
+    def test_custom_providers_subset(self, db):
+        rates = get_all_trailing_rates(providers=["ppq", "deepinfra"],
+                                       db_path=db, _now=_now_utc())
+        assert set(rates) == {"ppq", "deepinfra"}
+
+
+class TestGetRateReadiness(_OllamaBillingNeutered):
+    def test_cold_all_seeds(self, db):
+        report = get_rate_readiness(db_path=db, _now=_now_utc())
+        assert set(report) == set(PROVIDER_WINDOW_HOURS)
+        for provider, info in report.items():
+            assert info["source"] == "seed", provider
+            assert info["has_data"] is False, provider
+            assert info["rate"] == pytest.approx(SEED_RATES[provider], rel=1e-12)
+            assert info["window_hours"] == PROVIDER_WINDOW_HOURS[provider]
+
+    def test_measured_marked_correctly(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 100, "ppq", "m", 1000, 0.0001) for _ in range(100)])
+        _seed(db, [(now - 100, "openrouter", "m", 1000, 0.0002)
+                   for _ in range(100)])
+        report = get_rate_readiness(db_path=db, _now=now)
+        assert report["ppq"]["source"] == "measured"
+        assert report["ppq"]["has_data"] is True
+        assert report["ppq"]["rate"] == pytest.approx(0.1, rel=1e-9)
+        assert report["openrouter"]["source"] == "measured"
+        assert report["deepinfra"]["source"] == "seed"
+        assert report["ollama_cloud"]["source"] == "seed"
+
+    def test_ollama_billing_api_counts_as_measured(self, db, monkeypatch):
+        clear_cache()
+        import src.ollama_extra_usage as oeu
+        monkeypatch.setattr(oeu, "fetch_ollama_usage", lambda: {
+            "activity": {"glm-5.2": {"cost": 0.0155, "total_tokens": 1_000_000}}
+        })
+        report = get_rate_readiness(providers=["ollama_cloud"], db_path=db,
+                                    _now=_now_utc())
+        assert report["ollama_cloud"]["source"] == "measured"
+        assert report["ollama_cloud"]["has_data"] is True
+
+    def test_unknown_provider_in_subset(self, db):
+        report = get_rate_readiness(providers=["mystery"], db_path=db,
+                                    _now=_now_utc())
+        assert report["mystery"]["source"] == "unknown"
+        assert report["mystery"]["has_data"] is False
+        assert report["mystery"]["rate"] == UNKNOWN_PROVIDER_FALLBACK
+
+
+class TestGateAllRatesHaveData(_OllamaBillingNeutered):
+    @staticmethod
+    def _seed_measured(db, now, provider, cost=0.0001, n=100, tok=1000):
+        _seed(db, [(now - 100, provider, "m", tok, cost) for _ in range(n)])
+
+    def test_cold_returns_false(self, db):
+        assert gate_all_rates_have_data(db_path=db, _now=_now_utc()) is False
+
+    def test_all_required_measured_returns_true(self, db):
+        now = _now_utc()
+        for provider in REQUIRED_RATE_PROVIDERS:
+            self._seed_measured(db, now, provider)
+        assert gate_all_rates_have_data(db_path=db, _now=now) is True
+
+    def test_one_missing_returns_false(self, db):
+        now = _now_utc()
+        for provider in REQUIRED_RATE_PROVIDERS:
+            if provider == "deepinfra":
+                continue
+            self._seed_measured(db, now, provider)
+        assert gate_all_rates_have_data(db_path=db, _now=now) is False
+
+    def test_custom_providers_subset(self, db):
+        now = _now_utc()
+        self._seed_measured(db, now, "ppq")
+        # Gate scoped to just ppq → True even though others are cold.
+        assert gate_all_rates_have_data(providers=["ppq"], db_path=db,
+                                        _now=now) is True
+        # Default scope still False (others cold).
+        assert gate_all_rates_have_data(db_path=db, _now=now) is False
+
+    def test_ollama_via_billing_api_passes_gate(self, db, monkeypatch):
+        """ollama_cloud measured via the billing API (not cost_usd) counts."""
+        clear_cache()
+        now = _now_utc()
+        import src.ollama_extra_usage as oeu
+        monkeypatch.setattr(oeu, "fetch_ollama_usage", lambda: {
+            "activity": {"glm-5.2": {"cost": 0.0155, "total_tokens": 1_000_000}}
+        })
+        for provider in REQUIRED_RATE_PROVIDERS:
+            if provider == "ollama_cloud":
+                continue  # measured via billing API
+            self._seed_measured(db, now, provider)
+        assert gate_all_rates_have_data(db_path=db, _now=now) is True
+
+    def test_zero_rate_fails_gate(self, db):
+        """A measured-but-zero rate (all tokens, $0 cost) fails the gate."""
+        now = _now_utc()
+        for provider in REQUIRED_RATE_PROVIDERS:
+            # cost 0.0 → measured rate 0.0 → rate <= 0 → gate False
+            _seed(db, [(now - 100, provider, "m", 1000, 0.0)
+                       for _ in range(100)])
+        assert gate_all_rates_have_data(db_path=db, _now=now) is False
+
+    def test_never_raises_on_bad_db(self):
+        clear_cache()
+        missing = os.path.join(tempfile.gettempdir(), "rpt_gate_bad.db")
+        try:
+            assert gate_all_rates_have_data(db_path=missing,
+                                            _now=_now_utc()) is False
         finally:
             if os.path.exists(missing):
                 os.unlink(missing)
