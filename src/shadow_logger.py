@@ -107,7 +107,11 @@ CREATE TABLE IF NOT EXISTS routing_shadow_decisions (
     actual_cost REAL,
     divergence REAL,
     is_429 INTEGER DEFAULT 0,
-    paid_provider INTEGER DEFAULT 0
+    paid_provider INTEGER DEFAULT 0,
+    -- PM-T6: per-model pricing columns (added via migration) ---
+    requested_model TEXT,
+    per_model_base_rate REAL,
+    per_model_source TEXT
 );
 """
 
@@ -125,8 +129,9 @@ _INSERT_PRESSURE_SQL = (
     "(ts, live_provider, live_model, shadow_provider, shadow_model, "
     " shadow_cost, live_cost, tokens, agree, reason, "
     " pressure_provider, pressure_model, pressure_cost, actual_cost, "
-    " divergence, is_429, paid_provider) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+    " divergence, is_429, paid_provider, "
+    " requested_model, per_model_base_rate, per_model_source) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
 )
 
 # New columns to add when migrating an old DB.  (name, type, default-clause)
@@ -138,6 +143,10 @@ _MIGRATION_COLUMNS = [
     ("divergence", "REAL", "0.0"),
     ("is_429", "INTEGER", "0"),
     ("paid_provider", "INTEGER", "0"),
+    # PM-T6: per-model pricing columns.
+    ("requested_model", "TEXT", None),
+    ("per_model_base_rate", "REAL", None),
+    ("per_model_source", "TEXT", None),
 ]
 
 

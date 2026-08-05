@@ -316,6 +316,36 @@ def _resolve_dynamic_base_rates_per_model(
         return {}
 
 
+def _resolve_model_rate_source(
+    rates: dict[str, dict[str, float]],
+    provider: str,
+    model: str | None,
+) -> tuple[float, str]:
+    """Resolve ``(provider, model)`` → ``(base rate $/M, source tag)``.
+
+    Same strict fallback chain as :func:`_resolve_model_rate`, but also returns
+    a *source* tag so the shadow logger (PM-T6) can record whether a provider's
+    price was a direct model measurement, the provider ``_default`` seed, or the
+    conservative floor. Chain (docs/plan-per-model-pricing.md §3.6 / §5.4):
+
+      1. **Per-model measured rate** — ``rates[provider][model]`` → ``"measured"``
+      2. **Provider-level ``_default``** — ``rates[provider]["_default"]``
+         (positive) → ``"seed"`` (the flat per-provider blend / cold-start seed)
+      3. **Conservative fallback** — :data:`_UNKNOWN_MODEL_FALLBACK` ($1.0/M)
+         → ``"fallback"``
+
+    Pure function: no I/O, no side effects. Wired into the failover path by T3
+    (the rate) and into the shadow logger by T6 (the source tag).
+    """
+    prov_rates = rates.get(provider, {})
+    if model and model in prov_rates:
+        return float(prov_rates[model]), "measured"
+    default = prov_rates.get("_default")
+    if default is not None and default > 0:
+        return float(default), "seed"
+    return _UNKNOWN_MODEL_FALLBACK, "fallback"
+
+
 def _resolve_model_rate(
     rates: dict[str, dict[str, float]],
     provider: str,
@@ -338,15 +368,11 @@ def _resolve_model_rate(
     provider ``_default`` is returned, preserving the legacy per-provider path.
 
     Pure function: no I/O, no side effects — trivially unit-testable (the T2
-    gate). Wired into the failover path by T3.
+    gate). Wired into the failover path by T3; delegates to
+    :func:`_resolve_model_rate_source` (which also yields the source tag the
+    shadow logger records via PM-T6).
     """
-    prov_rates = rates.get(provider, {})
-    if model and model in prov_rates:
-        return float(prov_rates[model])
-    default = prov_rates.get("_default")
-    if default is not None and default > 0:
-        return float(default)
-    return _UNKNOWN_MODEL_FALLBACK
+    return _resolve_model_rate_source(rates, provider, model)[0]
 
 
 # ── Quota totals (approximate, for scarcity factor) ──────────────────────────
@@ -780,6 +806,19 @@ class LiveRouter:
             except Exception:
                 self._base_rates_per_model = {}
 
+        # ── PM-T6: per-model rate snapshot for shadow logging ─────────────
+        # After each _do_select_failover(model=...) call these hold the
+        # requested model and the per-model base rate resolved for EVERY
+        # candidate provider, so the shadow hook can log which rate each
+        # provider was priced at for the requested model. Populated only
+        # when per-model pricing is active (a concrete model was requested
+        # AND the kill switch is on); empty / None otherwise. Read via the
+        # last_requested_model / last_per_model_rates / last_per_model_sources
+        # properties.
+        self._last_requested_model: str | None = None
+        self._last_per_model_rates: dict[str, float] = {}
+        self._last_per_model_sources: dict[str, str] = {}
+
     # ── P5-RATES: dynamic base-rate refresh ──────────────────────────────
 
     def refresh_base_rates(self) -> dict[str, float]:
@@ -1036,6 +1075,24 @@ class LiveRouter:
         self._last_zai_pressures = {}
         self._last_ppq_pressure = 1.0
         self._last_credit_pressures = {}
+
+        # ── PM-T6: per-model rate snapshot for shadow logging ─────────────
+        # Snapshot the requested model and the per-model base rate resolved
+        # for EVERY candidate up front, so shadow logging can record it
+        # regardless of whether an exclusive-model short-circuit skips the
+        # optimizer loop. Only populated when per-model pricing is active
+        # (model set AND kill switch on); otherwise the properties stay
+        # empty/None (backward compatible — flat-blend path unchanged).
+        self._last_requested_model = model
+        self._last_per_model_rates = {}
+        self._last_per_model_sources = {}
+        if model and _PER_MODEL_PRICING_ENABLED:
+            for _pm_name in self._provider_names:
+                _pm_rate, _pm_src = _resolve_model_rate_source(
+                    self._base_rates_per_model, _pm_name, model
+                )
+                self._last_per_model_rates[_pm_name] = _pm_rate
+                self._last_per_model_sources[_pm_name] = _pm_src
 
         # ── EU-R3: Query Ollama Cloud quota regime ───────────────────────
         # On each routing decision, query the quota tracker to determine
@@ -1636,6 +1693,51 @@ class LiveRouter:
         """
         try:
             return dict(self._last_pace_mults)
+        except Exception:
+            return {}
+
+    # ── PM-T6: per-model pricing shadow-logging properties ────────────────
+
+    @property
+    def last_requested_model(self) -> str | None:
+        """The model name passed to the most recent ``select_failover`` (PM-T6).
+
+        ``None`` before any failover or when no model was requested. Read by
+        the shadow hook to populate the ``requested_model`` column of
+        ``routing_shadow_decisions``.
+        """
+        try:
+            return self._last_requested_model
+        except Exception:
+            return None
+
+    @property
+    def last_per_model_rates(self) -> dict[str, float]:
+        """Per-model base rate ($/M) for each candidate from the last failover.
+
+        Maps provider name → the rate that provider was priced at for the
+        requested model (resolved via :func:`_resolve_model_rate_source`).
+        Populated only when per-model pricing is active (a concrete model
+        was requested AND the kill switch is on); empty otherwise. Read by
+        the shadow hook to log the ``per_model_base_rate`` for the chosen
+        provider.
+        """
+        try:
+            return dict(self._last_per_model_rates)
+        except Exception:
+            return {}
+
+    @property
+    def last_per_model_sources(self) -> dict[str, str]:
+        """Per-model rate source tag for each candidate from the last failover.
+
+        Maps provider name → one of ``"measured"``, ``"seed"``,
+        ``"fallback"`` (see :func:`_resolve_model_rate_source`). Empty when
+        per-model pricing is inactive. Read by the shadow hook to populate
+        ``per_model_source``.
+        """
+        try:
+            return dict(self._last_per_model_sources)
         except Exception:
             return {}
 
