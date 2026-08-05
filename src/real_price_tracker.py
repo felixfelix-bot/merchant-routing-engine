@@ -108,6 +108,15 @@ __all__ = [
     "PROVIDER_WINDOW_HOURS",
     "SEED_RATES",
     "REQUIRED_RATE_PROVIDERS",
+    # ── z.ai amortized rate (T5: trailing-365d flat-rate amortization) ────────
+    "get_zai_amortized_rate",
+    "ZAI_ANNUAL_BUDGET",
+    "ZAI_FRIEND_PREMIUM",
+    "ZAI_SEED_RATE",
+    "ZAI_MIN_DATA_DAYS",
+    "ZAI_WINDOW_HOURS",
+    "ZAI_CACHE_TTL_SECONDS",
+    "ZAI_PROVIDERS",
     # ── Tunables / constants ────────────────────────────────────────────────────
     "LAST_RESORT_RATES",
     "DEFAULT_DB_PATH",
@@ -205,6 +214,44 @@ REQUIRED_RATE_PROVIDERS: tuple[str, ...] = (
     "openrouter",
 )
 
+# ── z.ai amortized-rate model (Task T5) ──────────────────────────────────────
+# The z.ai keys are a flat-rate subscription, so the cost_usd layer (~$0
+# marginal) cannot express their real per-token cost. Task T5 amortizes a fixed
+# annual budget over trailing-365d token volume to give the router a stable,
+# auditable base $/M for the flat-rate providers. See
+# docs/plan-remaining-v2.md §Task 5.
+#
+# ``provider LIKE 'zai%'`` in the spec denotes the z.ai subscription keys. The
+# production ``api_calls`` table stores them under their canonical names
+# (``ours`` / ``friend``), with legacy aliases ``zai_ours`` / ``zai_friend``
+# (src/provider_names.py). :func:`_query_zai_window` matches BOTH forms so the
+# rate is always populated from real data regardless of the row's convention.
+
+#: Annual budget ($) amortized over trailing-365d z.ai token volume.
+ZAI_ANNUAL_BUDGET: float = 300.0
+
+#: Premium applied to the ``friend`` key so the optimizer prefers ``ours``.
+#: ``friend`` effective rate = ours base rate x this factor.
+ZAI_FRIEND_PREMIUM: float = 1.21
+
+#: Seed $/M returned when fewer than ``ZAI_MIN_DATA_DAYS`` of data exist.
+#: Matches the observed z.ai folklore: ~21B tok/yr at $300 -> $0.0143/M.
+ZAI_SEED_RATE: float = 0.014
+
+#: Minimum data span (days) required before the calculated rate is trusted.
+#: Below this the seed is returned to avoid a noisy cold-start number.
+ZAI_MIN_DATA_DAYS: float = 30.0
+
+#: Trailing window length (hours) for the amortized calculation (365 days).
+ZAI_WINDOW_HOURS: float = 365.0 * 24.0
+
+#: Cache TTL for the amortized rate. Per docs/plan-remaining-v2.md §Task 5 the
+#: rate is refreshed daily, not per-request (token volume moves slowly).
+ZAI_CACHE_TTL_SECONDS: float = 86400.0
+
+#: Canonical z.ai flat-rate subscription providers.
+ZAI_PROVIDERS: tuple[str, ...] = ("ours", "friend")
+
 # ── Thread-safe TTL cache ────────────────────────────────────────────────────
 # key: (provider, model, window_hours, db_path) → (value, computed_at)
 # value is a float rate OR None (a cached "insufficient data" miss). Caching the
@@ -218,6 +265,11 @@ _cache_lock = threading.Lock()
 # fallback — so the (potentially slow) API is hit at most once per TTL per pair.
 _trailing_cache: dict[tuple[str, str | None, str], tuple[float | None, float]] = {}
 
+# z.ai amortized-rate cache (T5). key: (provider, db_path) → (rate, ts).
+# Daily TTL (ZAI_CACHE_TTL_SECONDS) — separate from the 5-min cost_usd cache and
+# the T6 trailing cache because the amortized rate moves on a daily cadence.
+_zai_cache: dict[tuple[str, str], tuple[float, float]] = {}
+
 
 def clear_cache() -> None:
     """Drop every cached rate. Tests call this between assertions; production
@@ -225,6 +277,7 @@ def clear_cache() -> None:
     with _cache_lock:
         _cache.clear()
         _trailing_cache.clear()
+        _zai_cache.clear()
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
@@ -677,6 +730,116 @@ def gate_all_rates_have_data(
         if rate is None or rate <= 0:
             return False
     return True
+
+
+# ── z.ai amortized rate (Task T5) ────────────────────────────────────────────
+
+
+def _query_zai_window(db_path: str, since_ts: float) -> tuple[int, float, float]:
+    """Aggregate the z.ai providers' tokens since ``since_ts``.
+
+    Matches every row whose ``key_name`` is a z.ai subscription key — the
+    canonical names (``ours``/``friend``) OR the legacy ``zai_*`` aliases that
+    the spec's ``provider LIKE 'zai%'`` denotes (see src/provider_names.py).
+
+    Returns ``(call_count, sum_total_tokens, min_ts)``. ``min_ts`` is the
+    earliest record in the window (used to measure the real data span); it is
+    ``0.0`` when there is no matching data. Never raises — on any DB error
+    returns ``(0, 0.0, 0.0)`` so callers fall through to the seed.
+    """
+    try:
+        conn = sqlite3.connect(db_path, timeout=2)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), "
+                "COALESCE(MIN(ts), 0) "
+                "FROM api_calls "
+                "WHERE (key_name IN ('ours', 'friend') OR key_name LIKE 'zai%') "
+                "AND ts > ?",
+                (since_ts,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        _log.debug("real_price_tracker: zai window query failed", exc_info=True)
+        return (0, 0.0, 0.0)
+    if not row:
+        return (0, 0.0, 0.0)
+    return (int(row[0] or 0), float(row[1] or 0.0), float(row[2] or 0.0))
+
+
+def get_zai_amortized_rate(
+    provider: str = "ours",
+    *,
+    db_path: str | None = None,
+    _now: float | None = None,
+) -> float:
+    """Amortized $/M for the z.ai flat-rate subscription over trailing 365 days.
+
+    The z.ai keys (``ours``/``friend``) are a fixed subscription, so their real
+    per-token cost is the annual budget spread over trailing-365d token volume::
+
+        zai_rate = ZAI_ANNUAL_BUDGET / (SUM(total_tokens for z.ai keys) / 1e6)
+
+    The ``friend`` key carries a ``ZAI_FRIEND_PREMIUM`` (1.21x) surcharge so the
+    optimizer prefers the primary ``ours`` key. When fewer than
+    ``ZAI_MIN_DATA_DAYS`` (30) days of data exist the function returns the
+    ``ZAI_SEED_RATE`` ($0.014/M, x1.21 for friend) rather than a noisy number.
+
+    Results are cached for ``ZAI_CACHE_TTL_SECONDS`` (24 h) — the rate is
+    recomputed daily, not per request (:func:`clear_cache` drops it). This is
+    the canonical base rate for the z.ai providers; the cost_usd-based
+    :func:`get_trailing_rate` cannot price them (their marginal cost is ~$0).
+
+    Thread-safe. Never raises; on any error it degrades to the seed rate.
+
+    Parameters
+    ----------
+    provider
+        ``"ours"`` (default) or ``"friend"``. Any other value is treated as
+        ``"ours"``.
+    db_path
+        Override the DB path (tests pass a temp DB).
+    _now
+        Injected clock for deterministic tests.
+
+    Returns
+    -------
+    float
+        $/M as a non-negative float. Always a float (the seed on cold start or
+        error).
+    """
+    now = _now if _now is not None else time.time()
+    db = _resolve_db(db_path)
+    friend = provider == "friend"
+    premium = ZAI_FRIEND_PREMIUM if friend else 1.0
+
+    # Daily cache (read under lock; cheap).
+    key = (provider, db)
+    with _cache_lock:
+        cached = _zai_cache.get(key)
+    if cached is not None:
+        value, computed_at = cached
+        if (now - computed_at) < ZAI_CACHE_TTL_SECONDS:
+            return value
+
+    # Compute the base rate from trailing-365d z.ai token volume.
+    since = now - ZAI_WINDOW_HOURS * 3600.0
+    _count, sum_tokens, min_ts = _query_zai_window(db, since)
+
+    # Data span = age of the oldest matching record. <30d (or no tokens) → seed.
+    data_days = (now - min_ts) / 86400.0 if min_ts > 0 else 0.0
+    if data_days < ZAI_MIN_DATA_DAYS or sum_tokens <= 0:
+        rate = ZAI_SEED_RATE * premium
+    else:
+        base = ZAI_ANNUAL_BUDGET / (sum_tokens / 1e6)
+        if base != base or base < 0:  # NaN / nonsensical guard → seed
+            base = ZAI_SEED_RATE
+        rate = base * premium
+
+    with _cache_lock:
+        _zai_cache[key] = (rate, now)
+    return rate
 
 
 def get_rate_with_fallback(

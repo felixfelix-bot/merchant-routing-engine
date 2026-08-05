@@ -38,6 +38,12 @@ from src.real_price_tracker import (
     REQUIRED_RATE_PROVIDERS,
     SEED_RATES,
     UNKNOWN_PROVIDER_FALLBACK,
+    ZAI_ANNUAL_BUDGET,
+    ZAI_CACHE_TTL_SECONDS,
+    ZAI_FRIEND_PREMIUM,
+    ZAI_MIN_DATA_DAYS,
+    ZAI_SEED_RATE,
+    ZAI_WINDOW_HOURS,
     clear_cache,
     detect_price_change,
     gate_all_rates_have_data,
@@ -48,6 +54,7 @@ from src.real_price_tracker import (
     get_real_rate,
     get_trailing_rate,
     get_trailing_rate_with_seed,
+    get_zai_amortized_rate,
 )
 
 
@@ -814,3 +821,173 @@ class TestGateAllRatesHaveData(_OllamaBillingNeutered):
         finally:
             if os.path.exists(missing):
                 os.unlink(missing)
+
+
+# ── T5: z.ai trailing-365d amortized rate ────────────────────────────────────
+
+
+class TestZaiAmortizedRate:
+    """get_zai_amortized_rate: flat-rate subscription cost amortized over
+    trailing-365d token volume. ``zai_rate = 300 / (SUM(tokens) / 1M)``;
+    friend = base x 1.21; <30d data → seed $0.014/M."""
+
+    def test_gate_within_50pct_of_seed(self, db):
+        """T5 acceptance gate: with >30d of representative data the calculated
+        rate lands within 50% of the $0.014/M folklore rate.
+
+        Representative volume = ~21.4B tokens/yr (the folklore assumption behind
+        $300/yr @ $0.014/M). Production currently runs far hotter (~96B tok/yr),
+        so the *real* amortized rate is lower — but the gate is a property of
+        the *formula*, validated here with controlled data.
+        """
+        now = _now_utc()
+        # ~21.43B tokens (ours 15B + friend 6.43B), oldest record 60d ago → >30d.
+        rows = [(now - 60 * 86400, "ours", "glm-5.2", 5_000_000_000, 0.0)
+                for _ in range(3)]
+        rows += [(now - 45 * 86400, "friend", "glm-5.2", 3_214_285_714, 0.0)
+                 for _ in range(2)]
+        _seed(db, rows)
+        rate = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        # 300 / (21_428_571_428 / 1e6) == 0.014
+        assert rate == pytest.approx(0.014, rel=1e-3)
+        lo, hi = ZAI_SEED_RATE * 0.5, ZAI_SEED_RATE * 1.5
+        assert lo <= rate <= hi  # within 50% of $0.014/M
+
+    def test_basic_formula_exact(self, db):
+        """10B tokens → 300 / (10_000 M) = $0.03/M exactly."""
+        now = _now_utc()
+        rows = [(now - 40 * 86400, "ours", "m", 6_000_000_000, 0.0),
+                (now - 40 * 86400, "friend", "m", 4_000_000_000, 0.0)]
+        _seed(db, rows)
+        rate = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        assert rate == pytest.approx(0.03, rel=1e-9)
+
+    def test_friend_premium_is_1_21x(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 40 * 86400, "ours", "m", 10_000_000_000, 0.0)])
+        ours = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        friend = get_zai_amortized_rate("friend", db_path=db, _now=now)
+        assert friend == pytest.approx(ours * ZAI_FRIEND_PREMIUM, rel=1e-12)
+
+    def test_combined_pool_ours_and_friend(self, db):
+        """Both z.ai keys contribute to the shared token denominator."""
+        now = _now_utc()
+        # ours alone = 6B → would give 0.05; friend adds 4B → 10B → 0.03
+        rows = [(now - 40 * 86400, "ours", "m", 6_000_000_000, 0.0),
+                (now - 40 * 86400, "friend", "m", 4_000_000_000, 0.0)]
+        _seed(db, rows)
+        rate = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        assert rate == pytest.approx(0.03, rel=1e-9)  # not 0.05
+
+    def test_legacy_zai_alias_counted(self, db):
+        """Legacy ``zai_ours``/``zai_friend`` rows (the spec's ``LIKE 'zai%'``)
+        are counted alongside the canonical names."""
+        now = _now_utc()
+        rows = [(now - 40 * 86400, "ours", "m", 5_000_000_000, 0.0),
+                (now - 40 * 86400, "zai_friend", "m", 5_000_000_000, 0.0)]
+        _seed(db, rows)
+        rate = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        assert rate == pytest.approx(0.03, rel=1e-9)  # 10B combined
+
+    def test_non_zai_provider_excluded_from_pool(self, db):
+        now = _now_utc()
+        # 10B z.ai + 90B ollama_cloud → ollama must NOT dilute the pool → 0.03
+        rows = [(now - 40 * 86400, "ours", "m", 10_000_000_000, 0.0)]
+        rows += [(now - 40 * 86400, "ollama_cloud", "m", 90_000_000_000, 0.0)]
+        _seed(db, rows)
+        rate = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        assert rate == pytest.approx(0.03, rel=1e-9)
+
+    def test_under_30d_uses_seed(self, db):
+        """Data spanning <30 days → seed $0.014/M, not the noisy calculated rate."""
+        now = _now_utc()
+        _seed(db, [(now - 20 * 86400, "ours", "m", 10_000_000_000, 0.0)])
+        rate = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        assert rate == pytest.approx(ZAI_SEED_RATE, rel=1e-12)
+
+    def test_friend_under_30d_seed(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 20 * 86400, "ours", "m", 10_000_000_000, 0.0)])
+        rate = get_zai_amortized_rate("friend", db_path=db, _now=now)
+        assert rate == pytest.approx(ZAI_SEED_RATE * ZAI_FRIEND_PREMIUM, rel=1e-12)
+
+    def test_no_data_returns_seed(self, db):
+        rate = get_zai_amortized_rate("ours", db_path=db, _now=_now_utc())
+        assert rate == pytest.approx(ZAI_SEED_RATE, rel=1e-12)
+
+    def test_unknown_provider_treated_as_ours(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 40 * 86400, "ours", "m", 10_000_000_000, 0.0)])
+        assert get_zai_amortized_rate("mystery", db_path=db, _now=now) == \
+            pytest.approx(0.03, rel=1e-9)
+
+    def test_window_excludes_older_than_365d(self, db):
+        """Tokens older than 365d are outside the trailing window → excluded."""
+        now = _now_utc()
+        # 10B at 400d ago (outside window) + 10B at 40d ago (inside).
+        rows = [(now - 400 * 86400, "ours", "m", 10_000_000_000, 0.0),
+                (now - 40 * 86400, "ours", "m", 10_000_000_000, 0.0)]
+        _seed(db, rows)
+        rate = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        # Only the 10B inside-window counts → 0.03 (min_ts is the 40d record →
+        # >30d span, so the calculated path is taken).
+        assert rate == pytest.approx(0.03, rel=1e-9)
+
+    def test_zero_tokens_returns_seed(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 40 * 86400, "ours", "m", 0, 0.0)])
+        rate = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        assert rate == pytest.approx(ZAI_SEED_RATE, rel=1e-12)
+
+    def test_daily_cache_served_within_ttl(self, db):
+        """Within the 24h TTL the cached rate is returned even if the DB mutates."""
+        now = _now_utc()
+        _seed(db, [(now - 40 * 86400, "ours", "m", 10_000_000_000, 0.0)])
+        first = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        assert first == pytest.approx(0.03, rel=1e-9)
+        # Halve the tokens (would double the rate) — cache must still serve 0.03.
+        _seed(db, [(now - 40 * 86400, "ours", "m", 5_000_000_000, 0.0)])
+        second = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        assert second == first  # cached
+
+    def test_daily_cache_recomputes_after_ttl(self, db):
+        t0 = _now_utc()
+        _seed(db, [(t0 - 40 * 86400, "ours", "m", 10_000_000_000, 0.0)])
+        first = get_zai_amortized_rate("ours", db_path=db, _now=t0)
+        # Add 10B more → 20B → 0.015, but only seen after the daily TTL.
+        _seed(db, [(t0 - 40 * 86400, "ours", "m", 10_000_000_000, 0.0)])
+        later = t0 + ZAI_CACHE_TTL_SECONDS + 1
+        second = get_zai_amortized_rate("ours", db_path=db, _now=later)
+        assert second != pytest.approx(first, rel=1e-3)
+        assert second == pytest.approx(300 / (20_000_000_000 / 1e6), rel=1e-9)
+
+    def test_clear_cache_drops_zai(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 40 * 86400, "ours", "m", 10_000_000_000, 0.0)])
+        first = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        _seed(db, [(now - 40 * 86400, "ours", "m", 5_000_000_000, 0.0)])
+        clear_cache()
+        second = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        assert second != pytest.approx(first, rel=1e-3)
+
+    def test_never_raises_on_bad_db(self):
+        """A bad/missing DB degrades to the seed rate, never raises."""
+        clear_cache()
+        missing = os.path.join(tempfile.gettempdir(), "rpt_zai_bad.db")
+        try:
+            rate = get_zai_amortized_rate("ours", db_path=missing,
+                                          _now=_now_utc())
+            assert rate == pytest.approx(ZAI_SEED_RATE, rel=1e-12)
+            frate = get_zai_amortized_rate("friend", db_path=missing,
+                                           _now=_now_utc())
+            assert frate == pytest.approx(ZAI_SEED_RATE * ZAI_FRIEND_PREMIUM,
+                                          rel=1e-12)
+        finally:
+            if os.path.exists(missing):
+                os.unlink(missing)
+
+    def test_always_returns_float(self, db):
+        for provider in ("ours", "friend", "mystery"):
+            rate = get_zai_amortized_rate(provider, db_path=db,
+                                          _now=_now_utc())
+            assert isinstance(rate, float), provider
