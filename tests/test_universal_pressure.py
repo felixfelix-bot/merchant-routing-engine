@@ -345,15 +345,17 @@ class TestZaiPressureIntegration:
 
     @pytest.fixture
     def rates(self):
-        """Simple converged rates dict for LiveRouter."""
-        return {"glm-5.2": 0.024}
+        """Converged rates dict for LiveRouter (provider names, not models)."""
+        return {
+            "ours": 0.001, "friend": 0.029, "ollama_cloud": 0.024,
+            "ppq": 0.14, "openrouter": 0.135, "deepinfra": 1.30,
+        }
 
     def _make_router(self, rates):
         from src.live_router import LiveRouter
         db_path = _make_usage_db()
         return db_path, LiveRouter(db_path=db_path, converged_rates=rates)
 
-    @pytest.mark.skip(reason="z.ai pressure wiring in select_failover not yet complete — _compute_zai_pressure exists but isn't called in the routing path")
     def test_price_rises_with_usage(self, rates, monkeypatch):
         """GATE: z.ai effective price rises as 5h usage goes 60%→100%.
 
@@ -426,7 +428,6 @@ class TestZaiPressureIntegration:
         finally:
             os.unlink(db_path)
 
-    @pytest.mark.skip(reason="z.ai pressure wiring in select_failover not yet complete — see test_price_rises_with_usage")
     def test_superposition_in_integration(self, rates):
         """GATE: session x weekly x monthly superposition in live_router.
 
@@ -697,7 +698,6 @@ class TestCreditPressureIntegration:
             finally:
                 os.unlink(db_path)
 
-    @pytest.mark.skip(reason="credit pressure wiring in select_failover not yet complete")
     def test_exhausted_openrouter_is_inf(self, rates):
         """GATE: OpenRouter with $10 fully spent → +inf → breaker tripped."""
         from src.live_router import LiveRouter
