@@ -584,7 +584,10 @@ function updateQuota(snap){
     const pct=clampPct(kk.used_pct);
     const cls=pct<50?'green':(pct<80?'yellow':'red');
     const healthyTag = kk.healthy === false ? ' · LOCKED' : '';
-    return `<div class="qb"><div class="qb-top"><span class="qb-name">${KEY_LABEL[k]||k.toUpperCase()}</span><span class="qb-pct" style="color:var(--${cls==='green'?'green':cls==='yellow'?'yellow':'red'})">${pct.toFixed(1)}%</span></div><div class="qb-track"><div class="qb-fill ${cls}" style="width:${pct}%"></div></div><div class="qb-meta"><span>${fmtTok(kk.remaining)} tok remaining${healthyTag}</span><span>${kk.resets_in_min!=null?'resets in '+kk.resets_in_min+'m':'—'}</span></div></div>`;
+    const weeklyTag = kk.weekly_pct!=null ? ` · weekly ${kk.weekly_pct.toFixed(1)}%` : '';
+    const noteTag = kk.note ? ` · ${kk.note}` : '';
+    const remainStr = kk.remaining!=null ? fmtTok(kk.remaining)+' tok remaining' : (kk.note||'no cap');
+    return `<div class="qb"><div class="qb-top"><span class="qb-name">${KEY_LABEL[k]||k.toUpperCase()}</span><span class="qb-pct" style="color:var(--${cls==='green'?'green':cls==='yellow'?'yellow':'red'})">${pct.toFixed(1)}%${weeklyTag}</span></div><div class="qb-track"><div class="qb-fill ${cls}" style="width:${pct}%"></div></div><div class="qb-meta"><span>${remainStr}${healthyTag}${noteTag}</span><span>${kk.resets_in_min!=null?'resets in '+kk.resets_in_min+'m':'—'}</span></div></div>`;
   }).join('');
 }
 

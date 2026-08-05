@@ -436,6 +436,18 @@ async function computeQuota(): Promise<any> {
       }
     }
   }
+  // Cumulative token tracking from api_calls table (5h session + 7d weekly windows)
+  // This provides a secondary confirmation of usage independent of the API response.
+  const nowS = Math.floor(Date.now() / 1000);
+  const sessionWindowStart = nowS - 5 * 3600;  // 5h
+  const weeklyWindowStart = nowS - 7 * 86400;  // 7d
+  const ollamaSessionTokens = qone(zaiDb,
+    `SELECT COALESCE(SUM(total_tokens),0) v FROM api_calls WHERE key_name='ollama_cloud' AND ts > ?`,
+    [sessionWindowStart])?.v || 0;
+  const ollamaWeeklyTokens = qone(zaiDb,
+    `SELECT COALESCE(SUM(total_tokens),0) v FROM api_calls WHERE key_name='ollama_cloud' AND ts > ?`,
+    [weeklyWindowStart])?.v || 0;
+
   out.ollama = {
     used_pct: ollamaSessionPct,
     weekly_pct: ollamaWeeklyPct,
@@ -443,6 +455,8 @@ async function computeQuota(): Promise<any> {
     weekly_usage: round(ollamaWeeklyUsage, 4),
     session_limit: { window: "5h", usage: round(ollamaSessionUsage, 4), usage_pct: ollamaSessionPct },
     weekly_limit: { window: "7d", usage: round(ollamaWeeklyUsage, 4), usage_pct: ollamaWeeklyPct },
+    session_tokens: ollamaSessionTokens,
+    weekly_tokens: ollamaWeeklyTokens,
     extra_usage: ollamaExtraUsage,
     extra_usage_rate: ollamaExtraUsageRate,
     billing_mode: ollamaBillingMode,
