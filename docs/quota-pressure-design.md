@@ -1,6 +1,7 @@
 # Quota-Pressure Pricing: Continuous Ollama Price Function
 
-> **Status:** Design — ready for implementation review
+> **Status:** Implemented (RP-PRICING shipped quadratic ramp 2026-08-05; **RP-EXP
+> superseded the curve with a rational asymptote** 2026-08-05 — see §3 & §8)
 > **Author:** Pricing engine analysis (subagent)
 > **Date:** 2026-08-05
 > **Replaces:** The step-function `extra_usage_multiplier` (regime → fixed multiplier)
@@ -114,49 +115,67 @@ longer drives pricing.
 
 ## 3. Mathematical Model
 
-### 3.1 The pressure function
+> **RP-EXP (2026-08-05) superseded the original quadratic ramp** described in the
+> first draft of this section. The curve is now a **rational asymptote** that
+> diverges to a true **+∞ at 100% usage**, so the optimizer can never keep
+> Ollama once the quota is full — it always reroutes to a cheaper alternative
+> first. The quadratic ramp (which only reached 4.17× at 100%) is retained
+> below as historical context; the live curve is §3.1.
 
-For each quota window (session, weekly):
+### 3.1 The pressure function (RP-EXP, live)
 
 ```
-              ┌ 1.0                                         if u ≤ onset
-pressure(u) = ┤
-              └ 1 + (A - 1) × ((u - onset) / (1 - onset))²   if u > onset
+              ┌ 1.0                          if u ≤ onset
+pressure(u) = ┤ 1 + K · t / (1 − t)          if onset < u < 1.0
+              └ +∞                           if u ≥ 1.0
+
+   where t = (u − onset) / (1 − onset)    [maps (onset,1) → (0,1)]
+         K = (extra_rate / base_rate) − 1 = EXTRA_USAGE_MULTIPLIER − 1  (≈3.17)
 ```
 
 Where:
-- `u` = usage fraction (0.0–1.0+; can exceed 1.0 for over-quota)
-- `onset` = usage at which pressure begins (default 0.75 = 75%)
-- `A` = asymptotic multiplier at u = 1.0 (default = `EXTRA_USAGE_MULTIPLIER` ≈ 4.17)
+- `u` = usage fraction (0.0–1.0+); the worst window governs (see below).
+- `onset` = usage at which pressure begins (**default 0.70 = 70%** in RP-EXP;
+  was 0.75 in the quadratic draft).
+- `K` = steepness, derived from the extra-rate/base-rate ratio (≈3.17).
 
-The overall `quota_pressure_factor` takes the **MAX** across both windows
-(worst case governs — same pattern as `pace_factor_multi`):
+The overall `quota_pressure_factor` takes the **MAX** of the session and weekly
+fractions (worst case governs — same pattern as `pace_factor_multi`).
 
-```
-quota_pressure = max(pressure(session_usage), pressure(weekly_usage))
-```
+**Key property:** at the midpoint of the ramp (`u = onset + 0.5·(1−onset) = 0.85`)
+the multiplier equals `1 + K = EXTRA_USAGE_MULTIPLIER` (≈4.17× → $0.10/M, the
+real extra-usage rate). Past the midpoint it diverges to **+∞** as u → 1.0.
 
-### 3.2 Why quadratic?
+### 3.2 Why a rational asymptote (+∞ at 100%)?
 
-A linear ramp (like scarcity) distributes the pressure uniformly across the
-onset→full range. A **quadratic** ramp keeps the penalty near 1.0 for most of
-the range and concentrates the steep rise near the end — mirroring the real
-physics: the probability and cost of hitting the extra-usage cliff accelerate
-non-linearly as you approach 100%.
+RP-EXP (Felix's refinement) requires that the price **literally become infinite
+at 100% usage** so the optimizer provably never selects Ollama once the quota is
+exhausted — "the router ALWAYS finds a cheaper alternative first." The rational
+form `1 + K·t/(1−t)` achieves a true vertical asymptote at u = 1.0 (whereas the
+earlier quadratic ramp only reached 4.17× and was capped there).
 
-### 3.3 Worked example (default parameters: onset=0.75, A=4.17)
+- Below the midpoint (~85%) the curve is gentle — Ollama stays cheapest while
+  there is headroom.
+- At the midpoint it equals the extra-usage rate (the real cost signal).
+- Above the midpoint it accelerates sharply, diverging to +∞ at 100%.
+
+**Exclusive models** (`kimi-k3`, `gpt-oss`, …) are unaffected by the +∞:
+`live_router` short-circuits them to `ollama_cloud` *before* the price
+comparison, so a model with no alternative is never priced out. Non-exclusive
+models (GLM-5.2) reroute to z.ai automatically.
+
+### 3.3 Worked example (RP-EXP defaults: onset=0.70, K≈3.17, base=$0.024/M)
 
 | Session usage | Pressure | Ollama effective ($/M) | z.ai friend off-peak ($/M) | z.ai friend peak ($/M) | Cheaper? |
 |---|---|---|---|---|---|
 | 50% | 1.00 | $0.024 | $0.029 | $0.087 | **Ollama** |
-| 75% | 1.00 | $0.024 | $0.029 | $0.087 | **Ollama** |
-| 80% | 1.21 | $0.029 | $0.029 | $0.087 | tie (off-peak) |
-| 85% | 1.62 | $0.039 | $0.029 | $0.087 | **z.ai** (off-peak) / **Ollama** (peak) |
-| 90% | 2.14 | $0.051 | $0.029 | $0.087 | **z.ai** (off-peak) / **Ollama** (peak) |
-| 95% | 3.03 | $0.073 | $0.029 | $0.087 | **z.ai** (off-peak) / **Ollama** (peak) |
-| 98% | 3.70 | $0.089 | $0.029 | $0.087 | **z.ai** (both) |
-| 100% | 4.17 | $0.100 | $0.029 | $0.087 | **z.ai** (both) |
-| 110% | 6.37 | $0.153 | $0.029 | $0.087 | **z.ai** (both) |
+| 70% | 1.00 | $0.024 | $0.029 | $0.087 | **Ollama** (onset) |
+| 80% | 2.58 | $0.062 | $0.029 | $0.087 | **z.ai** (off-peak) / **Ollama** (peak) |
+| 85% | 4.17 | $0.100 | $0.029 | $0.087 | **z.ai** (both) — midpoint = extra-usage rate |
+| 90% | 7.33 | $0.176 | $0.029 | $0.087 | **z.ai** (both, > openrouter $0.135) |
+| 95% | 16.8 | $0.404 | $0.029 | $0.087 | **z.ai** (both, > deepinfra) |
+| 99% | ~93 | $2.23 | $0.029 | $0.087 | **z.ai** (unreachable) |
+| 100% | +∞ | unreachable | $0.029 | $0.087 | **always rerouted** |
 
 > Note: scarcity applies to both providers equally, so it cancels in the
 > comparison. The crossover is driven purely by the pressure multiplier.
@@ -165,25 +184,27 @@ non-linearly as you approach 100%.
 
 | Scenario | Ollama usage at crossover | Why |
 |---|---|---|
-| Off-peak (z.ai = $0.029) | **~80%** | $0.024 × 1.21 ≈ $0.029 |
-| Peak (z.ai = $0.087) | **~98%** | $0.024 × 3.70 ≈ $0.089 |
+| Off-peak (z.ai = $0.029) | **~72%** | $0.024 × (1+K·t/(1−t)) = $0.029 → t ≈ 0.062 |
+| Peak (z.ai = $0.087) | **~84%** | $0.024 × (1+K·t/(1−t)) = $0.087 → t ≈ 0.453 |
 
-This is exactly the desired behaviour:
-- **Off-peak**: z.ai is cheap ($0.029), so we proactively reroute at 80% Ollama
-  usage — plenty of warning before the cliff.
-- **Peak**: z.ai is expensive ($0.087), so we squeeze Ollama until ~98% —
-  maximizing the value of the cheaper provider during expensive hours.
+RP-EXP crossovers are **earlier** than the quadratic draft (~80% / ~98%) because
+the rational curve is steeper. This is intended: the price signal turns on
+sooner, rerouting to z.ai with more headroom remaining.
+- **Off-peak**: z.ai is cheap ($0.029) → reroute at ~72% Ollama usage.
+- **Peak**: z.ai is expensive ($0.087) → squeeze Ollama until ~84%.
 - The optimizer handles this automatically — **no peak/off-peak special cases**.
 
 ### 3.5 Parameters (tunable via env vars)
 
 | Parameter | Env var | Default | Meaning |
 |---|---|---|---|
-| `onset` | `OLLAMA_PRESSURE_ONSET` | 0.75 | Usage fraction where pressure begins |
-| `A` (asymptote) | `OLLAMA_EXTRA_USAGE_MULTIPLIER` (existing) | 4.17 | Multiplier at 100% usage (= extra_rate / base_rate) |
+| `onset` | `OLLAMA_QUOTA_PRESSURE_ONSET` | 0.70 | Usage fraction where pressure begins |
+| `K` (steepness) | — (derived) | 3.17 | `(extra_rate / base_rate) − 1`, via `EXTRA_USAGE_MULTIPLIER` |
 
-The onset and asymptote are the only two knobs. They are sufficient to tune the
-crossover behaviour without changing the function shape.
+The onset is the only direct knob; `K` is derived from the extra-rate/base-rate
+ratio (`OLLAMA_EXTRA_USAGE_MULTIPLIER`), keeping the curve's steepness tied to
+the real cost structure. The old `OLLAMA_QUOTA_PRESSURE_STEEPNESS` env var was
+**removed** in RP-EXP (the rational curve has no free steepness parameter).
 
 ---
 
