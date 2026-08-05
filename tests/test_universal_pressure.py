@@ -28,6 +28,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.pricing_engine import (
     quota_pressure_factor,
+    cold_start_pressure,
+    COLD_START_USAGE_SEED,
     ZAI_QUOTA_PRESSURE_ONSET,
     ZAI_QUOTA_PRESSURE_ASYMPTOTE,
     PPQ_QUOTA_PRESSURE_ONSET,
@@ -510,12 +512,44 @@ class TestCreditPressureParams:
 class TestComputeCreditPressure:
     """Test the _compute_credit_pressure helper (self-tracked balance)."""
 
-    def test_fresh_balance_no_pressure(self):
-        """No spend yet → u=0 → 1.0 (no penalty)."""
+    def test_cold_start_returns_conservative(self):
+        """GATE (Task 4): no spend rows at all → cold start → pressure > 1.0.
+
+        A blind paid endpoint (e.g. OpenRouter, known-exhausted) must NOT look
+        fresh. The conservative seed replaces the old optimistic return 1.0.
+        """
         from src.live_router import _compute_credit_pressure, _credit_spend_cache
         _credit_spend_cache.clear()
         db = _make_usage_db()
         try:
+            p = _compute_credit_pressure(
+                db, "deepinfra", 5.0,
+                onset=0.80, asymptote=1.5,
+            )
+            assert p > 1.0, f"cold start must be conservative, got {p}"
+            # Equals the curve value at the seed with onset=0 (asymptote 1.5).
+            assert p == pytest.approx(1.5)
+        finally:
+            os.unlink(db)
+
+    def test_fresh_balance_with_data_no_pressure(self):
+        """Rows exist but spend is 0 → genuinely fresh → u=0 → 1.0.
+
+        This is distinct from the cold-start case: here we HAVE data and it says
+        the balance is untouched, so there is no penalty.
+        """
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        db = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'deepinfra', 'glm-5.2', 0.0)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
             p = _compute_credit_pressure(
                 db, "deepinfra", 5.0,
                 onset=0.80, asymptote=1.5,
@@ -612,24 +646,30 @@ class TestComputeCreditPressure:
         finally:
             os.unlink(db)
 
-    def test_none_db_returns_one(self):
-        """No DB path → cold start → 1.0 (never raises)."""
+    def test_none_db_returns_conservative(self):
+        """No DB path → cold start (no data) → conservative pressure (> 1.0).
+
+        Never raises; a finite conservative value keeps routing safe.
+        """
         from src.live_router import _compute_credit_pressure, _credit_spend_cache
         _credit_spend_cache.clear()
         p = _compute_credit_pressure(
             None, "deepinfra", 5.0,
             onset=0.80, asymptote=1.5,
         )
-        assert p == pytest.approx(1.0)
+        assert p > 1.0
+        assert math.isfinite(p)
 
     def test_never_raises(self):
-        """Garbage input → 1.0."""
+        """Garbage/nonexistent input → conservative pressure, never raises."""
         from src.live_router import _compute_credit_pressure, _credit_spend_cache
         _credit_spend_cache.clear()
-        assert _compute_credit_pressure(
+        p = _compute_credit_pressure(
             "/nonexistent/path.db", "deepinfra", 5.0,
             onset=0.80, asymptote=1.5,
-        ) == pytest.approx(1.0)
+        )
+        assert p > 1.0
+        assert math.isfinite(p)
 
 
 class TestCreditPressureIntegration:
@@ -678,15 +718,17 @@ class TestCreditPressureIntegration:
             lr._credit_spend_cache.clear()
             db_path = _make_usage_db()
             try:
-                if spend > 0:
-                    conn = sqlite3.connect(db_path)
-                    conn.execute(
-                        "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
-                        "VALUES (?, 'deepinfra', 'glm-5.2', ?)",
-                        (time.time(), spend),
-                    )
-                    conn.commit()
-                    conn.close()
+                # Always insert a row so this is "tracked, fresh/low spend"
+                # (has_data=True), NOT a cold start (which would now seed the
+                # conservative pressure). spend=0 ⇒ cost=0 ⇒ u=0 ⇒ 1.0.
+                conn = sqlite3.connect(db_path)
+                conn.execute(
+                    "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                    "VALUES (?, 'deepinfra', 'glm-5.2', ?)",
+                    (time.time(), spend),
+                )
+                conn.commit()
+                conn.close()
                 router = LiveRouter(db_path=db_path, converged_rates=rates)
                 router.select_failover(
                     quota_state=self._full_quota_state(),
@@ -728,3 +770,110 @@ class TestCreditPressureIntegration:
             assert router._last_credit_pressures.get("openrouter") == math.inf
         finally:
             os.unlink(db_path)
+
+
+# ── 7. Cold-start pressure (Task 4 / ADR §Cold-Start Seeding) ───────────────
+
+
+class TestColdStartPressure:
+    """Test the cold_start_pressure() pure function — the Task 4 gate.
+
+    A blind paid endpoint (no balance/token data) must get a CONSERVATIVE
+    pressure (> 1.0), not the old optimistic 1.0.
+    """
+
+    def test_gate_returns_above_one(self):
+        """GATE (Task 4): cold-start pressure is strictly > 1.0."""
+        assert cold_start_pressure() > 1.0
+
+    def test_default_seed_is_half(self):
+        """COLD_START_USAGE_SEED defaults to 0.5 (conservative)."""
+        assert COLD_START_USAGE_SEED == pytest.approx(0.5)
+
+    def test_equals_curve_at_onset_zero(self):
+        """cold_start_pressure == quota_pressure_factor(seed, onset=0.0)."""
+        p = cold_start_pressure(asymptote=1.5, hard_limit=True)
+        expected = quota_pressure_factor(
+            COLD_START_USAGE_SEED, onset=0.0, asymptote=1.5, hard_limit=True,
+        )
+        assert p == pytest.approx(expected)
+
+    def test_equals_asymptote_at_default_seed(self):
+        """At seed 0.5 the curve lands exactly on the asymptote (1.5x).
+
+        onset=0.0, t=(0.5-0)/(1-0)=0.5 → 1 + K*0.5/0.5 = 1 + K = asymptote.
+        A moderate, short-lived bias until the first real balance query.
+        """
+        assert cold_start_pressure(asymptote=1.5) == pytest.approx(1.5)
+
+    def test_hard_limit_seed_below_one_is_finite(self):
+        """hard_limit=True is a no-op at seed 0.5 (< 1.0): finite, not +inf."""
+        p = cold_start_pressure(asymptote=1.5, hard_limit=True)
+        assert math.isfinite(p)
+        assert p > 1.0
+
+    def test_scales_with_asymptote(self):
+        """Larger asymptote ⇒ larger cold-start pressure (steeper curve)."""
+        assert cold_start_pressure(asymptote=1.5) < cold_start_pressure(asymptote=3.0)
+
+    def test_seed_zero_disables_penalty(self):
+        """A seed of 0.0 (onset=0.0, u=0.0) yields 1.0 — the tunable off-switch."""
+        assert quota_pressure_factor(0.0, onset=0.0, asymptote=1.5) == pytest.approx(1.0)
+
+
+# ── 8. _compute_ppq_pressure helper (cold-start + measured paths) ───────────
+
+
+class TestComputePpqPressure:
+    """Test _compute_ppq_pressure — PPQ credit-depletion pressure.
+
+    Cold start (no usable balance data) must return the conservative
+    cold-start pressure (> 1.0), not the old 1.0.
+    """
+
+    def test_no_data_returns_conservative(self):
+        """GATE (Task 4): empty entry → cold start → pressure > 1.0."""
+        from src.live_router import _compute_ppq_pressure
+        assert _compute_ppq_pressure({}) > 1.0
+
+    def test_missing_used_pct_conservative(self):
+        """Entry present but no used_pct key → cold start → > 1.0."""
+        from src.live_router import _compute_ppq_pressure
+        assert _compute_ppq_pressure({"remaining": 10.0, "total": 20.0}) > 1.0
+
+    def test_error_sentinel_conservative(self):
+        """Error sentinel (used_pct=999) = no usable data → cold start → > 1.0."""
+        from src.live_router import _compute_ppq_pressure
+        assert _compute_ppq_pressure({"used_pct": 999}) > 1.0
+        assert math.isfinite(_compute_ppq_pressure({"used_pct": 999}))
+
+    def test_below_onset_returns_one(self):
+        """used_pct=50 (below onset 0.80) → measured path → 1.0 (has data)."""
+        from src.live_router import _compute_ppq_pressure
+        assert _compute_ppq_pressure({"used_pct": 50.0}) == pytest.approx(1.0)
+
+    def test_above_onset_rises(self):
+        """used_pct=90 (above onset 0.80) → measured path → pressure > 1.0."""
+        from src.live_router import _compute_ppq_pressure
+        assert _compute_ppq_pressure({"used_pct": 90.0}) > 1.0
+
+    def test_exhausted_is_inf(self):
+        """used_pct=100 → hard_limit=True → +inf (no credits = no service)."""
+        from src.live_router import _compute_ppq_pressure
+        assert _compute_ppq_pressure({"used_pct": 100.0}) == math.inf
+
+    def test_cold_start_matches_helper(self):
+        """Cold-start value equals cold_start_pressure with PPQ asymptote."""
+        from src.live_router import _compute_ppq_pressure
+        p = _compute_ppq_pressure({})
+        assert p == pytest.approx(
+            cold_start_pressure(asymptote=PPQ_QUOTA_PRESSURE_ASYMPTOTE, hard_limit=True)
+        )
+
+    def test_never_raises(self):
+        """Garbage input → finite conservative pressure, never raises."""
+        from src.live_router import _compute_ppq_pressure
+        for garbage in ({"used_pct": "garbage"}, {"used_pct": None}, {"used_pct": [1, 2]}):
+            p = _compute_ppq_pressure(garbage)
+            assert math.isfinite(p)
+            assert p > 1.0

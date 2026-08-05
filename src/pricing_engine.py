@@ -629,6 +629,63 @@ def quota_pressure_factor_superimposed(
     return s * w
 
 
+# ── Cold-start seeding (Task 4 / ADR §Cold-Start Seeding) ───────────────────
+# For PAID endpoints with no balance/token data yet, we cannot assume a fresh
+# balance — an unmeasured provider (e.g. OpenRouter, known-exhausted at $0)
+# must not look cheaper than it really is. The ADR seeds the usage fraction to
+# 0.5 (assume 50% depleted) as a conservative bias away from blind endpoints.
+#
+# IMPORTANT: the ADR's own balance table shows usage 0.5 is "below onset — no
+# pressure" because every provider's onset (0.60–0.80) is ABOVE the seed. A
+# naive seed fed through the normal curve would therefore still yield 1.0 — the
+# exact optimism Task 4 eliminates. So cold_start_pressure() evaluates the seed
+# with onset=0.0: the protective onset gate exists for MEASURED providers (don't
+# penalise them prematurely), but a provider with NO data deserves a baseline
+# conservative penalty from the very first request.
+#
+# At the default seed (0.5) and asymptote (1.5) this returns 1.5x — a moderate,
+# short-lived bias that lasts only until the first real balance query lands
+# (within ~5 min). Subscription endpoints (z.ai, Ollama) are excluded by the
+# ADR: their quota/usage API is called on startup, so there is no cold-start
+# gap for them.
+COLD_START_USAGE_SEED: float = float(
+    os.environ.get("COLD_START_USAGE_SEED", "0.5")
+)
+
+
+def cold_start_pressure(asymptote: float = 1.5, hard_limit: bool = False) -> float:
+    """Conservative quota-pressure factor for an endpoint with NO data.
+
+    Returns the RP-EXP curve value at :data:`COLD_START_USAGE_SEED` evaluated
+    with ``onset=0.0``, so the seed always produces a penalty (``> 1.0``)
+    regardless of any provider's normal onset. This is the cold-start
+    replacement for the old optimistic ``return 1.0`` in the live_router
+    pressure helpers (``_compute_ppq_pressure``,
+    ``_compute_credit_pressure``) — see Task 4 / ADR §Cold-Start Seeding.
+
+    Args:
+        asymptote: Curve steepness (``K = asymptote - 1.0``). Defaults to 1.5
+            (the uniform asymptote all paid endpoints use). Forward the
+            provider's own asymptote when calling.
+        hard_limit: If True, returns +inf when the seed ``>= 1.0``. At the
+            default seed 0.5 this is irrelevant (0.5 < 1.0), so the result is
+            always finite — but the flag is honoured for consistency with
+            :func:`quota_pressure_factor`.
+
+    Returns:
+        Pressure multiplier ``> 1.0`` for any seed in ``(0, 1)``. Equals the
+        *asymptote* at seed 0.5 (e.g. ``1.5`` with the default asymptote).
+        Returns 1.0 when the seed is 0.0 (cold-start penalty disabled) and
+        ``+inf``/asymptote when the seed ``>= 1.0``.
+    """
+    return quota_pressure_factor(
+        COLD_START_USAGE_SEED,
+        onset=0.0,
+        asymptote=asymptote,
+        hard_limit=hard_limit,
+    )
+
+
 def health_factor(is_healthy: bool, recent_429: int = 0) -> float:
     """Backward-compatible wrapper around health_pricing_factor.
 

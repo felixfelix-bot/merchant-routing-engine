@@ -53,6 +53,7 @@ from src.pricing_engine import (
     EXTRA_USAGE_MULTIPLIER,
     quota_pressure_factor,
     quota_pressure_factor_superimposed,
+    cold_start_pressure,
     ZAI_QUOTA_PRESSURE_ONSET,
     ZAI_QUOTA_PRESSURE_ASYMPTOTE,
     PPQ_QUOTA_PRESSURE_ONSET,
@@ -311,19 +312,29 @@ def _compute_ppq_pressure(quota_entry: dict) -> float:
 
     Uses PPQ-specific parameters (onset=0.80, asymptote=1.5, hard_limit=True).
     PPQ is credit-based (no time windows): the usage fraction is derived from
-    ``used_pct`` in the quota_state entry. Returns 1.0 if no usage data
-    (cold start — fresh credits). At 100% credit depletion returns +inf
-    (no credits = no service).
+    ``used_pct`` in the quota_state entry. At 100% credit depletion returns
+    +inf (no credits = no service).
 
-    Never raises — on any error returns 1.0.
+    Cold start (Task 4 / ADR §Cold-Start Seeding): when there is no usable
+    balance data (``used_pct`` missing or an error sentinel), return the
+    conservative :func:`cold_start_pressure` (> 1.0) instead of the old
+    optimistic 1.0. A blind PPQ endpoint must not look cheaper than it is
+    until the first balance query lands.
+
+    Never raises — on any error returns the conservative cold-start pressure.
     """
     try:
         used_pct = quota_entry.get("used_pct")
         if used_pct is None:
-            return 1.0
+            # Cold start: no balance data yet → conservative seed.
+            return cold_start_pressure(
+                asymptote=PPQ_QUOTA_PRESSURE_ASYMPTOTE, hard_limit=True,
+            )
         val = float(used_pct)
-        if val >= 900:  # error sentinel
-            return 1.0
+        if val >= 900:  # error sentinel — no usable data → cold start
+            return cold_start_pressure(
+                asymptote=PPQ_QUOTA_PRESSURE_ASYMPTOTE, hard_limit=True,
+            )
         u = max(0.0, val / 100.0)
         return quota_pressure_factor(
             u,
@@ -332,7 +343,9 @@ def _compute_ppq_pressure(quota_entry: dict) -> float:
             hard_limit=True,
         )
     except Exception:
-        return 1.0
+        return cold_start_pressure(
+            asymptote=PPQ_QUOTA_PRESSURE_ASYMPTOTE, hard_limit=True,
+        )
 
 
 # ── Credit-depletion cache for OpenRouter / DeepInfra ───────────────────────
@@ -341,34 +354,45 @@ def _compute_ppq_pressure(quota_entry: dict) -> float:
 # but a routing decision may iterate many providers, so cache the SUM for a
 # short TTL (same window as CPVO — 5 min).
 _CREDIT_SPEND_CACHE_TTL = 300.0  # seconds
-_credit_spend_cache: dict[str, tuple[float, float]] = {}  # {key_name: (spend, ts)}
+_credit_spend_cache: dict[str, tuple[float, bool, float]] = {}  # {key_name: (spend, has_data, ts)}
 
 
-def _query_cumulative_spend(db_path: str | None, key_name: str) -> float:
-    """Return SUM(cost_usd) for *key_name* from the usage DB, cached 5 min.
+def _query_cumulative_spend(db_path: str | None, key_name: str) -> tuple[float, bool]:
+    """Return ``(SUM(cost_usd), has_any_rows)`` for *key_name*, cached 5 min.
 
-    Returns 0.0 on any error (treat as no spend recorded yet — conservative).
+    ``has_any_rows`` distinguishes a genuine COLD START (no spend recorded at
+    all) from a fresh-but-tracked balance (rows exist, spend may be 0). The
+    distinction drives the conservative cold-start seed in
+    :func:`_compute_credit_pressure` (Task 4): no rows ⇒ seed usage 0.5, not
+    the optimistic 0.0.
+
+    Returns ``(0.0, False)`` on any error (no usable data ⇒ cold start).
     """
     now = time.time()
     cached = _credit_spend_cache.get(key_name)
-    if cached is not None and (now - cached[1]) < _CREDIT_SPEND_CACHE_TTL:
-        return cached[0]
+    if cached is not None and (now - cached[2]) < _CREDIT_SPEND_CACHE_TTL:
+        return cached[0], cached[1]
     spend = 0.0
+    has_data = False
     if db_path:
         try:
             conn = sqlite3.connect(db_path, timeout=2)
             try:
                 row = conn.execute(
-                    "SELECT COALESCE(SUM(cost_usd), 0) FROM api_calls WHERE key_name = ?",
+                    "SELECT COALESCE(SUM(cost_usd), 0), COUNT(*) "
+                    "FROM api_calls WHERE key_name = ?",
                     (key_name,),
                 ).fetchone()
-                spend = float(row[0]) if row else 0.0
+                if row:
+                    spend = float(row[0])
+                    has_data = int(row[1]) > 0
             finally:
                 conn.close()
         except Exception:
             spend = 0.0
-    _credit_spend_cache[key_name] = (spend, now)
-    return spend
+            has_data = False
+    _credit_spend_cache[key_name] = (spend, has_data, now)
+    return spend, has_data
 
 
 def _compute_credit_pressure(
@@ -396,14 +420,22 @@ def _compute_credit_pressure(
         asymptote: Factor at the ramp midpoint (uniform 1.5).
 
     Returns:
-        Pressure multiplier >= 1.0, or +inf when balance is exhausted.
+        Pressure multiplier >= 1.0, or +inf when balance is exhausted. With no
+        spend rows at all (cold start), returns the conservative
+        :func:`cold_start_pressure` (> 1.0) rather than 1.0.
 
-    Never raises — on any error returns 1.0 (cold start, no penalty).
+    Never raises — on any error returns the conservative cold-start pressure.
     """
     try:
         if starting_balance <= 0:
             return math.inf
-        spend = _query_cumulative_spend(db_path, key_name)
+        spend, has_data = _query_cumulative_spend(db_path, key_name)
+        if not has_data:
+            # Cold start: no spend rows at all → conservative seed (Task 4 /
+            # ADR §Cold-Start Seeding), NOT the optimistic 1.0 the old u=0
+            # path produced. A blind paid endpoint (e.g. OpenRouter,
+            # known-exhausted) must not look fresh until real data lands.
+            return cold_start_pressure(asymptote=asymptote, hard_limit=True)
         remaining = starting_balance - spend
         if remaining <= 0:
             # Exhausted balance → price infinity.
@@ -416,7 +448,7 @@ def _compute_credit_pressure(
             hard_limit=True,
         )
     except Exception:
-        return 1.0
+        return cold_start_pressure(asymptote=asymptote, hard_limit=True)
 
 
 # All providers that are NOT z.ai — these are the failover candidates
