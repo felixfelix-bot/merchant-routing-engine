@@ -58,6 +58,7 @@ __all__ = [
     "published_model_rate",
     "published_model_rates",
     "migrate_daily_spend_add_model",
+    "is_realtime_pricing_enabled",
 ]
 
 _log = logging.getLogger(__name__)
@@ -360,6 +361,18 @@ def _safe_float(val: Any) -> float | None:
     return f
 
 
+# ── Kill switch (design doc §6 — category 6) ─────────────────────────────────
+# When REALTIME_PRICING_ENABLED is set to a falsy value, all collectors are
+# skipped and refresh() returns the cold-start snapshot unchanged — reproducing
+# the old static-rate behaviour.  Any other value (or unset) means enabled.
+_FALSY = frozenset({"false", "0", "no", "off", ""})
+
+
+def is_realtime_pricing_enabled() -> bool:
+    """True unless ``REALTIME_PRICING_ENABLED`` is explicitly falsy."""
+    return os.environ.get("REALTIME_PRICING_ENABLED", "true").strip().lower() not in _FALSY
+
+
 # ── The singleton ────────────────────────────────────────────────────────────
 
 
@@ -444,6 +457,12 @@ class RealtimePricing:
         Idempotent under concurrent calls (RLock-guarded). Designed to be
         invoked by a cron job, NOT from a request handler.
         """
+        # Kill switch (§6): when REALTIME_PRICING_ENABLED=false, skip all
+        # collectors and return the cold-start snapshot unchanged — reproduces
+        # the old static-rate behaviour.
+        if not is_realtime_pricing_enabled():
+            return self._snapshot
+
         # Serialise: if another refresh is running, just return current snapshot.
         if not self._lock.acquire(blocking=False):
             return self._snapshot

@@ -799,3 +799,254 @@ class TestPublishedModelPrices:
         assert snap.by_provider["openrouter"].source == SRC_PUBLISHED
         assert snap.by_provider["openrouter"].rate_per_m == pytest.approx(0.135)
 
+
+# ── RP-2 §4: Validation against known-real numbers ────────────────────────────
+#
+# The cold-start seeds encode MEASURED values from docs/extra-usage-real-data-
+# analysis.md. These tests guard the provenance so a typo in DEFAULT_COLD_START
+# RATES is caught immediately.
+
+
+class TestKnownRealNumbers:
+    """Assert that seed/snapshot rates fall within the known-real bounds."""
+
+    def test_ollama_cloud_included_rate(self):
+        """ollama_cloud included: $0.0155/M (assert 0.012 < rate < 0.020)."""
+        rp = _make_instance()
+        ob = rp.get_rate("ollama_cloud")
+        assert 0.012 < ob.rate_per_m < 0.020, f"ollama_cloud rate {ob.rate_per_m} out of bounds"
+        # Also verify the constant itself
+        seed = DEFAULT_COLD_START_RATES["ollama_cloud"]
+        assert 0.012 < seed < 0.020
+
+    def test_ollama_extra_glm52_rate(self):
+        """ollama extra glm-5.2: $0.46/M (assert 0.30 < rate < 0.60)."""
+        seed = DEFAULT_COLD_START_RATES["ollama_cloud_extra_glm52"]
+        assert 0.30 < seed < 0.60, f"extra glm-5.2 rate {seed} out of bounds"
+        # Verify it surfaces via get_rate for the pseudo-provider key
+        rp = _make_instance()
+        ob = rp.get_rate("ollama_cloud_extra_glm52")
+        assert 0.30 < ob.rate_per_m < 0.60
+
+    def test_ollama_kimi3_rate(self):
+        """ollama kimi-k3: $7.53/M (assert 5.0 < rate < 10.0)."""
+        seed = DEFAULT_COLD_START_RATES["ollama_cloud_kimi3"]
+        assert 5.0 < seed < 10.0, f"kimi-k3 rate {seed} out of bounds"
+        rp = _make_instance()
+        ob = rp.get_rate("ollama_cloud_kimi3")
+        assert 5.0 < ob.rate_per_m < 10.0
+
+    def test_ours_rate_at_floor(self):
+        """ours: < $0.001/M (sunk cost, floored at MIN_EFFECTIVE_PRICE)."""
+        rp = _make_instance()
+        ob = rp.get_rate("ours")
+        assert ob.rate_per_m <= 0.001, f"ours rate {ob.rate_per_m} exceeds floor"
+        assert ob.rate_per_m >= MIN_EFFECTIVE_PRICE
+
+    def test_all_seed_rates_in_cold_start_snapshot(self):
+        """Every core-provider DEFAULT_COLD_START_RATES value surfaces verbatim
+        (floored) in the pre-refresh snapshot."""
+        rp = _make_instance()
+        snap = rp.snapshot()
+        core_providers = ("ours", "friend", "ollama_cloud", "ppq", "openrouter", "deepinfra")
+        for prov in core_providers:
+            expected = DEFAULT_COLD_START_RATES[prov]
+            floored = max(expected, MIN_EFFECTIVE_PRICE)
+            ob = snap.by_provider.get(prov)
+            assert ob is not None, f"{prov} missing from snapshot"
+            assert ob.rate_per_m == pytest.approx(floored, rel=0.01), (
+                f"{prov}: expected ~{floored}, got {ob.rate_per_m}"
+            )
+
+
+# ── RP-2 §5: Performance gates ────────────────────────────────────────────────
+
+
+class TestPerformance:
+    def test_snapshot_under_1us(self):
+        """snapshot() must complete in < 1µs (lock-free attribute read)."""
+        rp = _make_instance()
+        rp.refresh()  # populate the snapshot
+        # Warm up
+        for _ in range(100):
+            rp.snapshot()
+        # Measure
+        iters = 10_000
+        t0 = time.perf_counter_ns()
+        for _ in range(iters):
+            rp.snapshot()
+        elapsed_ns = time.perf_counter_ns() - t0
+        avg_ns = elapsed_ns / iters
+        assert avg_ns < 1_000, f"snapshot() took {avg_ns:.0f}ns avg (gate: 1000ns)"
+
+    def test_get_rate_under_1us(self):
+        """get_rate() is a hot-path lookup — must stay under 1µs."""
+        rp = _make_instance()
+        rp.refresh()
+        for _ in range(100):
+            rp.get_rate("ollama_cloud")
+        iters = 10_000
+        t0 = time.perf_counter_ns()
+        for _ in range(iters):
+            rp.get_rate("ollama_cloud")
+        elapsed_ns = time.perf_counter_ns() - t0
+        avg_ns = elapsed_ns / iters
+        assert avg_ns < 1_000, f"get_rate() took {avg_ns:.0f}ns avg (gate: 1000ns)"
+
+    def test_refresh_under_500ms(self):
+        """refresh() with temp DBs must complete in < 500ms."""
+        rp = _make_instance()
+        # Warm up (first refresh creates the schema table)
+        rp.refresh()
+        # Measure second refresh (steady-state)
+        t0 = time.perf_counter()
+        rp.refresh()
+        elapsed_ms = (time.perf_counter() - t0) * 1_000
+        assert elapsed_ms < 500, f"refresh() took {elapsed_ms:.1f}ms (gate: 500ms)"
+
+
+# ── RP-2 §6: Kill switch ──────────────────────────────────────────────────────
+
+
+class TestKillSwitch:
+    """REALTIME_PRICING_ENABLED=false reproduces old (static-rate) behaviour."""
+
+    def test_disabled_skips_collectors(self):
+        """With the kill switch off, refresh() is a no-op: no measured rates."""
+        # Seed data that WOULD produce measured rates if the switch were on.
+        mock_response = {
+            "activity": {
+                "glm-5.2": {"cost": 1.55, "total_tokens": 100_000_000, "request_count": 0},
+            },
+        }
+        today = time.strftime("%Y-%m-%d")
+        zai = _make_zai_db(daily_spend_rows=[(today, "deepinfra", 1.30, 1_000_000)])
+
+        with patch.dict(os.environ, {"REALTIME_PRICING_ENABLED": "false"}):
+            with patch("src.ollama_extra_usage.fetch_ollama_usage", return_value=mock_response):
+                rp = _make_instance(zai_db=zai)
+                rp.refresh()
+
+        # Every core provider must still be cold-start — collectors were skipped.
+        snap = rp.snapshot()
+        assert snap.refresh_count == 0
+        for prov in ("ours", "friend", "ollama_cloud", "ppq", "deepinfra"):
+            ob = snap.by_provider[prov]
+            assert ob.source == SRC_COLD_START, f"{prov} should be cold-start"
+            assert ob.is_measured is False
+
+    def test_disabled_get_provider_rates_returns_seeds(self):
+        """get_provider_rates() returns the seed values, not measured."""
+        from src.realtime_pricing import DEFAULT_COLD_START_RATES as SEEDS
+
+        with patch.dict(os.environ, {"REALTIME_PRICING_ENABLED": "false"}):
+            rp = _make_instance()
+            rp.refresh()
+            rates = rp.get_provider_rates()
+
+        for prov, expected in SEEDS.items():
+            if prov in rates:
+                floored = max(expected, MIN_EFFECTIVE_PRICE)
+                assert rates[prov] == pytest.approx(floored, rel=0.01), (
+                    f"{prov}: expected seed ~{floored}, got {rates[prov]}"
+                )
+
+    def test_enabled_by_default(self):
+        """When the env var is unset (default), realtime pricing is active."""
+        from src.realtime_pricing import is_realtime_pricing_enabled
+
+        # Ensure the var is truly absent
+        saved = os.environ.pop("REALTIME_PRICING_ENABLED", None)
+        try:
+            assert is_realtime_pricing_enabled() is True
+        finally:
+            if saved is not None:
+                os.environ["REALTIME_PRICING_ENABLED"] = saved
+
+    def test_falsy_values_disable(self):
+        from src.realtime_pricing import is_realtime_pricing_enabled
+
+        for val in ("false", "FALSE", "0", "no", "off", ""):
+            with patch.dict(os.environ, {"REALTIME_PRICING_ENABLED": val}):
+                assert is_realtime_pricing_enabled() is False, (
+                    f"value {val!r} should disable realtime pricing"
+                )
+
+    def test_truthy_values_enable(self):
+        from src.realtime_pricing import is_realtime_pricing_enabled
+
+        for val in ("true", "TRUE", "1", "yes", "on", "anything"):
+            with patch.dict(os.environ, {"REALTIME_PRICING_ENABLED": val}):
+                assert is_realtime_pricing_enabled() is True, (
+                    f"value {val!r} should enable realtime pricing"
+                )
+
+    def test_toggle_runtime(self):
+        """Toggling the env var between calls works (checked at call time)."""
+        mock_response = {
+            "activity": {
+                "glm-5.2": {"cost": 1.55, "total_tokens": 100_000_000, "request_count": 0},
+            },
+        }
+        # Enabled first: refresh produces measured rates
+        with patch("src.ollama_extra_usage.fetch_ollama_usage", return_value=mock_response):
+            rp = _make_instance()
+            rp.refresh()
+        assert rp.get_rate("ollama_cloud").source == SRC_OLLAMA_BILLING
+
+        # Now disable and refresh again: rate should NOT change (no-op)
+        measured_rate = rp.get_rate("ollama_cloud").rate_per_m
+        with patch.dict(os.environ, {"REALTIME_PRICING_ENABLED": "false"}):
+            with patch("src.ollama_extra_usage.fetch_ollama_usage",
+                       return_value={"activity": {"glm-5.2": {"cost": 999.0, "total_tokens": 100_000, "request_count": 0}}}):
+                rp.refresh()
+        assert rp.snapshot().by_provider["ollama_cloud"].source == SRC_OLLAMA_BILLING
+        assert rp.get_rate("ollama_cloud").rate_per_m == pytest.approx(measured_rate)
+
+
+# ── RP-2 §2: True 100-concurrent snapshot stress test ─────────────────────────
+
+
+class TestThreadSafetyStress:
+    """Category 2 hard requirement: 100 concurrent snapshot() during refresh()."""
+
+    def test_100_concurrent_snapshots_no_torn_reads(self):
+        """100 threads each call snapshot() in a tight loop while a writer
+        calls refresh().  No exceptions, every snapshot internally consistent."""
+        rp = _make_instance()
+        rp.refresh()  # seed a real snapshot
+
+        errors: list[Exception] = []
+        stop = threading.Event()
+
+        def reader():
+            try:
+                count = 0
+                while not stop.is_set() and count < 500:
+                    s = rp.snapshot()
+                    assert s.ts > 0
+                    # Internal consistency: every observation ts <= snapshot ts.
+                    for ob in s.by_provider.values():
+                        assert ob.ts <= s.ts + 5.0
+                    count += 1
+            except Exception as exc:
+                errors.append(exc)
+
+        def writer():
+            try:
+                for _ in range(50):
+                    rp.refresh()
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=reader, name=f"reader-{i}") for i in range(100)]
+        threads.append(threading.Thread(target=writer, name="writer"))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert not errors, f"{len(errors)} errors from 100 concurrent readers: {errors[:3]}"
+        # All reader threads actually ran
+        assert all(not t.is_alive() for t in threads), "a thread timed out"
+
