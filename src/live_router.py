@@ -71,6 +71,11 @@ from src.cpvo_calculator import CPVOCalculator
 from src.model_mapping import get_model
 from src.ollama_quota_tracker import get_quota_status, DEFAULT_SESSION_LIMIT
 from src.ollama_extra_usage import fetch_ollama_usage, get_extra_usage_status
+from src.real_price_tracker import (
+    get_real_rate,
+    get_zai_amortized_rate,
+    SEED_RATES as _RPT_SEED_RATES,
+)
 
 __all__ = ["LiveRouter"]
 
@@ -181,9 +186,13 @@ _OLLAMA_EXCLUSIVE_MODELS: frozenset[str] = frozenset({
 # Backward-compatible alias (older tests/code may reference _OLLAMA_ONLY_MODELS).
 _OLLAMA_ONLY_MODELS = _OLLAMA_EXCLUSIVE_MODELS
 
-# ── Converged rates (from replay_converged_rates.CONVERGED_COSTS) ────────────
-# These are the Kalman-converged base rates proven in the replay. When
-# ``converged_rates`` is passed to ``__init__``, they override these defaults.
+# ── Converged rates (cold-start fallback only) ──────────────────────────────
+# These hardcoded seeds back the PriceKalman filters at construction time.
+# When ``converged_rates`` is passed to ``__init__``, they are overridden.
+# When :data:`_DYNAMIC_RATES_ENABLED` is on and no override is passed, the
+# router instead seeds from :func:`_resolve_dynamic_base_rates` (real measured
+# rates from real_price_tracker); this dict then only serves as the
+# never-fail fallback for the resolver. See docs/REAL_PRICE_SYSTEM_DESIGN.md.
 _DEFAULT_CONVERGED_RATES: dict[str, float] = {
     "ours":          0.001,    # clamped from -0.000968
     "friend":        0.028983,
@@ -192,6 +201,80 @@ _DEFAULT_CONVERGED_RATES: dict[str, float] = {
     "openrouter":    0.135,
     "deepinfra":     1.30,
 }
+
+# ── P5-RATES: dynamic base rates from real_price_tracker ────────────────────
+# Kill switch (default OFF, matching every other pricing switch in this file).
+# When ON, LiveRouter seeds its PriceKalman filters from real measured rates
+# (cost_usd aggregates + z.ai amortization) instead of _DEFAULT_CONVERGED_RATES,
+# and a daemon thread refreshes them every _RATE_REFRESH_INTERVAL_SECONDS.
+#
+# ROUTING IMPLICATION (operator must read before enabling):
+#   The amortized z.ai rate (~$0.029/M) is a fully-loaded cost, much higher
+#   than the $0.001 marginal-cost seed. Routing optimizes MARGINAL cost
+#   (sunk-cost-insensitive), so enabling this makes z.ai look ~29x pricier to
+#   the optimizer and may shift failover toward ollama_cloud. Enable only after
+#   confirming that change is desired, or keep OFF to preserve current routing.
+_DYNAMIC_RATES_ENABLED: bool = (
+    os.environ.get("LIVE_ROUTER_DYNAMIC_RATES_ENABLED", "false").lower()
+    in ("1", "true", "yes")
+)
+
+#: How often the background refresh thread re-seeds the Kalman filters from the
+#: tracker. The tracker itself caches per-query for 5 min (z.ai: 24 h), so a
+#: 30-min default re-reads fresh aggregates without thrashing. Env-overridable.
+_RATE_REFRESH_INTERVAL_SECONDS: float = float(
+    os.environ.get("LIVE_ROUTER_RATE_REFRESH_INTERVAL_SECONDS", "1800")
+)
+
+# Per-provider measurement window for the dynamic resolver (hours). Mirrors
+# real_price_tracker.PROVIDER_WINDOW_HOURS; duplicated here so the resolver
+# stays explicit and auditable even if the tracker table is reordered.
+_ZAI_WINDOW_HOURS: float = 365.0 * 24.0      # 8760 — amortization window
+_OLLAMA_WINDOW_HOURS: float = 90.0 * 24.0    # 2160 — slow subscription
+_PAID_WINDOW_HOURS: float = 30.0 * 24.0      # 720  — ppq/deepinfra/openrouter
+_ZAI_PROVIDERS_RATES: frozenset[str] = frozenset({"ours", "friend"})
+
+
+def _resolve_dynamic_base_rates(db_path: str | None = None) -> dict[str, float]:
+    """Build the base-rate dict from real_price_tracker measurements.
+
+    Wiring (per P5-RATES spec):
+
+    * ``ours`` / ``friend`` — z.ai amortized rate
+      (:func:`get_zai_amortized_rate`): the flat-rate subscription cost spread
+      over trailing-365d token volume. The cost_usd layer cannot price flat-rate
+      keys (their marginal charge is ~$0), so the amortization IS the base rate.
+    * ``ollama_cloud`` — :func:`get_real_rate` over the 90-day window; falls
+      back to the seed when there is no measured data.
+    * ``ppq`` / ``deepinfra`` / ``openrouter`` — :func:`get_real_rate` over the
+      30-day window; falls back to the seed when there is no measured data.
+
+    Always returns a complete dict with every key in
+    :data:`_DEFAULT_CONVERGED_RATES`. NEVER raises — on any error for any
+    provider, that provider falls back to its seed (or the hardcoded default if
+    the seed lookup itself fails). Safe to call from import time and from the
+    hot path.
+    """
+    rates: dict[str, float] = {}
+    for name in _DEFAULT_CONVERGED_RATES:
+        fallback = _DEFAULT_CONVERGED_RATES[name]
+        try:
+            if name in _ZAI_PROVIDERS_RATES:
+                rate = get_zai_amortized_rate(name, db_path=db_path)
+            elif name == "ollama_cloud":
+                rate = get_real_rate(
+                    name, window_hours=_OLLAMA_WINDOW_HOURS, db_path=db_path
+                )
+            else:  # ppq / deepinfra / openrouter
+                rate = get_real_rate(
+                    name, window_hours=_PAID_WINDOW_HOURS, db_path=db_path
+                )
+            if rate is None or rate != rate or rate <= 0:  # None / NaN / non-pos
+                rate = _RPT_SEED_RATES.get(name, fallback)
+            rates[name] = float(rate)
+        except Exception:
+            rates[name] = fallback
+    return rates
 
 # ── Quota totals (approximate, for scarcity factor) ──────────────────────────
 _QUOTA_TOTALS: dict[str, float] = {
@@ -483,13 +566,19 @@ class LiveRouter:
         """Get or create the singleton instance. Thread-safe."""
         with cls._instance_lock:
             if cls._instance is None:
-                cls._instance = cls(db_path, converged_rates)
+                inst = cls(db_path, converged_rates)
+                cls._instance = inst
+                # Lazily start the periodic refresh daemon (no-op when the
+                # dynamic-rates kill switch is off).
+                inst._start_rate_refresh_thread()
             return cls._instance
 
     @classmethod
     def reset_instance(cls) -> None:
         """Reset the singleton (for testing)."""
         with cls._instance_lock:
+            if cls._instance is not None:
+                cls._instance._stop_rate_refresh_thread()
             cls._instance = None
 
     def __init__(
@@ -507,7 +596,12 @@ class LiveRouter:
                 Defaults to _DEFAULT_CONVERGED_RATES.
         """
         self._db_path = db_path
-        rates = converged_rates if converged_rates is not None else dict(_DEFAULT_CONVERGED_RATES)
+        if converged_rates is not None:
+            rates = dict(converged_rates)
+        elif _DYNAMIC_RATES_ENABLED:
+            rates = _resolve_dynamic_base_rates(db_path)
+        else:
+            rates = dict(_DEFAULT_CONVERGED_RATES)
 
         # Keep the unadjusted base rates for CPVO queries and fallback.
         self._base_rates: dict[str, float] = dict(rates)
@@ -587,6 +681,89 @@ class LiveRouter:
         self._cpvo: CPVOCalculator = CPVOCalculator(db_path)
         self._cpvo_cache: dict[str, float] | None = None
         self._cpvo_cache_ts: float = 0.0
+
+        # ── P5-RATES: dynamic base-rate refresh state ───────────────────────
+        # When _DYNAMIC_RATES_ENABLED, a daemon thread periodically calls
+        # refresh_base_rates() to re-seed the PriceKalman filters from the
+        # tracker. Thread is started lazily (first get_instance) so direct
+        # ``LiveRouter(...)`` construction in tests never spawns a thread.
+        self._rate_refresh_thread: threading.Thread | None = None
+        self._rate_refresh_stop: threading.Event = threading.Event()
+        self._last_rate_refresh_ts: float = 0.0
+
+    # ── P5-RATES: dynamic base-rate refresh ──────────────────────────────
+
+    def refresh_base_rates(self) -> dict[str, float]:
+        """Recompute base rates from real_price_tracker and feed the Kalman.
+
+        Recomputes :func:`_resolve_dynamic_base_rates` against this router's
+        DB path, then:
+
+        * Updates ``self._base_rates`` (read by CPVO queries and as a
+          fallback) to the fresh values.
+        * Feeds each fresh rate as an *observation* into the corresponding
+          PriceKalman via :meth:`PriceKalman.update`, so the filters converge
+          smoothly toward the measured rates rather than jumping.
+
+        Safe to call whether or not dynamic rates are enabled (when disabled
+        it is a cheap no-op-ish refresh against seeds). NEVER raises; any
+        resolver error leaves the existing rates untouched. Thread-safe
+        (acquires ``self._lock``). Returns the new ``_base_rates`` snapshot.
+        """
+        try:
+            fresh = _resolve_dynamic_base_rates(self._db_path)
+        except Exception:
+            return dict(self._base_rates)
+        with self._lock:
+            for name, rate in fresh.items():
+                self._base_rates[name] = rate
+                kalman = self._price_kalmans.get(name)
+                if kalman is not None:
+                    try:
+                        kalman.update(max(rate, MIN_EFFECTIVE_PRICE))
+                    except Exception:
+                        pass  # never let a Kalman update break the refresh
+            self._last_rate_refresh_ts = time.time()
+        return dict(self._base_rates)
+
+    def _start_rate_refresh_thread(self) -> None:
+        """Start the background refresh daemon (idempotent, at-most-once).
+
+        Only starts when ``_DYNAMIC_RATES_ENABLED`` is on. The thread sleeps
+        in small increments so a :meth:`reset_instance` / process exit can
+        prompt it to stop. Daemon=True so it never blocks shutdown.
+        """
+        if not _DYNAMIC_RATES_ENABLED:
+            return
+        if self._rate_refresh_thread is not None:
+            return
+        stop = self._rate_refresh_stop
+        interval = _RATE_REFRESH_INTERVAL_SECONDS
+
+        def _loop() -> None:
+            while not stop.is_set():
+                # Sleep in 5s slices so reset/exit is responsive.
+                waited = 0.0
+                while waited < interval and not stop.is_set():
+                    stop.wait(5.0)
+                    waited += 5.0
+                if stop.is_set():
+                    return
+                try:
+                    self.refresh_base_rates()
+                except Exception:
+                    pass  # daemon must never die from a refresh error
+
+        t = threading.Thread(target=_loop, name="live-router-rate-refresh",
+                             daemon=True)
+        self._rate_refresh_thread = t
+        t.start()
+
+    def _stop_rate_refresh_thread(self) -> None:
+        """Signal the refresh thread to stop (called on reset_instance)."""
+        self._rate_refresh_stop.set()
+        self._rate_refresh_thread = None
+        self._rate_refresh_stop = threading.Event()
 
     # ── Public API ───────────────────────────────────────────────────────
 
