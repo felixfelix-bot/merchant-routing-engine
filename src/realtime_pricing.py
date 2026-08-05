@@ -54,6 +54,10 @@ __all__ = [
     "SRC_ZAI_AMORTIZED",
     "MEASURED_SOURCES",
     "DEFAULT_COLD_START_RATES",
+    # ── PM-T5: per-model spend (daily_spend model column) ───────────────────
+    "published_model_rate",
+    "published_model_rates",
+    "migrate_daily_spend_add_model",
 ]
 
 _log = logging.getLogger(__name__)
@@ -113,6 +117,176 @@ _KALMAN_NOISE: Final[dict[str, float]] = {
 
 # Spend look-back window for DB-backed collectors (seconds)
 SPEND_WINDOW_S: Final = 7 * 86400  # 7 days
+
+# ── Per-model published list prices (PM-T5 fallback) ─────────────────────────
+# config/providers.yaml → external.<provider>.models.<model> carries
+# cost_per_1m_input / cost_per_1m_output. Until daily_spend is migrated to
+# carry a `model` column (see migrate_daily_spend_add_model), the per-model
+# resolution chain falls back to these published list prices (plan §3.6
+# step 3 / §3.5). Blended $/M = (cost_per_1m_input + cost_per_1m_output) / 2.
+
+_DEFAULT_PROVIDERS_YAML: str = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "config",
+    "providers.yaml",
+)
+
+
+def published_model_rate(
+    provider: str, model: str, providers_yaml: str | None = None
+) -> float | None:
+    """Published list-price $/M for one ``(provider, model)`` pair from
+    config/providers.yaml. Returns None if the model isn't listed. The
+    per-model fallback for the resolution chain (plan §3.6 step 3). Never
+    raises.
+    """
+    return published_model_rates(provider, providers_yaml).get(model)
+
+
+def published_model_rates(
+    provider: str, providers_yaml: str | None = None
+) -> dict[str, float]:
+    """All published per-model list prices ``{model: blended_$/M}`` for
+    *provider* from config/providers.yaml → ``external.<provider>.models``.
+    Blended rate is ``(cost_per_1m_input + cost_per_1m_output) / 2``. Returns
+    ``{}`` on any failure or missing section. Never raises.
+    """
+    path = providers_yaml or _DEFAULT_PROVIDERS_YAML
+    out: dict[str, float] = {}
+    try:
+        import yaml  # type: ignore[import-untyped]
+
+        with open(path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+        ext = data.get("external", {}) or {}
+        prov_cfg = ext.get(provider, {}) or {}
+        for model, mcfg in (prov_cfg.get("models", {}) or {}).items():
+            if not isinstance(mcfg, dict):
+                continue
+            cin = _safe_float(mcfg.get("cost_per_1m_input"))
+            cout = _safe_float(mcfg.get("cost_per_1m_output"))
+            if cin is None or cout is None:
+                continue
+            out[model] = (cin + cout) / 2.0
+    except Exception:
+        _log.debug(
+            "published model rates load failed for %s", provider, exc_info=True
+        )
+    return out
+
+
+def _spend_table_has_model(conn: sqlite3.Connection) -> bool:
+    """True iff a daily_spend table with a ``model`` column is attached to
+    *conn*. False when the table is absent or pre-migration (no model column).
+    Never raises.
+    """
+    try:
+        cols = conn.execute("PRAGMA table_info(daily_spend)").fetchall()
+    except Exception:
+        return False
+    return any((r[1] or "") == "model" for r in cols)
+
+
+def migrate_daily_spend_add_model(db_path: str) -> dict[str, object]:
+    """PM-T5 schema migration: give daily_spend a per-model dimension.
+
+    Adds a ``model TEXT NOT NULL DEFAULT 'unknown'`` column and upgrades the
+    primary key from ``(date, tier)`` to ``(date, tier, model)`` so the spend
+    collector can record one row per model per day. Existing rows are
+    back-filled to ``model='unknown'`` (aggregated onto the new key).
+
+    SQLite cannot ALTER a primary key, so the migration rebuilds the table:
+    create ``daily_spend_new`` → copy + aggregate → drop old → rename, all in
+    one ``BEGIN IMMEDIATE`` transaction. On any error it rolls back and leaves
+    the original table untouched.
+
+    Idempotent: a no-op (bar a NULL→'unknown' sweep) on an already-migrated
+    table. Safe on a DB without daily_spend (returns early). Never raises —
+    returns a report dict instead::
+
+        {"table_exists": bool, "had_model_column": bool,
+         "migrated": bool, "rows": int}
+    """
+    report: dict[str, object] = {
+        "table_exists": False,
+        "had_model_column": False,
+        "migrated": False,
+        "rows": 0,
+    }
+    try:
+        conn = sqlite3.connect(db_path, timeout=10)
+    except Exception:
+        _log.warning("migrate: cannot open %s", db_path, exc_info=True)
+        return report
+    try:
+        tbl = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='daily_spend'"
+        ).fetchone()
+        if not tbl:
+            return report
+        report["table_exists"] = True
+        has_model = _spend_table_has_model(conn)
+        report["had_model_column"] = has_model
+
+        if has_model:
+            # Already migrated — just sweep stray NULLs to 'unknown'.
+            conn.execute(
+                "UPDATE daily_spend SET model='unknown' WHERE model IS NULL"
+            )
+            conn.commit()
+            report["rows"] = conn.execute(
+                "SELECT COUNT(*) FROM daily_spend"
+            ).fetchone()[0]
+            return report
+
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            CREATE TABLE daily_spend_new (
+                date        TEXT    NOT NULL,
+                tier        TEXT    NOT NULL,
+                model       TEXT    NOT NULL DEFAULT 'unknown',
+                spend_usd   REAL    DEFAULT 0,
+                call_count  INTEGER DEFAULT 0,
+                token_count INTEGER DEFAULT 0,
+                PRIMARY KEY (date, tier, model)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO daily_spend_new
+                (date, tier, model, spend_usd, call_count, token_count)
+            SELECT date, tier, 'unknown',
+                   SUM(spend_usd), SUM(call_count), SUM(token_count)
+            FROM daily_spend
+            GROUP BY date, tier
+            """
+        )
+        conn.execute("DROP TABLE daily_spend")
+        conn.execute("ALTER TABLE daily_spend_new RENAME TO daily_spend")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_daily_spend_tier_date "
+            "ON daily_spend(tier, date)"
+        )
+        conn.commit()
+        report["migrated"] = True
+        report["rows"] = conn.execute(
+            "SELECT COUNT(*) FROM daily_spend"
+        ).fetchone()[0]
+        return report
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        _log.warning(
+            "daily_spend model migration failed for %s", db_path, exc_info=True
+        )
+        return report
+    finally:
+        conn.close()
 
 
 # ── Public data structures ───────────────────────────────────────────────────
@@ -636,16 +810,23 @@ class RealtimePricing:
         return self._measure_spend_tier("deepinfra", SRC_DEEPINFRA_ACTUAL)
 
     def _measure_openrouter_spend(self) -> dict[tuple[str, str | None], RateObservation]:
-        """OpenRouter: same pattern WHERE tier='openrouter'. If no measured
-        data, fall back to published list price (is_measured=False)."""
+        """OpenRouter: same daily_spend pattern WHERE tier='openrouter'.
+
+        With no measured data, fall back to **per-model** published list prices
+        from providers.yaml (PM-T5; is_measured=False). If providers.yaml has no
+        per-model entry for openrouter, fall back to the provider-level
+        published price.
+        """
         result = self._measure_spend_tier("openrouter", SRC_OPENROUTER_ACTUAL)
-        if not result:
-            now = time.time()
-            published = _PUBLISHED_PRICES.get("openrouter", 0.135)
-            result[("openrouter", None)] = RateObservation(
+        if result:
+            return result
+        now = time.time()
+        published = published_model_rates("openrouter", self._providers_yaml)
+        for model, rate in published.items():
+            result[("openrouter", model)] = RateObservation(
                 provider="openrouter",
-                model=None,
-                rate_per_m=_floor_rate(published),
+                model=model,
+                rate_per_m=_floor_rate(rate),
                 source=SRC_PUBLISHED,
                 is_measured=False,
                 confidence=_confidence(0, False),
@@ -653,41 +834,110 @@ class RealtimePricing:
                 sample_cost_usd=0.0,
                 ts=now,
             )
+        if result:
+            return result
+        # No per-model config either — provider-level published fallback.
+        result[("openrouter", None)] = RateObservation(
+            provider="openrouter",
+            model=None,
+            rate_per_m=_floor_rate(_PUBLISHED_PRICES.get("openrouter", 0.135)),
+            source=SRC_PUBLISHED,
+            is_measured=False,
+            confidence=_confidence(0, False),
+            sample_tokens=0,
+            sample_cost_usd=0.0,
+            ts=now,
+        )
         return result
 
     def _measure_spend_tier(
         self, tier: str, source: str
     ) -> dict[tuple[str, str | None], RateObservation]:
-        """Shared spend-table query for daily_spend-backed providers."""
+        """Shared spend-table query for daily_spend-backed providers.
+
+        PM-T5 — per-model: when daily_spend carries a ``model`` column (after
+        :func:`migrate_daily_spend_add_model`), emits one measured
+        :class:`RateObservation` per model (``GROUP BY model``) plus a
+        token-weighted provider-level ``(tier, None)`` aggregate — mirroring
+        :meth:`_measure_ppq_ledger`. Before the schema is migrated the query
+        stays provider-level (the original behaviour), so cold-start / measured
+        semantics for every provider are unchanged.
+        """
         now = time.time()
         cutoff_date = time.strftime("%Y-%m-%d", time.gmtime(now - SPEND_WINDOW_S))
+        result: dict[tuple[str, str | None], RateObservation] = {}
+        rows: list[tuple] | None = None
+        single: tuple | None = None
         try:
             conn = sqlite3.connect(self._zai_db, timeout=2)
             try:
-                row = conn.execute(
-                    "SELECT COALESCE(SUM(spend_usd), 0), COALESCE(SUM(token_count), 0) "
-                    "FROM daily_spend WHERE tier = ? AND date >= ?",
-                    (tier, cutoff_date),
-                ).fetchone()
+                if _spend_table_has_model(conn):
+                    rows = conn.execute(
+                        "SELECT model, COALESCE(SUM(spend_usd), 0), "
+                        "COALESCE(SUM(token_count), 0) "
+                        "FROM daily_spend WHERE tier = ? AND date >= ? "
+                        "GROUP BY model",
+                        (tier, cutoff_date),
+                    ).fetchall()
+                else:
+                    single = conn.execute(
+                        "SELECT COALESCE(SUM(spend_usd), 0), "
+                        "COALESCE(SUM(token_count), 0) "
+                        "FROM daily_spend WHERE tier = ? AND date >= ?",
+                        (tier, cutoff_date),
+                    ).fetchone()
             finally:
                 conn.close()
         except Exception:
             _log.debug("%s spend query failed", tier, exc_info=True)
             return {}
 
-        if not row:
-            return {}
-        spend = float(row[0] or 0)
-        tokens = int(row[1] or 0)
-        if tokens <= 0 or spend <= 0:
-            return {}
+        # ── Per-model path (migrated schema) ──────────────────────────────
+        if rows is not None:
+            total_cost = 0.0
+            total_tokens = 0
+            for model, cost, tokens in rows:
+                cost = float(cost or 0)
+                tokens = int(tokens or 0)
+                if tokens <= 0 or cost <= 0:
+                    continue
+                total_cost += cost
+                total_tokens += tokens
+                model = model or "unknown"
+                result[(tier, model)] = RateObservation(
+                    provider=tier,
+                    model=model,
+                    rate_per_m=_floor_rate(cost / (tokens / 1e6)),
+                    source=source,
+                    is_measured=True,
+                    confidence=_confidence(tokens, True),
+                    sample_tokens=tokens,
+                    sample_cost_usd=cost,
+                    ts=now,
+                )
+            if total_tokens > 0 and total_cost > 0:
+                result[(tier, None)] = RateObservation(
+                    provider=tier,
+                    model=None,
+                    rate_per_m=_floor_rate(total_cost / (total_tokens / 1e6)),
+                    source=source,
+                    is_measured=True,
+                    confidence=_confidence(total_tokens, True),
+                    sample_tokens=total_tokens,
+                    sample_cost_usd=total_cost,
+                    ts=now,
+                )
+            return result
 
-        rate = _floor_rate(spend / (tokens / 1e6))
-        return {
-            (tier, None): RateObservation(
+        # ── Provider-level path (pre-migration schema) ────────────────────
+        assert single is not None  # rows is None ⇒ single was queried
+        spend = float(single[0] or 0)
+        tokens = int(single[1] or 0)
+        if tokens > 0 and spend > 0:
+            result[(tier, None)] = RateObservation(
                 provider=tier,
                 model=None,
-                rate_per_m=rate,
+                rate_per_m=_floor_rate(spend / (tokens / 1e6)),
                 source=source,
                 is_measured=True,
                 confidence=_confidence(tokens, True),
@@ -695,7 +945,7 @@ class RealtimePricing:
                 sample_cost_usd=spend,
                 ts=now,
             )
-        }
+        return result
 
     # ── Persistence ──────────────────────────────────────────────────────
 

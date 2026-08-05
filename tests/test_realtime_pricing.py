@@ -30,6 +30,9 @@ from src.realtime_pricing import (
     RateObservation,
     RateSnapshot,
     RealtimePricing,
+    migrate_daily_spend_add_model,
+    published_model_rate,
+    published_model_rates,
 )
 from src.price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
 
@@ -564,3 +567,235 @@ class TestIntegration:
         snap = rp.refresh()
         assert snap is not None
         assert snap.refresh_count >= 1
+
+
+# ── PM-T5: per-model daily_spend (migration + GROUP BY + published fallback) ──
+
+
+def _make_zai_db_per_model(daily_spend_rows=None) -> str:
+    """A temp zai_usage.db whose daily_spend ALREADY has the `model` column
+    (post-migration schema). Rows: (date, tier, model, spend_usd, token_count).
+    """
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE api_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL, key_name TEXT, model TEXT,
+            total_tokens INTEGER DEFAULT 0, cost_usd REAL, cost_source TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE daily_spend (
+            date TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            model TEXT NOT NULL DEFAULT 'unknown',
+            spend_usd REAL DEFAULT 0,
+            call_count INTEGER DEFAULT 0,
+            token_count INTEGER DEFAULT 0,
+            PRIMARY KEY (date, tier, model)
+        )
+        """
+    )
+    for row in (daily_spend_rows or []):
+        conn.execute(
+            "INSERT INTO daily_spend (date, tier, model, spend_usd, token_count) "
+            "VALUES (?,?,?,?,?)",
+            row,
+        )
+    conn.commit()
+    conn.close()
+    return path
+
+
+class TestDailySpendMigration:
+    """migrate_daily_spend_add_model: idempotent, backfills 'unknown'."""
+
+    def test_adds_model_column_and_upgrades_pk(self):
+        """Pre-migration (no model col, PK date,tier) → model col + PK
+        (date,tier,model); existing rows backfilled to 'unknown'."""
+        today = time.strftime("%Y-%m-%d")
+        zai = _make_zai_db(daily_spend_rows=[
+            (today, "deepinfra", 1.30, 1_000_000),
+            (today, "openrouter", 0.135, 2_000_000),
+        ])
+        report = migrate_daily_spend_add_model(zai)
+        assert report["table_exists"] is True
+        assert report["had_model_column"] is False
+        assert report["migrated"] is True
+        assert report["rows"] == 2
+
+        conn = sqlite3.connect(zai)
+        # model column present.
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(daily_spend)")]
+        assert "model" in cols
+        # PK upgraded to (date, tier, model).
+        pk = conn.execute("PRAGMA index_list('daily_spend')").fetchall()
+        assert pk, "expected a primary-key index after migration"
+        # Rows backfilled to model='unknown', spend preserved.
+        rows = conn.execute(
+            "SELECT tier, model, spend_usd FROM daily_spend ORDER BY tier"
+        ).fetchall()
+        conn.close()
+        assert rows == [
+            ("deepinfra", "unknown", 1.30),
+            ("openrouter", "unknown", 0.135),
+        ]
+
+    def test_idempotent_on_already_migrated(self):
+        """Running twice is a no-op (no second rebuild, no data loss)."""
+        today = time.strftime("%Y-%m-%d")
+        zai = _make_zai_db(daily_spend_rows=[(today, "deepinfra", 1.30, 1_000_000)])
+        first = migrate_daily_spend_add_model(zai)
+        assert first["migrated"] is True
+        second = migrate_daily_spend_add_model(zai)
+        assert second["had_model_column"] is True
+        assert second["migrated"] is False
+        assert second["rows"] == 1
+        # Data still intact.
+        conn = sqlite3.connect(zai)
+        n = conn.execute("SELECT COUNT(*) FROM daily_spend").fetchone()[0]
+        conn.close()
+        assert n == 1
+
+    def test_safe_on_db_without_table(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        report = migrate_daily_spend_add_model(path)
+        os.unlink(path)
+        assert report["table_exists"] is False
+        assert report["migrated"] is False
+
+    def test_never_raises_on_unopenable_path(self):
+        report = migrate_daily_spend_add_model("/nonexistent/dir/db.sqlite")
+        assert report["migrated"] is False
+
+    def test_aggregates_duplicate_date_tier_rows(self):
+        """Multiple pre-migration rows sharing (date, tier) collapse onto one
+        backfilled 'unknown' row with summed spend/tokens."""
+        today = time.strftime("%Y-%m-%d")
+        zai = _make_zai_db(daily_spend_rows=[
+            (today, "deepinfra", 1.0, 500_000),
+            (today, "deepinfra", 0.5, 500_000),
+        ])
+        migrate_daily_spend_add_model(zai)
+        conn = sqlite3.connect(zai)
+        row = conn.execute(
+            "SELECT model, spend_usd, token_count FROM daily_spend "
+            "WHERE tier='deepinfra'"
+        ).fetchone()
+        conn.close()
+        assert row == ("unknown", 1.5, 1_000_000)
+
+
+class TestSpendTierPerModel:
+    """_measure_spend_tier: per-model GROUP BY when migrated; provider-level
+    otherwise."""
+
+    def test_per_model_groupby_emits_model_keys_and_aggregate(self):
+        """Migrated schema + two models → per-model measured obs + a
+        token-weighted provider-level (model=None) aggregate."""
+        today = time.strftime("%Y-%m-%d")
+        # flash: $0.14 / 1M tok → $0.14/M ; pro: $2.70 / 1M tok → $2.70/M
+        rows = [
+            (today, "deepinfra", "deepseek-v4-flash", 0.14, 1_000_000),
+            (today, "deepinfra", "deepseek-v4-pro", 2.70, 1_000_000),
+        ]
+        zai = _make_zai_db_per_model(daily_spend_rows=rows)
+        rp = _make_instance(zai_db=zai)
+        snap = rp.refresh()
+
+        flash = snap.by_provider_model.get(("deepinfra", "deepseek-v4-flash"))
+        pro = snap.by_provider_model.get(("deepinfra", "deepseek-v4-pro"))
+        agg = snap.by_provider_model.get(("deepinfra", None))
+        assert flash is not None and pro is not None and agg is not None
+        assert flash.source == SRC_DEEPINFRA_ACTUAL
+        assert flash.is_measured is True
+        assert flash.rate_per_m == pytest.approx(0.14, rel=0.01)
+        assert pro.rate_per_m == pytest.approx(2.70, rel=0.01)
+        # Aggregate is the token-weighted blend (1.42), distinct from either.
+        assert agg.rate_per_m == pytest.approx(1.42, rel=0.01)
+        assert flash.rate_per_m < agg.rate_per_m < pro.rate_per_m
+
+    def test_pre_migration_stays_provider_level(self):
+        """No model column → exactly one provider-level (model=None) obs; no
+        per-model keys. Backward compatible."""
+        today = time.strftime("%Y-%m-%d")
+        zai = _make_zai_db(daily_spend_rows=[(today, "deepinfra", 1.30, 1_000_000)])
+        rp = _make_instance(zai_db=zai)
+        snap = rp.refresh()
+        assert ("deepinfra", None) in snap.by_provider_model
+        # No per-model deepinfra keys before migration.
+        deepinfra_models = {m for (p, m) in snap.by_provider_model
+                            if p == "deepinfra" and m is not None}
+        assert deepinfra_models == set()
+        ob = snap.by_provider_model[("deepinfra", None)]
+        assert ob.source == SRC_DEEPINFRA_ACTUAL
+        assert ob.rate_per_m == pytest.approx(1.30, rel=0.01)
+
+    def test_migrate_then_refresh_yields_per_model(self):
+        """End-to-end: pre-migration DB → run migration → refresh now returns
+        per-model rows (the collector detects the new column at runtime)."""
+        today = time.strftime("%Y-%m-%d")
+        zai = _make_zai_db(daily_spend_rows=[(today, "deepinfra", 1.30, 1_000_000)])
+        # Before migration: provider-level only.
+        rp = _make_instance(zai_db=zai)
+        snap0 = rp.refresh()
+        assert ("deepinfra", None) in snap0.by_provider_model
+        assert not any(p == "deepinfra" and m is not None
+                       for (p, m) in snap0.by_provider_model)
+        RealtimePricing.reset_instance()
+
+        migrate_daily_spend_add_model(zai)
+        rp2 = _make_instance(zai_db=zai)
+        snap1 = rp2.refresh()
+        # After migration: the backfilled row is model='unknown' → per-model
+        # key (deepinfra, 'unknown') appears alongside the aggregate.
+        assert ("deepinfra", "unknown") in snap1.by_provider_model
+        assert ("deepinfra", None) in snap1.by_provider_model
+        ob = snap1.by_provider_model[("deepinfra", "unknown")]
+        assert ob.source == SRC_DEEPINFRA_ACTUAL
+        assert ob.is_measured is True
+        assert ob.rate_per_m == pytest.approx(1.30, rel=0.01)
+
+
+class TestPublishedModelPrices:
+    """published_model_rate(s): providers.yaml → per-model blended $/M."""
+
+    def test_deepinfra_flash_blended_price(self):
+        # providers.yaml: deepinfra.deepseek-v4-flash 0.09 in + 0.19 out → 0.14.
+        assert published_model_rate("deepinfra", "deepseek-v4-flash") == pytest.approx(0.14)
+
+    def test_openrouter_flash_blended_price(self):
+        # 0.09 in + 0.18 out → 0.135.
+        assert published_model_rate("openrouter", "deepseek-v4-flash") == pytest.approx(0.135)
+
+    def test_unknown_model_returns_none(self):
+        assert published_model_rate("deepinfra", "no-such-model") is None
+
+    def test_rates_dict_for_provider(self):
+        rates = published_model_rates("ppq")
+        assert rates["deepseek-v4-flash"] == pytest.approx(0.14)
+
+    def test_never_raises_missing_file(self):
+        assert published_model_rates("deepinfra", "/no/such/file.yaml") == {}
+        assert published_model_rate("deepinfra", "x", "/no/such/file.yaml") is None
+
+    def test_openrouter_cold_falls_back_to_per_model_published(self):
+        """No openrouter spend → snapshot carries per-model published key
+        (openrouter, deepseek-v4-flash), source PUBLISHED, is_measured False."""
+        rp = _make_instance()  # empty DBs
+        snap = rp.refresh()
+        ob = snap.by_provider_model.get(("openrouter", "deepseek-v4-flash"))
+        assert ob is not None
+        assert ob.source == SRC_PUBLISHED
+        assert ob.is_measured is False
+        assert ob.rate_per_m == pytest.approx(0.135)
+        # Provider-level aggregate rolls up to the same published value.
+        assert snap.by_provider["openrouter"].source == SRC_PUBLISHED
+        assert snap.by_provider["openrouter"].rate_per_m == pytest.approx(0.135)
+
