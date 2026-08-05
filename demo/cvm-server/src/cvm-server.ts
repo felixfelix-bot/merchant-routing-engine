@@ -328,8 +328,23 @@ function computePricing(): any {
 // QUOTA, REQUESTS, SYSTEM, COST COMPUTATIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Ollama API cache — avoid hitting ollama.com on every snapshot
-let ollamaApiCache: { at: number; session: number; weekly: number } = { at: 0, session: 0, weekly: 0 };
+// Ollama API cache — avoid hitting ollama.com on every snapshot.
+// Stores raw usage fractions (0-1) from the API, plus derived fields.
+interface OllamaApiCache {
+  at: number;
+  sessionUsage: number;   // raw fraction 0-1 from limits.session.usage
+  weeklyUsage: number;    // raw fraction 0-1 from limits.weekly.usage
+  sessionPct: number;     // sessionUsage * 100, rounded
+  weeklyPct: number;      // weeklyUsage * 100, rounded
+  extraUsage: boolean;    // true when session or weekly usage >= 1.0
+  extraUsageRate: number | null; // pay-per-token rate if available from API
+  billingMode: string | null;    // billing mode from response headers, if any
+}
+let ollamaApiCache: OllamaApiCache = {
+  at: 0, sessionUsage: 0, weeklyUsage: 0,
+  sessionPct: 0, weeklyPct: 0,
+  extraUsage: false, extraUsageRate: null, billingMode: null,
+};
 const OLLAMA_CACHE_TTL = 30_000; // 30s
 // Thundering-herd guard: prevents concurrent computeQuota() calls from both
 // firing Ollama API fetches at once.
@@ -356,8 +371,14 @@ async function computeQuota(): Promise<any> {
     }
   }
   // Ollama Cloud — real quota from ollama.com/api/usage (cached 30s)
-  let ollamaSessionPct = ollamaApiCache.session;
-  let ollamaWeeklyPct = ollamaApiCache.weekly;
+  let ollamaSessionPct = ollamaApiCache.sessionPct;
+  let ollamaWeeklyPct = ollamaApiCache.weeklyPct;
+  let ollamaSessionUsage = ollamaApiCache.sessionUsage;
+  let ollamaWeeklyUsage = ollamaApiCache.weeklyUsage;
+  let ollamaExtraUsage = ollamaApiCache.extraUsage;
+  let ollamaExtraUsageRate = ollamaApiCache.extraUsageRate;
+  let ollamaBillingMode = ollamaApiCache.billingMode;
+
   if (Date.now() - ollamaApiCache.at > OLLAMA_CACHE_TTL && !ollamaFetching) {
     const ollamaKey = process.env.OLLAMA_CLOUD_API_KEY || "";
     if (ollamaKey) {
@@ -369,9 +390,34 @@ async function computeQuota(): Promise<any> {
         });
         if (resp.ok) {
           const data = await resp.json() as any;
-          ollamaSessionPct = round((data?.limits?.session?.usage || 0) * 100, 1);
-          ollamaWeeklyPct = round((data?.limits?.weekly?.usage || 0) * 100, 1);
-          ollamaApiCache = { at: Date.now(), session: ollamaSessionPct, weekly: ollamaWeeklyPct };
+          ollamaSessionUsage = data?.limits?.session?.usage ?? 0;
+          ollamaWeeklyUsage = data?.limits?.weekly?.usage ?? 0;
+          ollamaSessionPct = round(ollamaSessionUsage * 100, 1);
+          ollamaWeeklyPct = round(ollamaWeeklyUsage * 100, 1);
+
+          // Extra-usage detection: when included limits are exhausted (usage >= 1.0),
+          // Ollama Cloud silently switches to pay-per-token billing.
+          ollamaExtraUsage = ollamaSessionUsage >= 1.0 || ollamaWeeklyUsage >= 1.0;
+
+          // Check for pay-per-token rate in the API response (if Ollama adds it)
+          ollamaExtraUsageRate = data?.extra_usage_rate ?? data?.rate ?? null;
+
+          // Check response headers for billing mode indicators
+          const billingHeader = resp.headers.get("x-billing-mode")
+            || resp.headers.get("x-ollama-billing-mode")
+            || null;
+          ollamaBillingMode = billingHeader;
+
+          ollamaApiCache = {
+            at: Date.now(),
+            sessionUsage: ollamaSessionUsage,
+            weeklyUsage: ollamaWeeklyUsage,
+            sessionPct: ollamaSessionPct,
+            weeklyPct: ollamaWeeklyPct,
+            extraUsage: ollamaExtraUsage,
+            extraUsageRate: ollamaExtraUsageRate,
+            billingMode: ollamaBillingMode,
+          };
         } else {
           // Non-OK response — still update cache timestamp so TTL backoff
           // applies. Otherwise the next 5s tick would re-fetch immediately,
@@ -393,11 +439,20 @@ async function computeQuota(): Promise<any> {
   out.ollama = {
     used_pct: ollamaSessionPct,
     weekly_pct: ollamaWeeklyPct,
+    session_usage: round(ollamaSessionUsage, 4),
+    weekly_usage: round(ollamaWeeklyUsage, 4),
+    session_limit: { window: "5h", usage: round(ollamaSessionUsage, 4), usage_pct: ollamaSessionPct },
+    weekly_limit: { window: "7d", usage: round(ollamaWeeklyUsage, 4), usage_pct: ollamaWeeklyPct },
+    extra_usage: ollamaExtraUsage,
+    extra_usage_rate: ollamaExtraUsageRate,
+    billing_mode: ollamaBillingMode,
     remaining: null,
-    healthy: true,
+    healthy: !ollamaExtraUsage,
     locked: false,
     resets_in_min: 300,
-    note: `session ${ollamaSessionPct}% / weekly ${ollamaWeeklyPct}%`,
+    note: ollamaExtraUsage
+      ? `EXTRA USAGE — session ${ollamaSessionPct}% / weekly ${ollamaWeeklyPct}% (pay-per-token)`
+      : `session ${ollamaSessionPct}% / weekly ${ollamaWeeklyPct}%`,
   };
   // PPQ — pay-per-use, no quota cap
   out.ppq = {
