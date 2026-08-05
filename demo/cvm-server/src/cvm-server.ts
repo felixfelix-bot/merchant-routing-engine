@@ -331,6 +331,9 @@ function computePricing(): any {
 // Ollama API cache — avoid hitting ollama.com on every snapshot
 let ollamaApiCache: { at: number; session: number; weekly: number } = { at: 0, session: 0, weekly: 0 };
 const OLLAMA_CACHE_TTL = 30_000; // 30s
+// Thundering-herd guard: prevents concurrent computeQuota() calls from both
+// firing Ollama API fetches at once.
+let ollamaFetching = false;
 
 async function computeQuota(): Promise<any> {
   const q = proxyCache.quota;
@@ -355,9 +358,10 @@ async function computeQuota(): Promise<any> {
   // Ollama Cloud — real quota from ollama.com/api/usage (cached 30s)
   let ollamaSessionPct = ollamaApiCache.session;
   let ollamaWeeklyPct = ollamaApiCache.weekly;
-  if (Date.now() - ollamaApiCache.at > OLLAMA_CACHE_TTL) {
+  if (Date.now() - ollamaApiCache.at > OLLAMA_CACHE_TTL && !ollamaFetching) {
     const ollamaKey = process.env.OLLAMA_CLOUD_API_KEY || "";
     if (ollamaKey) {
+      ollamaFetching = true;
       try {
         const resp = await fetch("https://ollama.com/api/usage", {
           headers: { Authorization: `Bearer ${ollamaKey}` },
@@ -368,9 +372,21 @@ async function computeQuota(): Promise<any> {
           ollamaSessionPct = round((data?.limits?.session?.usage || 0) * 100, 1);
           ollamaWeeklyPct = round((data?.limits?.weekly?.usage || 0) * 100, 1);
           ollamaApiCache = { at: Date.now(), session: ollamaSessionPct, weekly: ollamaWeeklyPct };
+        } else {
+          // Non-OK response — still update cache timestamp so TTL backoff
+          // applies. Otherwise the next 5s tick would re-fetch immediately,
+          // causing ~720 req/hour against ollama.com when the API is down.
+          ollamaApiCache.at = Date.now();
         }
       } catch (e: any) {
         console.warn(`[cvm] ollama quota fetch failed: ${e.message}`);
+        // Update cache timestamp on failure too — this is the MEDIUM cache
+        // stampede fix. A failed fetch should still back off for OLLAMA_CACHE_TTL,
+        // otherwise setInterval ticks every 5s would each fire a new request
+        // while the API is down.
+        ollamaApiCache.at = Date.now();
+      } finally {
+        ollamaFetching = false;
       }
     }
   }
