@@ -38,7 +38,7 @@ ollama_cloud:
   quota_windows: [5h, weekly]
   included_quota_tokens_session: 500000000   # 500M tokens per 5h session
   included_quota_tokens_weekly: 3500000000   # 3.5B tokens per 7-day week
-  extra_usage_rate_per_m: 0.10               # $/M above quota
+  extra_usage_rate_per_m: 0.10               # $/M above quota (EU-R3: $0.024 * 4.17 = $0.10/M)
 
 # ── External per-token providers (last resort) ─────────────────────────────
 external:

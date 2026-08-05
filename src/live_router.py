@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import sys
+import math
 import threading
 import time
 from typing import Any
@@ -45,12 +46,37 @@ from src.price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
 from src.consumption_kalman import ConsumptionKalman
 from src.routing_optimizer import RoutingOptimizer
 from src.provider_names import normalize_provider_name
-from src.pricing_engine import pace_factor_multi
+from src.pricing_engine import pace_factor_multi, extra_usage_multiplier, EXTRA_USAGE_MULTIPLIER
 from src.quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
 from src.cpvo_calculator import CPVOCalculator
 from src.model_mapping import get_model
+from src.ollama_quota_tracker import get_quota_status, DEFAULT_SESSION_LIMIT
+from src.ollama_extra_usage import fetch_ollama_usage, get_extra_usage_status
 
 __all__ = ["LiveRouter"]
+
+# ── Kill switch (EU-R3): extra-usage pricing is disabled by default ──────────
+# Until shadow mode validates the extra-usage multiplier, the multiplier is
+# NOT applied unless OLLAMA_EXTRA_USAGE_ENABLED=true is set in the env.
+# When disabled, the regime is always treated as "included" (no penalty).
+_EXTRA_USAGE_ENABLED: bool = (
+    os.environ.get("OLLAMA_EXTRA_USAGE_ENABLED", "false").lower() in ("1", "true", "yes")
+)
+
+# ── Ollama-exclusive models (EU-R3 Step 3) ───────────────────────────────────
+# These models are ONLY served by ollama_cloud — no other provider has them.
+# They MUST always route to ollama_cloud regardless of price or quota regime.
+# PPQ/OpenRouter/DeepInfra do not serve kimi or gpt-oss models.
+_OLLAMA_EXCLUSIVE_MODELS: frozenset[str] = frozenset({
+    "kimi-k2.7-code",
+    "kimi-k3:cloud",
+    "gpt-oss:120b",
+    "gemma4:31b",
+    "qwen3.5:397b",
+})
+
+# Backward-compatible alias (older tests/code may reference _OLLAMA_ONLY_MODELS).
+_OLLAMA_ONLY_MODELS = _OLLAMA_EXCLUSIVE_MODELS
 
 # ── Converged rates (from replay_converged_rates.CONVERGED_COSTS) ────────────
 # These are the Kalman-converged base rates proven in the replay. When
@@ -68,7 +94,7 @@ _DEFAULT_CONVERGED_RATES: dict[str, float] = {
 _QUOTA_TOTALS: dict[str, float] = {
     "ours":         2_000_000,    # ~2M tokens per 5h window
     "friend":       2_000_000,
-    "ollama_cloud": 1_000_000,    # rate-limited daily
+    "ollama_cloud": 500_000_000,  # 500M tokens per 5h session (EUv2-4)
     "ppq":          float("inf"),  # pay-per-token, no hard quota
     "openrouter":   float("inf"),
     "deepinfra":    float("inf"),  # pay-per-token, no hard quota
@@ -167,6 +193,13 @@ class LiveRouter:
         # routing_live_decisions (P3.4, Fix 2). Single source of truth.
         self._last_pace_mults: dict[str, float] = {}
 
+        # ── EU-R3: quota regime from the last routing decision ──────────
+        # Set inside _do_select_failover under self._lock. Read via the
+        # ``last_quota_regime`` property so the production proxy can log it
+        # to the key_decisions / routing_live_decisions table.
+        self._last_quota_regime: str = "included"
+        self._last_quota_status: dict | None = None
+
         # ── CPVO quality-aware effective rates (Phase 2.5.4) ───────────────
         # Queries the provider_telemetry table to inflate the base rate of
         # low-success providers (effective = base / success_rate).  Cached so
@@ -186,6 +219,7 @@ class LiveRouter:
         failure_counts: dict[str, int] | None = None,
         pace_windows: dict[str, list[tuple[float, float, float, float, float]]] | None = None,
         task_type: str = "coding",
+        model: str | None = None,
     ) -> tuple[tuple[str | None, str | None], tuple[str | None, str | None]]:
         """Choose a failover provider when BOTH z.ai keys are exhausted.
 
@@ -207,6 +241,13 @@ class LiveRouter:
             task_type: Task type for model selection (P4.5d). One of
                 ``"coding"``, ``"reasoning"``, ``"chat"``, ``"simple"``.
                 Defaults to ``"coding"``.
+            model: The model name being requested (EUv2-4). When this is
+                an Ollama-only model (kimi-k3:cloud, kimi-k2.7-code,
+                gpt-oss:120b, gemma4:31b, qwen3.5:397b), the router
+                always returns ollama_cloud regardless of quota regime.
+                When it is a non-exclusive model (e.g. glm-5.2) and the
+                regime is "extra", the router reroutes to a cheaper
+                per-token provider.
 
         Returns:
             ((chosen_provider, chosen_model), (fallback_provider, fallback_model))
@@ -219,7 +260,7 @@ class LiveRouter:
             with self._lock:
                 return self._do_select_failover(
                     quota_state, health_state, peak,
-                    failure_counts, pace_windows, task_type,
+                    failure_counts, pace_windows, task_type, model,
                 )
         except Exception:
             return ((None, None), (None, None))
@@ -321,8 +362,89 @@ class LiveRouter:
         failure_counts: dict[str, int] | None,
         pace_windows: dict[str, list[tuple[float, float, float, float, float]]] | None,
         task_type: str = "coding",
+        model: str | None = None,
     ) -> tuple[tuple[str | None, str | None], tuple[str | None, str | None]]:
         """Internal failover selection — may raise (wrapped by caller)."""
+
+        # ── EU-R3: Query Ollama Cloud quota regime ───────────────────────
+        # On each routing decision, query the quota tracker to determine
+        # whether ollama_cloud is in "included", "extra", or "exhausted"
+        # regime. The regime drives the extra-usage pricing multiplier
+        # and the rerouting logic for non-exclusive models.
+        #
+        # Kill switch: when OLLAMA_EXTRA_USAGE_ENABLED is not true (default),
+        # the regime is always forced to "included" — no extra-usage penalty
+        # is applied. This allows shadow-mode validation before going live.
+        quota_regime = "included"
+        quota_status: dict | None = None
+        extra_usage_status = None
+        try:
+            db_path = self._db_path
+            if db_path and _EXTRA_USAGE_ENABLED:
+                # Primary: query the quota tracker (DB-based token counting)
+                quota_status = get_quota_status(db_path)
+                quota_regime = quota_status.get("regime", "included")
+
+                # Secondary: fetch usage fractions from ollama.com/api/usage
+                # and build a full ExtraUsageStatus for real quota fractions.
+                try:
+                    api_response = fetch_ollama_usage()
+                    if api_response is not None:
+                        extra_usage_status = get_extra_usage_status(
+                            api_response, db_path=db_path,
+                        )
+                except Exception:
+                    # API fetch failure is non-fatal — DB regime is enough.
+                    pass
+        except Exception:
+            # Quota tracker failure must never break routing — default
+            # to "included" (no extra-usage penalty).
+            quota_regime = "included"
+            quota_status = None
+
+        # Stash for the last_quota_regime / last_quota_status properties.
+        self._last_quota_regime = quota_regime
+        self._last_quota_status = quota_status
+
+        # ── EU-R3: Ollama-exclusive model short-circuit ──────────────────
+        # If the requested model is Ollama-exclusive (kimi, gpt-oss, etc.),
+        # it MUST route to ollama_cloud regardless of regime. No other
+        # provider serves these models.
+        if model is not None and model in _OLLAMA_EXCLUSIVE_MODELS:
+            # Check if ollama_cloud is healthy and has quota
+            oc_healthy = health_state.get("ollama_cloud", True)
+            oc_quota = quota_state.get("ollama_cloud", {})
+            oc_remaining = float(oc_quota.get("remaining", _QUOTA_TOTALS.get("ollama_cloud", 1e9)))
+            if oc_healthy and oc_remaining > 0:
+                return (
+                    ("ollama_cloud", model),
+                    (None, None),
+                )
+            # ollama_cloud is down — no alternative for exclusive models
+            return ((None, None), (None, None))
+
+        # ── EU-R3: Compute extra-usage multiplier for ollama_cloud ──────
+        # When the regime is "extra", ollama_cloud's effective rate gets
+        # multiplied by EXTRA_USAGE_MULTIPLIER (≈4.17x → $0.024 * 4.17 =
+        # $0.10/M). When "exhausted", the multiplier is +inf —
+        # ollama_cloud becomes unreachable to the optimizer.
+        # When the kill switch is off, quota_regime is "included" so
+        # extra_mult = 1.0 (no penalty).
+        extra_mult = extra_usage_multiplier(quota_regime)
+
+        # ── EU-R3: Set real quota_total and quota_remaining from API ─────
+        # When we have usage fractions from the Ollama API, override the
+        # static _QUOTA_TOTALS with real values derived from the API.
+        # session_usage (0-1 fraction) tells us what fraction of the
+        # included quota is used; remaining = total * (1 - usage).
+        oc_quota_override: dict[str, float] = {}
+        if extra_usage_status is not None:
+            session_total = DEFAULT_SESSION_LIMIT
+            session_usage_frac = extra_usage_status.session_usage
+            oc_quota_override["total"] = float(session_total)
+            oc_quota_override["remaining"] = float(
+                session_total * max(0.0, 1.0 - session_usage_frac)
+            )
 
         optimizer = RoutingOptimizer(
             peak_hours_utc=_ZAI_PEAK,
@@ -348,20 +470,37 @@ class LiveRouter:
             total = float(qs.get("total", _QUOTA_TOTALS.get(name, 1e9)))
             healthy = health_state.get(name, True)
 
+            # ── EU-R3: Override ollama_cloud quota from API usage fractions ─
+            # When we have real usage data from ollama.com/api/usage, use
+            # the API-derived quota_total and quota_remaining instead of
+            # the static _QUOTA_TOTALS defaults.
+            if name == "ollama_cloud" and oc_quota_override:
+                remaining = oc_quota_override.get("remaining", remaining)
+                total = oc_quota_override.get("total", total)
+
             # Determine model tier and peak config
             if name in ("ours", "friend"):
                 tier = "high"
-                model = "glm-5.2"
+                prov_model = "glm-5.2"
                 prov_peak = _ZAI_PEAK
                 prov_peak_mult = 3.0
             elif name == "ollama_cloud":
-                tier = "high"
-                model = "glm-5.2"
+                # ── EU-R3: In "extra" regime, lower ollama_cloud's tier to
+                # "low" so it competes with per-token externals (ppq,
+                # openrouter) on PRICE rather than being auto-chosen at
+                # "high" difficulty.  In "included" regime it stays "high"
+                # (cheapest high-tier, preferred over externals).  In
+                # "exhausted" it gets filtered (breaker tripped below).
+                if quota_regime == "extra":
+                    tier = "low"
+                else:
+                    tier = "high"
+                prov_model = "glm-5.2"
                 prov_peak = None
                 prov_peak_mult = 1.0
             else:
                 tier = "low"
-                model = "deepseek/deepseek-v4-flash"
+                prov_model = "deepseek/deepseek-v4-flash"
                 prov_peak = None
                 prov_peak_mult = 1.0
 
@@ -371,18 +510,33 @@ class LiveRouter:
             else:
                 fc = 0 if healthy else 999
 
+            # ── EU-R3: Apply extra-usage multiplier to ollama_cloud ──────
+            # In "extra" regime, ollama_cloud's base rate is multiplied by
+            # EXTRA_USAGE_MULTIPLIER (≈4.17x) so the optimizer sees $0.10/M
+            # instead of $0.024/M. In "exhausted" regime, extra_mult is
+            # +inf, which makes the effective price infinite — the
+            # optimizer filters it out as unreachable.
+            # When the kill switch is off, extra_mult = 1.0 (no change).
+            base_rate = float(effective_rates.get(
+                name, self._base_rates.get(name, 0.001)))
+            if name == "ollama_cloud" and extra_mult != 1.0:
+                if math.isinf(extra_mult):
+                    # Exhausted: force breaker tripped so optimizer filters it
+                    healthy = False
+                else:
+                    base_rate = base_rate * extra_mult
+
             optimizer.add_provider(
                 name=name,
                 # Quality-aware base rate: a throwaway PriceKalman seeded with
-                # the CPVO effective rate.  Keeps the optimizer's multiplier
-                # pipeline (peak/scarcity/health/pace) intact while making the
-                # base reflect provider quality.  Falls back to the live
-                # PriceKalman when CPVO has no entry for this provider.
+                # the CPVO effective rate (further adjusted by the extra-usage
+                # multiplier for ollama_cloud).  Keeps the optimizer's
+                # multiplier pipeline (peak/scarcity/health/pace) intact
+                # while making the base reflect provider quality and quota
+                # regime.  Falls back to the live PriceKalman when CPVO has
+                # no entry for this provider.
                 price_kalman=PriceKalman(
-                    initial_rate=max(
-                        float(effective_rates.get(name, self._base_rates.get(name, 0.001))),
-                        MIN_EFFECTIVE_PRICE,
-                    ),
+                    initial_rate=max(base_rate, MIN_EFFECTIVE_PRICE),
                     process_noise=1e-6,
                     measurement_noise=1e-4,
                 ),
@@ -390,7 +544,7 @@ class LiveRouter:
                 quota_remaining=remaining,
                 breaker_tripped=not healthy,
                 model_tier=tier,
-                model=model,
+                model=prov_model,
                 quota_total=total if total != float("inf") else None,
                 peak_hours_utc=prov_peak,
                 peak_mult=prov_peak_mult,
@@ -440,6 +594,13 @@ class LiveRouter:
         if chosen == "fallback":
             chosen = None
 
+        # ── EU-R3: Log quota regime in the reason field ─────────────────
+        # Augment the routing reason with the current quota regime so it
+        # appears in the key_decisions / routing_live_decisions table when
+        # the production proxy logs this decision.
+        if "reason" in result and quota_regime != "included":
+            result["reason"] = f"{result['reason']} (quota_regime={quota_regime})"
+
         # Find fallback: second viable provider from candidates
         fallback = None
         candidates = result.get("candidates", [])
@@ -454,6 +615,34 @@ class LiveRouter:
         fallback_model = get_model(fallback, task_type) if fallback is not None else None
 
         return ((chosen, chosen_model), (fallback, fallback_model))
+
+    @property
+    def last_quota_regime(self) -> str:
+        """Quota regime from the most recent failover decision (EUv2-4).
+
+        Returns one of ``"included"``, ``"extra"``, or ``"exhausted"``.
+        Defaults to ``"included"`` before any failover has been attempted.
+        Read by the production proxy to log the regime alongside the
+        routing decision in ``key_decisions`` / ``routing_live_decisions``.
+        """
+        try:
+            return self._last_quota_regime
+        except Exception:
+            return "included"
+
+    @property
+    def last_quota_status(self) -> dict | None:
+        """Full quota status dict from the most recent failover (EUv2-4).
+
+        Returns the dict from ``ollama_quota_tracker.get_quota_status()``
+        or None if no failover has been attempted or the tracker failed.
+        Includes ``regime``, ``session_used_pct``, ``weekly_used_pct``,
+        ``session_tokens``, ``weekly_tokens``.
+        """
+        try:
+            return self._last_quota_status
+        except Exception:
+            return None
 
     @property
     def last_pace_mults(self) -> dict[str, float]:

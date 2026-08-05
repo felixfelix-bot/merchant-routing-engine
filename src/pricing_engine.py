@@ -23,6 +23,7 @@ Phase 1.3 of the merchant routing engine.
 from __future__ import annotations
 
 import math
+import os
 from datetime import datetime, timezone
 
 # ── ADR-004: effective price is always positive ─────────────────────────────
@@ -89,6 +90,30 @@ HEALTH_BREAKER_THRESHOLD: int = 10     # strictly greater → circuit breaker
 #   ratio 2.0 (will exhaust way early) → 4.0 → capped at 3.0
 PACE_FLOOR: float = 0.5    # minimum pace_factor (attract traffic aggressively)
 PACE_CAP: float = 3.0      # maximum pace_factor (strong slowdown, but finite)
+
+# ── Extra-usage multiplier (ollama Cloud quota regime) ──────────────────────
+# When the Ollama Cloud quota is exceeded (regime='extra'), the effective
+# rate is multiplied by the extra-usage multiplier. The default multiplier
+# of 4.17x maps the $0.024/M base rate to $0.10/M ($0.024 * 4.17 = $0.10).
+#
+# The multiplier can be overridden via the OLLAMA_EXTRA_USAGE_MULTIPLIER env
+# var (EU-R3). This allows tuning without code changes.
+#
+# When the quota is fully exhausted (regime='exhausted'), the multiplier is
+# +inf — same semantics as the health circuit breaker: the provider becomes
+# unreachable to the optimizer.
+#
+# Config source: config/providers.yaml → ollama_cloud.extra_usage_rate_per_m
+# The multiplier is derived as: extra_usage_rate_per_m / base_rate.
+# Default: 0.10 / 0.024 ≈ 4.17.
+EXTRA_USAGE_BASE_RATE: float = 0.024   # $/M — ollama_cloud base rate
+EXTRA_USAGE_TARGET_RATE: float = 0.10  # $/M — target effective rate in extra mode
+# Recompute default multiplier from the rate values so they stay in sync.
+# Allow override via env var (EU-R3: OLLAMA_EXTRA_USAGE_MULTIPLIER).
+_DEFAULT_EXTRA_USAGE_MULT = EXTRA_USAGE_TARGET_RATE / EXTRA_USAGE_BASE_RATE  # ≈4.17
+EXTRA_USAGE_MULTIPLIER: float = float(
+    os.environ.get("OLLAMA_EXTRA_USAGE_MULTIPLIER", _DEFAULT_EXTRA_USAGE_MULT)
+)
 
 
 def peak_multiplier(provider: str, hour_utc: int | None = None) -> float:
@@ -286,6 +311,46 @@ def pace_factor_multi(
     return max(factors)
 
 
+def extra_usage_multiplier(
+    regime: str,
+    multiplier: float | None = None,
+) -> float:
+    """Deterministic extra-usage multiplier based on quota regime.
+
+    Maps the Ollama Cloud quota regime (from
+    :func:`ollama_quota_tracker.get_quota_status`) to a price multiplier:
+
+        regime == "included"  → 1.0   (no change — within free quota)
+        regime == "extra"     → EXTRA_USAGE_MULTIPLIER (default ≈4.17x,
+                                 raising $0.024/M base to $0.10/M)
+        regime == "exhausted" → +inf  (provider unreachable, filtered out)
+
+    The *multiplier* override allows callers to supply a config-derived
+    value (e.g. from ``providers.yaml`` →
+    ``ollama_cloud.extra_usage_rate_per_m`` divided by the provider's
+    base rate). When *multiplier* is None, the module-level
+    :data:`EXTRA_USAGE_MULTIPLIER` constant is used.
+
+    Args:
+        regime: Quota regime string — one of ``"included"``,
+            ``"extra"``, or ``"exhausted"`` (as returned by
+            :func:`ollama_quota_tracker.get_quota_status`).
+        multiplier: Optional override for the extra-mode multiplier.
+            If None, uses :data:`EXTRA_USAGE_MULTIPLIER` (≈4.17).
+
+    Returns:
+        Multiplier: 1.0 for included, the configured multiplier (>= 1.0)
+        for extra, or +inf for exhausted. Unknown regimes default to 1.0
+        (fail-safe: no penalty on unrecognised input).
+    """
+    if regime == "extra":
+        return multiplier if multiplier is not None else EXTRA_USAGE_MULTIPLIER
+    if regime == "exhausted":
+        return math.inf
+    # "included" or any unknown regime → no change.
+    return 1.0
+
+
 def health_factor(is_healthy: bool, recent_429: int = 0) -> float:
     """Backward-compatible wrapper around health_pricing_factor.
 
@@ -316,8 +381,10 @@ def compute_effective_price(
     failure_count: int = 0,
     breaker_tripped: bool = False,
     pace_mult: float = 1.0,
+    extra_usage_regime: str = "included",
+    extra_usage_mult: float | None = None,
 ) -> float:
-    """Effective price = base_rate * peak * scarcity * health * pace (ADR-009).
+    """Effective price = base_rate * peak * scarcity * health * pace * extra_usage.
 
     Pure deterministic composition of the multipliers above applied to
     the (Kalman-smoothed) base rate. No state, no side effects.
@@ -337,6 +404,12 @@ def compute_effective_price(
     factor that adjusts price based on burn rate vs time remaining in
     quota windows. It defaults to 1.0 (no adjustment) when not provided.
 
+    The extra-usage multiplier (:func:`extra_usage_multiplier`) applies a
+    price penalty when the Ollama Cloud quota regime is "extra" (above
+    included quota but not fully exhausted) or makes the provider
+    unreachable when "exhausted". It defaults to the "included" regime
+    (multiplier = 1.0, no change) so non-Ollama providers are unaffected.
+
     Args:
         base_rate: Base $/M rate (typically from price_kalman.base_rate, or a
             provider's fixed per-token price).
@@ -353,10 +426,16 @@ def compute_effective_price(
         pace_mult: Predictive quota-pacing multiplier from
             :func:`pace_factor` or :func:`pace_factor_multi`. Default
             1.0 (no pace adjustment).
+        extra_usage_regime: Quota regime for Ollama Cloud — one of
+            "included", "extra", or "exhausted" (from
+            :func:`ollama_quota_tracker.get_quota_status`). Default
+            "included" (no penalty — non-Ollama providers unaffected).
+        extra_usage_mult: Optional override for the extra-mode multiplier.
+            If None, uses :data:`EXTRA_USAGE_MULTIPLIER` (≈4.17).
 
     Returns:
         Effective price in $/M. Always > 0: finite results are >= 0.001, and
-        an unhealthy provider yields +inf (preserved, not floored).
+        an unhealthy or exhausted provider yields +inf (preserved, not floored).
     """
     # Backward compat: if is_healthy is provided, translate to new interface.
     if is_healthy is not None:
@@ -368,8 +447,9 @@ def compute_effective_price(
     peak = peak_multiplier(provider, hour_utc)
     scarcity = scarcity_factor(quota_pct)
     health = health_pricing_factor(failure_count, breaker_tripped)
+    extra = extra_usage_multiplier(extra_usage_regime, extra_usage_mult)
 
-    price = base_rate * peak * scarcity * health * pace_mult
+    price = base_rate * peak * scarcity * health * pace_mult * extra
 
     # ADR-004 invariant #1: effective_price > 0 always.
     # - NaN arises only from the forbidden 0 * inf combination (invariant #4,
