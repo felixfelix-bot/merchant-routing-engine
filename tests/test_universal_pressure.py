@@ -639,28 +639,42 @@ class TestCreditPressureIntegration:
     def _enable_credit_pressure(self, monkeypatch):
         """Enable DeepInfra + OpenRouter credit pressure for all tests."""
         import src.live_router as lr
-        from src.live_router import _credit_spend_cache
-        _credit_spend_cache.clear()
+        lr._credit_spend_cache.clear()
         monkeypatch.setattr(lr, "_DEEPINFRA_CREDIT_PRESSURE_ENABLED", True)
         monkeypatch.setattr(lr, "_OPENROUTER_CREDIT_PRESSURE_ENABLED", True)
 
     @pytest.fixture
     def rates(self):
+        """Full provider set (all 6) so the loop iterates openrouter/deepinfra."""
         return {
             "ours": 0.001, "friend": 0.029, "ollama_cloud": 0.024,
             "ppq": 0.14, "openrouter": 0.135, "deepinfra": 1.30,
         }
-    def test_deepinfra_pressure_rises_with_spend(self, rates):
-        """GATE: DeepInfra effective pressure rises as credits deplete.
 
-        With $5 starting and 0/2.5/4.5 spend, pressure should be
-        1.0 / 1.0 / >1.0 respectively.
-        """
+    def _full_quota_state(self):
+        """All providers exhausted except the credit-based ones."""
+        return {
+            "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 500_000_000},
+            "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
+            "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
+            "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
+        }
+
+    def _full_health(self):
+        h = {k: True for k in self._full_quota_state()}
+        h["ours"] = False
+        h["friend"] = False
+        h["ollama_cloud"] = False
+        return h
+
+    def test_deepinfra_pressure_rises_with_spend(self, rates):
+        """GATE: DeepInfra effective pressure rises as credits deplete."""
         from src.live_router import LiveRouter
         import src.live_router as lr
 
         for spend, expect_gt_one in [(0.0, False), (2.5, False), (4.5, True)]:
-            _credit_spend_cache = {}  # noqa: F811 — clear per iteration
             lr._credit_spend_cache.clear()
             db_path = _make_usage_db()
             try:
@@ -673,21 +687,10 @@ class TestCreditPressureIntegration:
                     )
                     conn.commit()
                     conn.close()
-                quota_state = {
-                    "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
-                    "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
-                    "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 500_000_000},
-                    "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
-                    "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
-                    "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
-                }
-                health = {k: True for k in quota_state}
-                health["ours"] = False
-                health["friend"] = False
-                health["ollama_cloud"] = False
                 router = LiveRouter(db_path=db_path, converged_rates=rates)
                 router.select_failover(
-                    quota_state=quota_state, health_state=health,
+                    quota_state=self._full_quota_state(),
+                    health_state=self._full_health(),
                     peak=False, model="glm-5.2",
                 )
                 p = router._last_credit_pressures.get("deepinfra", 1.0)
@@ -699,7 +702,7 @@ class TestCreditPressureIntegration:
                 os.unlink(db_path)
 
     def test_exhausted_openrouter_is_inf(self, rates):
-        """GATE: OpenRouter with $10 fully spent → +inf → breaker tripped."""
+        """GATE: OpenRouter with $10 fully spent -> +inf -> breaker tripped."""
         from src.live_router import LiveRouter
         import src.live_router as lr
         lr._credit_spend_cache.clear()
@@ -714,22 +717,12 @@ class TestCreditPressureIntegration:
             )
             conn.commit()
             conn.close()
-            quota_state = {
-                "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
-                "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
-                "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 500_000_000},
-                "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
-                "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
-                "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
-            }
-            health = {k: True for k in quota_state}
-            health["ours"] = False
-            health["friend"] = False
-            health["ollama_cloud"] = False
-            health["openrouter"] = False  # already exhausted via spend
+            health = self._full_health()
+            health["openrouter"] = False
             router = LiveRouter(db_path=db_path, converged_rates=rates)
             router.select_failover(
-                quota_state=quota_state, health_state=health,
+                quota_state=self._full_quota_state(),
+                health_state=health,
                 peak=False, model="glm-5.2",
             )
             assert router._last_credit_pressures.get("openrouter") == math.inf
