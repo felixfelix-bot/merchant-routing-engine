@@ -432,6 +432,28 @@ class ShadowHook:
         else:
             actual_cost = 0.0
 
+        # ── PM-T6: per-model pricing context for the shadow row ─────────
+        # The LiveRouter exposes the requested model and the per-model base
+        # rate it resolved for every candidate during select_failover. We log
+        # the chosen (pressure) provider's rate + source, and append a compact
+        # per-candidate breakdown to the reason so the full picture of how each
+        # provider was priced for this model is recorded (plan §4.3).
+        requested_model = router.last_requested_model
+        pm_rates = router.last_per_model_rates
+        pm_sources = router.last_per_model_sources
+        pm_base_rate = pm_rates.get(pressure_provider) if pm_rates else None
+        pm_source = pm_sources.get(pressure_provider) if pm_sources else None
+
+        reason = (
+            f"pressure_compare: actual={actual_provider} "
+            f"pressure={pressure_provider}"
+        )
+        if pm_rates:
+            _cand = ",".join(
+                f"{_n}={pm_rates[_n]:.4g}" for _n in sorted(pm_rates)
+            )
+            reason += f" | per_model_rates[{_cand}]"
+
         # ── Log the divergence row ───────────────────────────────────────
         self._logger.log_pressure_decision(
             ts=now,
@@ -442,8 +464,11 @@ class ShadowHook:
             actual_cost=actual_cost,
             pressure_cost=pressure_cost,
             tokens=tokens,
-            reason=f"pressure_compare: actual={actual_provider} pressure={pressure_provider}",
+            reason=reason,
             is_429=is_429,
+            requested_model=requested_model,
+            per_model_base_rate=pm_base_rate,
+            per_model_source=pm_source,
         )
 
     def get_stats(self) -> dict:

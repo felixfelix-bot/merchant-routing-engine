@@ -322,6 +322,9 @@ class ShadowLogger:
         tokens,
         reason: Optional[str] = "",
         is_429: bool = False,
+        requested_model: Optional[str] = None,
+        per_model_base_rate: Any = None,
+        per_model_source: Optional[str] = None,
     ) -> None:
         """Log a pressure-routing divergence decision (P6-SHADOW).
 
@@ -345,6 +348,15 @@ class ShadowLogger:
             tokens: token count for this call (0 if unknown).
             reason: free-text annotation.
             is_429: ``True`` if the actual request received a 429 (rate limit).
+            requested_model: The model the client asked for (PM-T6). ``None``
+                when no model was requested or per-model pricing is off.
+            per_model_base_rate: The per-model base rate ($/M) the pressure
+                router resolved for its chosen provider
+                (``pressure_provider``). ``None`` when per-model pricing is
+                inactive.
+            per_model_source: Source tag for ``per_model_base_rate`` — one of
+                ``"measured"``, ``"seed"``, ``"fallback"`` (see LiveRouter).
+                ``None`` when per-model pricing is inactive.
 
         Never raises — sanitises all NaN/inf to 0 before storage.
         """
@@ -381,6 +393,9 @@ class ShadowLogger:
                     divergence,
                     1 if is_429 else 0,
                     paid,
+                    requested_model,
+                    _sanitize(per_model_base_rate) if per_model_base_rate is not None else None,
+                    per_model_source,
                 ),
             )
             self._conn.commit()

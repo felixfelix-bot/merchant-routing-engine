@@ -217,6 +217,262 @@ class TestPerModelFailoverGate:
         assert captured["ours"][0] < 1.0
 
 
+# ── PM-T6: per-model shadow logging ──────────────────────────────────────────
+
+# T6 GATE rates: kimi-k3 measured at $7.53/M on EVERY provider (plan §1.3 —
+# "same model, same upstream"), so whichever provider the optimizer chooses,
+# its per-model base rate is $7.53. This makes the GATE assertion deterministic
+# regardless of tie-breaking among equal-priced providers.
+T6_PER_MODEL_RATES: dict[str, dict[str, float]] = {
+    "ours":         {"kimi-k3": 7.53, "_default": 0.014},
+    "friend":       {"kimi-k3": 7.53, "_default": 0.029},
+    "ollama_cloud": {"kimi-k3": 7.53, "_default": 0.024},
+    "ppq":          {"kimi-k3": 7.53, "_default": 0.14},
+    "deepinfra":    {"kimi-k3": 7.53, "_default": 1.30},
+    "openrouter":   {"kimi-k3": 7.53, "_default": 0.135},
+}
+
+
+class TestPerModelProperties:
+    """PM-T6: LiveRouter exposes the requested model + per-model rate snapshot."""
+
+    def test_requested_model_and_rates_after_failover(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(lr, "_PER_MODEL_PRICING_ENABLED", True)
+        monkeypatch.setattr(
+            lr, "_resolve_dynamic_base_rates_per_model", lambda dbp=None: {}
+        )
+        router = LiveRouter(db_path=tmp_db, converged_rates=FLAT_RATES)
+        router._base_rates_per_model = PER_MODEL_RATES
+
+        router.select_failover(
+            quota_state=_quota_available(),
+            health_state=_all_healthy(),
+            peak=False,
+            model="kimi-k3",
+        )
+        # requested model is recorded verbatim (always, regardless of switch)
+        assert router.last_requested_model == "kimi-k3"
+        rates = router.last_per_model_rates
+        # ours/friend/ollama_cloud measure kimi-k3 at $7.53 (measured source)
+        assert rates["ours"] == pytest.approx(7.53, rel=1e-3)
+        assert rates["friend"] == pytest.approx(7.53, rel=1e-3)
+        assert rates["ollama_cloud"] == pytest.approx(7.53, rel=1e-3)
+        # ppq has only a _default -> priced at its blend ($0.14)
+        assert rates["ppq"] == pytest.approx(0.14, rel=1e-3)
+        # openrouter has no entry AND no _default -> conservative $1.0/M floor
+        assert rates["openrouter"] == pytest.approx(1.0, rel=1e-3)
+
+    def test_source_tags_classify_fallback_chain(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(lr, "_PER_MODEL_PRICING_ENABLED", True)
+        monkeypatch.setattr(
+            lr, "_resolve_dynamic_base_rates_per_model", lambda dbp=None: {}
+        )
+        router = LiveRouter(db_path=tmp_db, converged_rates=FLAT_RATES)
+        router._base_rates_per_model = PER_MODEL_RATES
+
+        router.select_failover(
+            quota_state=_quota_available(),
+            health_state=_all_healthy(),
+            peak=False,
+            model="kimi-k3",
+        )
+        src = router.last_per_model_sources
+        assert src["ours"] == "measured"        # exact model entry
+        assert src["friend"] == "measured"
+        assert src["ollama_cloud"] == "measured"
+        assert src["ppq"] == "seed"             # provider _default
+        assert src["openrouter"] == "fallback"  # no entry, no _default
+
+    def test_rates_empty_when_kill_switch_off(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(lr, "_PER_MODEL_PRICING_ENABLED", False)
+        router = LiveRouter(db_path=tmp_db, converged_rates=FLAT_RATES)
+        router._base_rates_per_model = PER_MODEL_RATES  # ignored when switch off
+
+        router.select_failover(
+            quota_state=_quota_available(),
+            health_state=_all_healthy(),
+            peak=False,
+            model="kimi-k3",
+        )
+        # requested model is always recorded; per-model RATES are not (switch off)
+        assert router.last_requested_model == "kimi-k3"
+        assert router.last_per_model_rates == {}
+        assert router.last_per_model_sources == {}
+
+    def test_rates_empty_when_model_none(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(lr, "_PER_MODEL_PRICING_ENABLED", True)
+        monkeypatch.setattr(
+            lr, "_resolve_dynamic_base_rates_per_model", lambda dbp=None: {}
+        )
+        router = LiveRouter(db_path=tmp_db, converged_rates=FLAT_RATES)
+        router._base_rates_per_model = PER_MODEL_RATES
+
+        router.select_failover(
+            quota_state=_quota_available(),
+            health_state=_all_healthy(),
+            peak=False,
+            model=None,
+        )
+        assert router.last_requested_model is None
+        assert router.last_per_model_rates == {}
+        assert router.last_per_model_sources == {}
+
+    def test_properties_default_before_any_failover(self, tmp_db, monkeypatch):
+        """A fresh router exposes sane defaults before select_failover runs."""
+        router = LiveRouter(db_path=tmp_db, converged_rates=FLAT_RATES)
+        assert router.last_requested_model is None
+        assert router.last_per_model_rates == {}
+        assert router.last_per_model_sources == {}
+
+
+class TestPerModelShadowLoggingGate:
+    """PM-T6 GATE: after select_failover(model='kimi-k3'), the decision log
+    contains requested_model='kimi-k3' and per_model_base_rate=7.53 for the
+    chosen provider.
+
+    Drives the full path: ShadowHook.compare_pressure -> LiveRouter
+    .select_failover(model=...) -> ShadowLogger row, then reads the row back
+    from the SQLite decision table.
+    """
+
+    def test_decision_log_has_requested_model_and_rate(self, tmp_db, monkeypatch):
+        import sqlite3
+        from src.shadow_hook import ShadowHook
+
+        # Hermetic LiveRouter: per-model pricing ON, kimi-k3 measured at $7.53
+        # on every provider, so the chosen provider's rate is deterministically
+        # $7.53 regardless of optimizer tie-breaking.
+        monkeypatch.setattr(lr, "_PER_MODEL_PRICING_ENABLED", True)
+        monkeypatch.setattr(
+            lr, "_resolve_dynamic_base_rates_per_model", lambda dbp=None: {}
+        )
+        router = LiveRouter(db_path=tmp_db, converged_rates=FLAT_RATES)
+        router._base_rates_per_model = T6_PER_MODEL_RATES
+        # Inject as the singleton the shadow hook resolves via get_instance().
+        monkeypatch.setattr(
+            LiveRouter, "get_instance",
+            staticmethod(lambda db_path=None: router),
+        )
+        ShadowHook._instance = None
+
+        hook = ShadowHook(db_path=tmp_db)
+        hook.compare_pressure(
+            actual_provider="ours",
+            actual_model="kimi-k3",
+            tokens=5000,
+            quota_state=_quota_available(),
+            health_state=_all_healthy(),
+            peak=False,
+        )
+
+        conn = sqlite3.connect(tmp_db)
+        try:
+            row = conn.execute(
+                "SELECT requested_model, per_model_base_rate, per_model_source, "
+                "pressure_provider FROM routing_shadow_decisions "
+                "ORDER BY id DESC LIMIT 1;"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert row is not None, (
+            "no decision row logged — compare_pressure swallowed an error"
+        )
+        requested_model, pm_rate, pm_source, pressure_provider = row
+        # ── THE GATE ───────────────────────────────────────────────────────
+        assert requested_model == "kimi-k3", (
+            f"requested_model={requested_model!r}, expected 'kimi-k3'"
+        )
+        assert pm_rate == pytest.approx(7.53, rel=1e-3), (
+            f"per_model_base_rate={pm_rate} for chosen provider "
+            f"{pressure_provider!r}, expected $7.53/M (PM-T6 GATE)"
+        )
+        assert pm_source == "measured"
+        assert pressure_provider is not None and pressure_provider != "unknown"
+
+    def test_reason_records_per_candidate_rates(self, tmp_db, monkeypatch):
+        """PM-T6 'log per-model rates for each candidate': the reason carries a
+        compact per-provider breakdown so the full pricing picture is recorded."""
+        import sqlite3
+        from src.shadow_hook import ShadowHook
+
+        monkeypatch.setattr(lr, "_PER_MODEL_PRICING_ENABLED", True)
+        monkeypatch.setattr(
+            lr, "_resolve_dynamic_base_rates_per_model", lambda dbp=None: {}
+        )
+        router = LiveRouter(db_path=tmp_db, converged_rates=FLAT_RATES)
+        router._base_rates_per_model = T6_PER_MODEL_RATES
+        monkeypatch.setattr(
+            LiveRouter, "get_instance",
+            staticmethod(lambda db_path=None: router),
+        )
+        ShadowHook._instance = None
+
+        hook = ShadowHook(db_path=tmp_db)
+        hook.compare_pressure(
+            actual_provider="ours",
+            actual_model="kimi-k3",
+            tokens=5000,
+            quota_state=_quota_available(),
+            health_state=_all_healthy(),
+            peak=False,
+        )
+
+        conn = sqlite3.connect(tmp_db)
+        try:
+            reason = conn.execute(
+                "SELECT reason FROM routing_shadow_decisions "
+                "ORDER BY id DESC LIMIT 1;"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        assert "per_model_rates[" in reason
+        # every candidate provider appears in the breakdown
+        for name in T6_PER_MODEL_RATES:
+            assert name in reason, f"{name!r} missing from per-candidate reason"
+
+    def test_per_model_rate_null_when_switch_off(self, tmp_db, monkeypatch):
+        """Backward compat: kill switch OFF -> per_model_base_rate/source are
+        NULL (per-model pricing inactive). requested_model is still recorded
+        (it is pure observational metadata)."""
+        import sqlite3
+        from src.shadow_hook import ShadowHook
+
+        monkeypatch.setattr(lr, "_PER_MODEL_PRICING_ENABLED", False)
+        router = LiveRouter(db_path=tmp_db, converged_rates=FLAT_RATES)
+        monkeypatch.setattr(
+            LiveRouter, "get_instance",
+            staticmethod(lambda db_path=None: router),
+        )
+        ShadowHook._instance = None
+
+        hook = ShadowHook(db_path=tmp_db)
+        hook.compare_pressure(
+            actual_provider="ours",
+            actual_model="kimi-k3",
+            tokens=5000,
+            quota_state=_quota_available(),
+            health_state=_all_healthy(),
+            peak=False,
+        )
+
+        conn = sqlite3.connect(tmp_db)
+        try:
+            row = conn.execute(
+                "SELECT requested_model, per_model_base_rate, per_model_source "
+                "FROM routing_shadow_decisions ORDER BY id DESC LIMIT 1;"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert row is not None
+        requested_model, pm_rate, pm_source = row
+        assert requested_model == "kimi-k3"   # model always recorded
+        assert pm_rate is None                # but per-model rate is not
+        assert pm_source is None
+
+
 # ── PM-T7: Integration verification of the kimi-k3 routing fix ───────────────
 #
 # The four T3 tests above prove the wiring exists (the optimizer *sees* the
