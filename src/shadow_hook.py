@@ -334,6 +334,118 @@ class ShadowHook:
             return "high"
         return "medium"
 
+    # ── P6: pressure-routing divergence comparison ──────────────────────
+
+    def compare_pressure(
+        self,
+        actual_provider: str | None,
+        actual_model: str | None,
+        tokens: int,
+        quota_state: dict[str, Any],
+        health_state: dict[str, bool],
+        peak: bool,
+        failure_counts: dict[str, int] | None = None,
+        pace_windows: dict[str, list[tuple[float, float, float, float, float]]] | None = None,
+        is_429: bool = False,
+        actual_cost: float | None = None,
+    ) -> None:
+        """Log the divergence between the actual provider and what the
+        LiveRouter's **pressure routing** would have chosen (P6-SHADOW).
+
+        Unlike :meth:`compare` (which runs the price-first routing_optimizer),
+        this invokes :meth:`LiveRouter.select_failover` — the quota-pressure-
+        based selection that production will eventually promote.  The result is
+        logged via :meth:`ShadowLogger.log_pressure_decision` so the divergence
+        metric and exit criteria can be evaluated after the soak.
+
+        NEVER raises — pressure comparison must not break production.
+
+        Args:
+            actual_provider / actual_model: what production actually used.
+            tokens: total tokens for this request.
+            quota_state / health_state / peak / failure_counts / pace_windows:
+                same shape as :meth:`compare` — forwarded to select_failover.
+            is_429: whether the actual request hit a 429.
+            actual_cost: optional effective $/M of the actual provider.  When
+                None, estimated from the seed price table (best-effort).
+        """
+        try:
+            self._do_compare_pressure(
+                actual_provider, actual_model, tokens,
+                quota_state, health_state, peak,
+                failure_counts, pace_windows, is_429, actual_cost,
+            )
+        except Exception:
+            pass  # pressure comparison must never break production
+
+    def _do_compare_pressure(
+        self,
+        actual_provider: str | None,
+        actual_model: str | None,
+        tokens: int,
+        quota_state: dict[str, Any],
+        health_state: dict[str, bool],
+        peak: bool,
+        failure_counts: dict[str, int] | None,
+        pace_windows: dict[str, list[tuple[float, float, float, float, float]]] | None,
+        is_429: bool,
+        actual_cost: float | None,
+    ) -> None:
+        """Internal pressure comparison — may raise (wrapped by caller)."""
+        now = time.time()
+        actual_provider = normalize_provider_name(actual_provider)
+
+        # ── Ask the LiveRouter what pressure routing would choose ────────
+        # We import locally to avoid a hard dependency at module load time
+        # (LiveRouter pulls in many provider modules).  select_failover never
+        # raises — it returns ((None, None), (None, None)) on failure.
+        from src.live_router import LiveRouter
+
+        router = LiveRouter.get_instance()
+        (chosen, chosen_model), _fallback = router.select_failover(
+            quota_state=quota_state,
+            health_state=health_state,
+            peak=peak,
+            failure_counts=failure_counts,
+            pace_windows=pace_windows,
+            model=actual_model,
+        )
+
+        pressure_provider = chosen or "unknown"
+        pressure_model = chosen_model or "unknown"
+
+        # ── Estimate effective costs ─────────────────────────────────────
+        # Use the shadow_hook's own PriceKalman base rates — these are the
+        # smoothed $/M per provider that the hook already maintains.  This
+        # avoids importing live_router internals and stays consistent with the
+        # price-first comparison in _do_compare().
+        pressure_cost = 0.0
+        if pressure_provider in self._price_kalmans:
+            pressure_cost = self._price_kalmans[pressure_provider].base_rate
+
+        # Actual cost: use the explicit value when provided, otherwise
+        # estimate from the hook's price kalman for the actual provider.
+        if actual_cost is not None:
+            actual_cost = float(actual_cost)
+        elif actual_provider in self._price_kalmans:
+            actual_cost = self._price_kalmans[actual_provider].base_rate
+        else:
+            actual_cost = 0.0
+
+        # ── Log the divergence row ───────────────────────────────────────
+        self._logger.log_pressure_decision(
+            ts=now,
+            actual_provider=actual_provider or "none",
+            actual_model=actual_model or "unknown",
+            pressure_provider=pressure_provider,
+            pressure_model=pressure_model,
+            actual_cost=actual_cost,
+            pressure_cost=pressure_cost,
+            tokens=tokens,
+            reason=f"pressure_compare: actual={actual_provider} pressure={pressure_provider}",
+            is_429=is_429,
+        )
+
     def get_stats(self) -> dict:
         """Return shadow mode statistics for monitoring."""
         try:
