@@ -16,7 +16,7 @@ WHY A DEDICATED FILE
 
 WHAT IT DOES
     POST https://api.ppq.ai/credits/balance  (Bearer auth, empty ``{}`` body)
-    →  {"balance": <float USD>, "currency": "USD", ...}
+    →  {"balance": <float>}   (bare float; may be NEGATIVE = credit overrun)
     →  stored as one row in the shared ``provider_balances`` table
        (provider='ppq'), with ``usage_fraction`` in [0,1] ready to feed
        ``pricing_engine.quota_pressure_factor(u, onset=0.80, asymptote=1.5,
@@ -30,8 +30,15 @@ OpenRouter. The starting (top-up) balance therefore comes from the
 
 The contract mirrors the OpenRouter collector (dataclass + parse/collect/
 store/get_latest, stdlib-only, NEVER raises — these run in cron and the
-request path). The authoritative API call was verified against the DQ05
-monitor's ``dq05_ppq`` tool (scripts/dq05_monitor_mcp.py).
+request path). The API call was verified against the LIVE endpoint on
+2026-08-05 (POST /credits/balance, Bearer ``PPQ_API_KEY``, empty ``{}``
+body → ``200 {"balance": <float>}``; GET variants 404) and cross-checked
+with the production collector at ``~/.hermes/bot/ppq_data_collector.py``
+(same host/api.ppq.ai, same Bearer auth from ``PPQ_API_KEY``).
+``scripts/dq05_monitor_mcp.py`` / a ``dq05_ppq`` tool do not exist in this
+tree — the earlier "verified against the DQ05 monitor" note referred to a
+remote MCP tool that is not present here; the live probe above is the
+authoritative source.
 
 CONFIG (env)
     PPQ_API_KEY             bearer token for api.ppq.ai (required for live)
@@ -61,6 +68,7 @@ __all__ = [
     "store_ppq_balance",
     "get_latest_ppq_balance",
     "collect_and_store_ppq",
+    "ppq_quota_entry",
     "default_db_path",
     "main",
     "PPQ_BALANCE_ENDPOINT",
@@ -353,6 +361,56 @@ def collect_and_store_ppq(
     if balance is not None:
         store_ppq_balance(db_path, balance)
     return balance
+
+
+# ── Bridge to quota_state['ppq'] (P3-PPQ STEP 3) ──────────────────────────────
+# A balance row is useless to the pricing engine until it lands in the
+# ``quota_state['ppq']`` dict that ``live_router._compute_ppq_pressure`` reads.
+# ``ppq_quota_entry`` is that bridge: it turns the newest row in the shared
+# ``provider_balances`` table into the ``{'used_pct': float, ...}`` entry the
+# pressure function consumes. ``_snapshot_quota`` (production proxy) calls this
+# instead of the old hardcoded ``{'used_pct': 0.0, ...}``.
+
+_PPQ_BALANCE_MAX_AGE = 1200.0  # 20 min — 2× the 5-min collection cadence (slack)
+
+
+def ppq_quota_entry(
+    db_path: Optional[str] = None,
+    *,
+    max_age: Optional[float] = _PPQ_BALANCE_MAX_AGE,
+) -> dict:
+    """Build the ``quota_state['ppq']`` entry from the latest stored balance.
+
+    The bridge from the collector (``provider_balances`` table) to the
+    ``quota_state['ppq']`` dict that ``live_router._compute_ppq_pressure``
+    reads. Until this is wired into ``_snapshot_quota``, PPQ credit depletion
+    is invisible to the pricing engine (``used_pct`` stays hardcoded at 0.0).
+
+    Cold-start contract (matches ``_compute_ppq_pressure``):
+      * no stored row, OR the row is older than ``max_age`` (default 20 min,
+        i.e. 2× the 5-min collection cadence) → return ``{}`` (no ``used_pct``
+        key). ``_compute_ppq_pressure`` then applies conservative
+        ``cold_start_pressure`` (>1.0) so a not-yet-probed PPQ endpoint does
+        not look artificially cheap.
+      * fresh row → ``{'used_pct', 'remaining', 'starting', 'is_exhausted',
+        'collected_at'}`` with ``used_pct`` in 0–100.
+
+    Pass ``max_age=None`` to use the newest row regardless of age. Never
+    raises — any DB/parse error yields the cold-start ``{}`` entry.
+    """
+    db_path = db_path or default_db_path()
+    bal = get_latest_ppq_balance(db_path)
+    if bal is None:
+        return {}
+    if max_age is not None and (time.time() - bal.collected_at) > max_age:
+        return {}
+    return {
+        "used_pct": float(bal.used_pct),
+        "remaining": float(bal.balance) if bal.balance is not None else 0.0,
+        "starting": float(bal.starting),
+        "is_exhausted": bool(bal.is_exhausted),
+        "collected_at": float(bal.collected_at),
+    }
 
 
 # ── Cron entrypoint ──────────────────────────────────────────────────────────

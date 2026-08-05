@@ -309,3 +309,111 @@ class TestPressureCompat:
             b.usage_fraction, onset=0.80, asymptote=1.5, hard_limit=True,
         )
         assert factor == float("inf")  # no credits → breaker trips
+
+
+# ── Bridge to quota_state['ppq'] (P3-PPQ STEP 3 + STEP 4) ────────────────────
+# End-to-end: stored balance → ppq_quota_entry() → live_router._compute_ppq_pressure.
+# These exercise the REAL consumer (not quota_pressure_factor directly), proving
+# the collector → quota_state → pressure wiring for the two regimes the task pins:
+#   balance=0  (credits gone)   → +inf
+#   balance=full (nothing spent) → 1.0
+
+def _store(db_path, balance, starting=20.0, collected_at=None):
+    """Store one PPQ balance row and return it parsed."""
+    b = pc.parse_ppq_balance({"balance": balance}, starting)
+    assert b is not None
+    if collected_at is not None:
+        b.collected_at = collected_at
+    assert pc.store_ppq_balance(db_path, b)
+    return b
+
+
+class TestBridge:
+    def test_exhausted_balance_yields_inf(self, db_path):
+        """STEP 4: balance=0 → ppq_quota_entry → _compute_ppq_pressure == +inf."""
+        from src.live_router import _compute_ppq_pressure
+        _store(db_path, 0.0)
+        entry = pc.ppq_quota_entry(db_path)
+        assert "used_pct" in entry
+        assert entry["is_exhausted"] is True
+        assert entry["used_pct"] == pytest.approx(100.0)
+        assert _compute_ppq_pressure(entry) == float("inf")
+
+    def test_full_balance_yields_baseline(self, db_path):
+        """STEP 4: balance == starting (nothing spent) → pressure == 1.0."""
+        from src.live_router import _compute_ppq_pressure
+        _store(db_path, 20.0, starting=20.0)
+        entry = pc.ppq_quota_entry(db_path)
+        assert entry["used_pct"] == pytest.approx(0.0)
+        assert entry["is_exhausted"] is False
+        assert _compute_ppq_pressure(entry) == pytest.approx(1.0)
+
+    def test_negative_balance_yields_inf(self, db_path):
+        """Negative balance (credit overrun — what the live API actually returns
+        for an overdrawn account) is treated as exhausted → +inf."""
+        from src.live_router import _compute_ppq_pressure
+        _store(db_path, -0.0026, starting=20.0)
+        entry = pc.ppq_quota_entry(db_path)
+        assert entry["is_exhausted"] is True
+        assert _compute_ppq_pressure(entry) == float("inf")
+
+    def test_mid_balance_ramps_past_onset(self, db_path):
+        """balance=2 of 20 → 90% used → pressure > 1.0 (past onset 0.80)."""
+        from src.live_router import _compute_ppq_pressure
+        _store(db_path, 2.0, starting=20.0)
+        entry = pc.ppq_quota_entry(db_path)
+        assert entry["used_pct"] == pytest.approx(90.0)
+        assert _compute_ppq_pressure(entry) > 1.0
+
+    def test_no_data_is_cold_start(self, db_path):
+        """No stored row → ppq_quota_entry() == {} → conservative cold_start (>1.0)."""
+        from src.live_router import _compute_ppq_pressure
+        from src.pricing_engine import (
+            cold_start_pressure, PPQ_QUOTA_PRESSURE_ASYMPTOTE,
+        )
+        entry = pc.ppq_quota_entry(db_path)
+        assert entry == {}  # cold-start marker: no used_pct key
+        expected = cold_start_pressure(
+            asymptote=PPQ_QUOTA_PRESSURE_ASYMPTOTE, hard_limit=True,
+        )
+        assert _compute_ppq_pressure(entry) == pytest.approx(expected)
+        assert _compute_ppq_pressure(entry) > 1.0
+
+    def test_stale_row_is_cold_start(self, db_path):
+        """A row older than max_age (collector stopped) → cold-start {} entry."""
+        import time as _time
+        from src.live_router import _compute_ppq_pressure
+        from src.pricing_engine import (
+            cold_start_pressure, PPQ_QUOTA_PRESSURE_ASYMPTOTE,
+        )
+        _store(db_path, 10.0, collected_at=_time.time() - 3600)  # 1h old → stale
+        entry = pc.ppq_quota_entry(db_path)  # default max_age = 1200s
+        assert entry == {}
+        expected = cold_start_pressure(
+            asymptote=PPQ_QUOTA_PRESSURE_ASYMPTOTE, hard_limit=True,
+        )
+        assert _compute_ppq_pressure(entry) == pytest.approx(expected)
+
+    def test_stale_disabled_uses_newest(self, db_path):
+        """max_age=None ignores staleness and returns the row regardless of age."""
+        import time as _time
+        _store(db_path, 10.0, collected_at=_time.time() - 999999)
+        entry = pc.ppq_quota_entry(db_path, max_age=None)
+        assert "used_pct" in entry
+        assert entry["used_pct"] == pytest.approx(50.0)
+
+    def test_bridge_never_raises_on_bad_db(self, tmp_path):
+        """A garbage/unreachable db_path must not raise — returns cold-start {}."""
+        entry = pc.ppq_quota_entry(str(tmp_path / "nope" / "deep" / "x.db"))
+        assert entry == {}
+
+    def test_entry_shape_matches_snapshot_contract(self, db_path):
+        """The entry carries the fields _snapshot_quota / diagnostics expect."""
+        _store(db_path, 8.0, starting=20.0)
+        entry = pc.ppq_quota_entry(db_path)
+        for k in ("used_pct", "remaining", "starting", "is_exhausted", "collected_at"):
+            assert k in entry, f"missing {k}"
+        assert entry["remaining"] == pytest.approx(8.0)
+        assert entry["starting"] == pytest.approx(20.0)
+        assert entry["used_pct"] == pytest.approx(60.0)
+        assert isinstance(entry["collected_at"], float)
