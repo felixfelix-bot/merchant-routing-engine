@@ -711,3 +711,173 @@ This document supersedes it on:
 - **Migration phasing**: the explicit kill-switch + 5-phase plan here
 - **Thread-safety contract**: the lock-free-snapshot / RLock-refresh model here
 - **Risk register**: R1–R14 here supersede the §10 table
+
+---
+
+## 8. Quota-Aware Price Modeling
+
+> **Felix's direction (2025-08-05):** "Make sure that the price goes up as the
+> quota gets used up, and then redirect to z.ai based on price, not based on
+> quota." Price-based routing replaces quota-threshold gating entirely.
+
+### 8.1 Felix's question: "don't we already have a common filter?"
+
+**Yes.** `RealtimePricing` (§2) IS the common filter. Every provider's $/M flows
+through the same pipeline: collector → `PriceKalman` → deterministic multipliers
+→ effective price → optimizer. The quota-awareness described here does NOT
+create a parallel mechanism. It enriches the data that the **existing** pipeline
+already consumes — specifically, it replaces the step-function
+`extra_usage_multiplier` (§pricing_engine.py L314–351) and the RP-5 throttle
+(`live_router.py` L66–99) with a single continuous price function that lives in
+the same multiplier layer.
+
+### 8.2 The price function — burn-rate-weighted expected marginal cost
+
+**Recommendation: Option C (probability-weighted), grounded in Option D
+(marginal cost).** Options A (step) and B (linear ramp on current usage) are
+rejected: A is reactive-only (the current approach Felix is correcting), and B
+ignores burn velocity — at 50% usage it raises price equally whether the window
+resets in 4.5h or 30 seconds.
+
+The effective $/M for an Ollama model is:
+
+```
+effective_rate = (1 - p_extra) × r_included + p_extra × r_extra
+```
+
+Where:
+- `r_included` — measured base rate from the billing collector (§3.3), ~$0.0155/M
+- `r_extra` — measured rate once in extra mode, ~$0.46/M for glm-5.2 (30× included)
+- `p_extra` — probability that the next request falls in the extra-usage regime
+
+`p_extra` is derived from the **predicted end-of-window usage**, not just current
+usage:
+
+```
+predicted_end = usage_frac + (burn_rate × time_remaining_h) / quota_total
+p_extra = clamp((predicted_end - ONSET) / (1.0 - ONSET), 0, 1)
+```
+
+- `ONSET` = 0.7 (configurable; below this predicted usage, `p_extra` = 0)
+- `burn_rate` from `ConsumptionKalman` (already tracked per provider)
+- `time_remaining_h` from the session/weekly window reset timestamps
+- `quota_total` from `providers.yaml` (500M session / 3.5B weekly)
+
+**Behavior:**
+
+| Scenario | `predicted_end` | `p_extra` | Effective glm-5.2 rate |
+|----------|-----------------|-----------|----------------------|
+| 10% usage, 4h left, low burn | 0.25 | 0.0 | $0.0155/M (included) |
+| 80% usage, 2h left, low burn | 0.90 | 0.67 | $0.31/M |
+| 60% usage, 0.5h left, high burn | 0.95 | 0.83 | $0.38/M |
+| 100% usage (in extra mode) | ≥1.0 | 1.0 | $0.46/M (measured = extra) |
+| Window just reset | 0.05 | 0.0 | $0.0155/M |
+
+The crossover where Ollama-glm-5.2 exceeds PPQ ($0.14/M) happens at
+`p_extra ≈ 0.28`, i.e. `predicted_end ≈ 0.78`. The optimizer picks PPQ
+automatically — no threshold, no gating.
+
+### 8.3 Integration — new deterministic multiplier, NOT a new collector
+
+Per ADR-003, quota-awareness is a **deterministic multiplier** on top of the
+Kalman base rate, exactly like `peak_multiplier`, `scarcity_factor`, and
+`pace_factor`. It is NOT a modification to the collector and NOT a new Kalman
+input.
+
+| Component | Change |
+|-----------|--------|
+| `_measure_ollama_billing` (collector) | **Unchanged.** Continues measuring the real backward-looking rate from `activity.cost / tokens`. When in extra mode, this naturally returns ~$0.46/M. |
+| `PriceKalman` | **Unchanged.** Smooths the measured rate. Stays honest. |
+| **NEW:** `quota_price_factor()` in `pricing_engine.py` | Computes `p_extra` and returns the blended rate. Applied in `compute_effective_price()`. |
+| `extra_usage_multiplier()` (pricing_engine.py L314) | **Replaced** by `quota_price_factor()`. The regime-string interface ("included"/"extra"/"exhausted") is deleted. |
+| RP-5 throttle (live_router.py L66–99) | **Replaced.** `_THROTTLE_THRESHOLD`, `_BLOCK_THRESHOLD`, `_THROTTLE_PRICE_MULT` deleted. The price function handles everything. |
+| `pace_factor()` for Ollama | `pace_factor` returns 1.0 for Ollama — `quota_price_factor` subsumes it (both predict window exhaustion; only Ollama has the price transition). |
+
+Signature:
+
+```python
+def quota_price_factor(
+    usage_frac: float,        # 0–1, from ollama.com/api/usage
+    burn_rate: float,         # tokens/hour, from ConsumptionKalman
+    time_remaining_h: float,  # hours until window reset
+    quota_total: float,       # tokens (session or weekly)
+    r_included: float,        # $/M, from PriceKalman.base_rate
+    r_extra: float,           # $/M, from providers.yaml extra_usage_rate_per_m
+    onset: float = 0.7,       # predicted_end below this → p_extra = 0
+) -> float:
+    """Returns the quota-aware effective $/M. Replaces extra_usage_multiplier."""
+```
+
+When `usage_frac >= 1.0` (already in extra mode), the collector's measured rate
+IS `r_extra`, the Kalman tracks it, and `quota_price_factor` returns `r_extra`
+directly — no double-counting. The multiplier's sole job is the **proactive**
+adjustment in the transition zone (predicted_end between `onset` and 1.0).
+
+### 8.4 kimi-k3 (always extra) vs glm-5.2 (sometimes included)
+
+| Model | Included quota? | Base rate measured | `quota_price_factor` behavior |
+|-------|----------------|-------------------|------------------------------|
+| **glm-5.2** | Yes (5h session + weekly) | ~$0.0155/M included, ~$0.46/M extra | Full proactive ramp. Price rises as quota depletes. |
+| **kimi-k3** | **No** — always pay-per-token | Always ~r_extra (measured directly from billing) | `p_extra` is always 1.0 by definition. `quota_price_factor` returns `r_extra`. No ramp — the price is honestly high from the start. |
+
+kimi-k3 is naturally deprioritized by the optimizer because its effective rate
+(~$0.46/M) always exceeds PPQ ($0.14/M) and OpenRouter ($0.135/M). It only gets
+routed when it's the only model that can serve the request (Ollama-exclusive
+short-circuit in `live_router.py` L448–463 stays in place — that's model
+availability, not price gating).
+
+The per-`(provider, model)` Kalman grid (§2.4) handles this naturally: each
+model has its own base rate. The collector must parse `activity` per-model from
+the billing API (the `/api/usage` response already breaks down cost by model).
+
+### 8.5 Session boundary reset — price drops instantly
+
+At the 5h session reset, `usage_frac` drops to ~0. Three things happen:
+
+1. **`quota_price_factor` returns `r_included` immediately** — no Kalman lag, no
+   smoothing. The deterministic multiplier is instant by design (ADR-003).
+2. **The Kalman base rate stays at its last converged value** (~$0.0155/M if we
+   were in included mode, or transitioning down from $0.46/M if we were in extra
+   mode — the Kalman smooths this over a few cycles, which is correct: we DID
+   pay those rates).
+3. **The optimizer picks Ollama again** if its effective price is now the lowest
+   among externals. No "re-enable Ollama" flag — the price drop handles it.
+
+For the weekly window (7 days), the same logic applies on a longer cycle. The
+session and weekly windows are evaluated independently; the optimizer sees the
+higher of the two effective rates (worst-case governs, matching
+`pace_factor_multi` semantics).
+
+### 8.6 The optimizer routes away naturally — no special gating
+
+When `quota_price_factor` raises glm-5.2's effective rate above $0.14/M (PPQ)
+or $0.135/M (OpenRouter), the `RoutingOptimizer` simply picks the cheaper
+provider. No `if usage > threshold: exclude()` logic. No regime strings. No
+breaker trip. The same `compute_effective_price → sort → pick cheapest` path
+that routes to z.ai at $0.001/M also routes away from Ollama at $0.31/M.
+
+The entire transition is invisible to the optimizer — it just sees a number go
+up and picks the next-cheapest. This is the core of Felix's correction: **one
+price comparison, no special cases.**
+
+### 8.7 Why this beats quota-threshold blocking
+
+| Quota-threshold blocking (current) | Quota-aware pricing (this design) |
+|-------------------------------------|----------------------------------|
+| Cliff behavior: fine at 84%, blocked at 85% | Smooth ramp: price rises continuously |
+| Arbitrary thresholds (0.85, 1.0) need tuning | Single `onset` parameter (0.7), or none |
+| Leaves quota unused if threshold is conservative | Uses every token the optimizer deems worth the price |
+| Doesn't adapt to burn rate — blocks at 85% whether burn is fast or slow | Burn-rate-aware: slow burn → stay cheap longer |
+| Requires separate code paths for throttle/block/extra regimes | One function, one code path |
+| Binary: Ollama is either full-price or excluded | Graduated: Ollama competes on price at every usage level |
+| Breaks the "one source of truth" principle — quota logic is separate from price logic | Price IS the quota logic. One pipeline. |
+
+### 8.8 Migration note
+
+This change is additive to the §4 phased plan. It slots into **Phase 2**
+(feature-flagged optimizer switch) as a replacement for the existing
+`extra_usage_multiplier` call in `compute_effective_price`. The kill switch
+`REALTIME_PRICING_ENABLED=false` restores the old step-function behavior. No new
+DB tables, no new collectors, no new cron jobs — just one new function in
+`pricing_engine.py` and the deletion of three threshold constants from
+`live_router.py`.
