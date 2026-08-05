@@ -56,6 +56,8 @@ from src.real_price_tracker import (
     get_trailing_rate,
     get_trailing_rate_with_seed,
     get_zai_amortized_rate,
+    get_zai_per_model_rate,
+    get_zai_per_model_rates,
 )
 
 
@@ -811,6 +813,63 @@ class TestGetAllTrailingRatesPerModel(_OllamaBillingNeutered):
         assert "get_all_trailing_rates_per_model" in rpt.__all__
 
 
+# ── PM-T5 gate: DeepInfra per-model rate resolution ──────────────────────────
+
+
+class TestDeepInfraPerModelGate:
+    """PM-T5 acceptance gate.
+
+    ``get_real_rate("deepinfra", "deepseek-v4-flash")`` must return that
+    model's *measured* per-model rate — not the provider blend. This is the
+    precondition for per-model pricing once ``daily_spend`` is migrated to
+    carry a ``model`` column (plan §6 T5).
+    """
+
+    def test_per_model_rate_not_provider_blend(self, db):
+        """Two deepinfra models at very different costs: deepseek-v4-flash's
+        per-model rate must reflect its own cost, distinct from the blend."""
+        now = _now_utc()
+        # deepseek-v4-flash: 200 calls × 5000 tok × $0.0007 = 1M tok, $0.14
+        #   → $0.14/M (matches providers.yaml published blend 0.09+0.19)/2).
+        flash = [
+            (now - 100, "deepinfra", "deepseek-v4-flash", 5_000, 0.0007)
+            for _ in range(200)
+        ]
+        # deepseek-v4-pro: 200 calls × 5000 tok × $0.0135 = 1M tok, $2.70
+        #   → $2.70/M.
+        pro = [
+            (now - 100, "deepinfra", "deepseek-v4-pro", 5_000, 0.0135)
+            for _ in range(200)
+        ]
+        _seed(db, flash + pro)
+
+        flash_rate = get_real_rate("deepinfra", "deepseek-v4-flash", db_path=db)
+        pro_rate = get_real_rate("deepinfra", "deepseek-v4-pro", db_path=db)
+        blend = get_real_rate("deepinfra", db_path=db)
+
+        # All three resolve (≥ MIN_CALLS_FOR_RATE per slice).
+        assert flash_rate is not None
+        assert pro_rate is not None
+        assert blend is not None
+        # The per-model rates are correct.
+        assert flash_rate == pytest.approx(0.14, rel=0.02)
+        assert pro_rate == pytest.approx(2.70, rel=0.02)
+        # THE GATE: per-model rate differs from the provider blend.
+        assert flash_rate != pytest.approx(blend, rel=0.02)
+        assert pro_rate != pytest.approx(blend, rel=0.02)
+        # Blend sits strictly between the two model rates.
+        assert flash_rate < blend < pro_rate
+
+    def test_unknown_model_returns_none(self, db):
+        """A model with no rows → None (insufficient data), not the blend."""
+        now = _now_utc()
+        _seed(db, [
+            (now - 100, "deepinfra", "deepseek-v4-flash", 5_000, 0.0007)
+            for _ in range(200)
+        ])
+        assert get_real_rate("deepinfra", "nonexistent-model", db_path=db) is None
+
+
 class TestGetRateReadiness(_OllamaBillingNeutered):
     def test_cold_all_seeds(self, db):
         report = get_rate_readiness(db_path=db, _now=_now_utc())
@@ -1086,3 +1145,310 @@ class TestZaiAmortizedRate:
             rate = get_zai_amortized_rate(provider, db_path=db,
                                           _now=_now_utc())
             assert isinstance(rate, float), provider
+
+
+# ── T4: z.ai per-model amortization (metered vs subscription) ────────────────
+
+
+class TestQueryZaiWindowPerModel:
+    """_query_zai_window_per_model: GROUP BY (key_name, model) over z.ai keys."""
+
+    def test_groups_by_key_and_model(self, db):
+        now = _now_utc()
+        rows = (
+            [(now - 100, "ours", "glm-5.2", 1000, 0.0) for _ in range(120)]
+            + [(now - 100, "ours", "kimi-k3", 1000, 0.00753) for _ in range(120)]
+            + [(now - 100, "friend", "glm-5.2", 1000, 0.0) for _ in range(120)]
+        )
+        _seed(db, rows)
+        out = rpt._query_zai_window_per_model(db, now - 365 * 86400)
+        # Two providers, each with its own model breakdown.
+        assert set(out) == {"ours", "friend"}
+        assert set(out["ours"]) == {"glm-5.2", "kimi-k3"}
+        # (count, sum_cost, sum_tokens) tuple shape.
+        count, sum_cost, sum_tokens = out["ours"]["kimi-k3"]
+        assert count == 120
+        assert sum_cost == pytest.approx(120 * 0.00753, rel=1e-9)
+        assert sum_tokens == pytest.approx(120 * 1000, rel=1e-9)
+
+    def test_null_cost_summed_as_zero(self, db):
+        """Subscription models with NULL cost_usd surface with sum_cost=0.0."""
+        now = _now_utc()
+        rows = [(now - 100, "ours", "glm-5.2", 1000, None) for _ in range(120)]
+        _seed(db, rows)
+        out = rpt._query_zai_window_per_model(db, now - 365 * 86400)
+        _, sum_cost, sum_tokens = out["ours"]["glm-5.2"]
+        assert sum_cost == 0.0
+        assert sum_tokens == pytest.approx(120 * 1000, rel=1e-9)
+
+    def test_null_model_keyed_as_null_marker(self, db):
+        now = _now_utc()
+        rows = [(now - 100, "ours", None, 1000, 0.0) for _ in range(120)]
+        _seed(db, rows)
+        out = rpt._query_zai_window_per_model(db, now - 365 * 86400)
+        assert "_null" in out["ours"]
+
+    def test_legacy_zai_alias_counted(self, db):
+        now = _now_utc()
+        rows = [(now - 100, "zai_ours", "glm-5.2", 1000, 0.0)
+                for _ in range(120)]
+        _seed(db, rows)
+        out = rpt._query_zai_window_per_model(db, now - 365 * 86400)
+        assert "zai_ours" in out
+        assert "glm-5.2" in out["zai_ours"]
+
+    def test_non_zai_provider_excluded(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 100, "ppq", "kimi-k3", 1000, 0.00753)
+                   for _ in range(120)])
+        out = rpt._query_zai_window_per_model(db, now - 365 * 86400)
+        assert "ppq" not in out
+
+    def test_window_excludes_old_rows(self, db):
+        now = _now_utc()
+        # 400d ago — outside the 365d window.
+        _seed(db, [(now - 400 * 86400, "ours", "glm-5.2", 1000, 0.0)
+                   for _ in range(120)])
+        out = rpt._query_zai_window_per_model(db, now - 365 * 86400)
+        assert out == {}
+
+    def test_never_raises_on_bad_db(self):
+        clear_cache()
+        missing = os.path.join(tempfile.gettempdir(), "rpt_zai_pm_bad.db")
+        try:
+            assert rpt._query_zai_window_per_model(missing, 0) == {}
+        finally:
+            if os.path.exists(missing):
+                os.unlink(missing)
+
+
+class TestZaiPerModelRate:
+    """get_zai_per_model_rate: metered → cost_usd, subscription → amortized."""
+
+    def _seed_metered_and_sub(self, db, now):
+        """glm-5.2 (subscription, ~$0.014/M) + kimi-k3 (metered, $7.53/M)."""
+        # glm-5.2: 20B tokens over >30d → amortized 300/(20e9/1e6) = 0.015.
+        glm = [(now - 60 * 86400, "ours", "glm-5.2", 100_000_000, 0.0)
+               for _ in range(200)]
+        # kimi-k3: 200 calls × (1000 tok, $0.00753) → cost_usd rate 7.53/M.
+        # Small token volume so it barely shifts the amortized denominator.
+        kimi = [(now - 100, "ours", "kimi-k3", 1000, 0.00753)
+                for _ in range(200)]
+        _seed(db, glm + kimi)
+        return glm, kimi
+
+    def test_gate_kimi_metered_vs_glm_subscription(self, db):
+        """GATE: kimi-k3 ≈ $7.53/M (metered), glm-5.2 ≈ $0.014/M (amortized),
+        and the two differ by >100× on the same z.ai key."""
+        now = _now_utc()
+        self._seed_metered_and_sub(db, now)
+
+        kimi = get_real_rate("ours", "kimi-k3", db_path=db, _now=now)
+        glm = get_real_rate("ours", "glm-5.2", db_path=db, _now=now)
+
+        # kimi-k3 metered: real cost_usd rate.
+        assert kimi == pytest.approx(7.53, rel=1e-3)
+        # glm-5.2 subscription: amortized 300/(20.0002e9/1e6) ≈ 0.015.
+        assert glm == pytest.approx(0.015, rel=2e-2)
+        # The two rates differ by >100× — the cost spread the blend hid.
+        assert kimi is not None and glm is not None
+        assert kimi / glm > 100
+
+    def test_metered_model_uses_cost_usd_rate(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 100, "ours", "kimi-k3", 1000, 0.00753)
+                   for _ in range(200)])
+        rate = get_zai_per_model_rate("ours", "kimi-k3", db_path=db, _now=now)
+        assert rate == pytest.approx(7.53, rel=1e-9)
+
+    def test_subscription_model_uses_amortized_rate(self, db):
+        """A model with cost_usd≈0 returns the provider amortized rate, not 0."""
+        now = _now_utc()
+        _seed(db, [(now - 40 * 86400, "ours", "glm-5.2", 10_000_000_000, 0.0)])
+        rate = get_zai_per_model_rate("ours", "glm-5.2", db_path=db, _now=now)
+        amortized = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        assert rate == pytest.approx(amortized, rel=1e-12)
+        assert rate == pytest.approx(0.03, rel=1e-9)  # 300/(10e9/1e6)
+
+    def test_get_real_rate_falls_back_when_cost_usd_zero(self, db):
+        """cost_usd=0.0 within the window → get_real_rate returns amortized,
+        not 0.0 (the subscription blindspot the fallback fixes)."""
+        now = _now_utc()
+        # glm-5.2 rows inside the 168h window, cost_usd=0.0.
+        _seed(db, [(now - 100, "ours", "glm-5.2", 1000, 0.0)
+                   for _ in range(200)])
+        rate = get_real_rate("ours", "glm-5.2", db_path=db, _now=now)
+        # <30d data → amortized seed $0.014/M (not 0.0).
+        assert rate == pytest.approx(ZAI_SEED_RATE, rel=1e-12)
+        assert rate != 0.0
+
+    def test_get_real_rate_falls_back_when_no_costed_rows(self, db):
+        """cost_usd=NULL (no costed rows in window) → None → amortized fallback."""
+        now = _now_utc()
+        _seed(db, [(now - 60 * 86400, "ours", "glm-5.2", 100_000_000, None)
+                   for _ in range(200)])
+        rate = get_real_rate("ours", "glm-5.2", db_path=db, _now=now)
+        assert rate == pytest.approx(0.015, rel=2e-2)
+
+    def test_metered_under_min_calls_falls_to_amortized(self, db):
+        """A metered model with <MIN_CALLS_FOR_RATE calls is under-observed →
+        falls back to the (cheap) amortized rate rather than a noisy guess."""
+        now = _now_utc()
+        # Seed enough subscription volume for a real amortized rate.
+        _seed(db, [(now - 40 * 86400, "ours", "glm-5.2", 10_000_000_000, 0.0)])
+        # Only 5 kimi-k3 calls (< MIN_CALLS_FOR_RATE=100).
+        _seed(db, [(now - 100, "ours", "kimi-k3", 1000, 0.00753)
+                   for _ in range(5)])
+        rate = get_zai_per_model_rate("ours", "kimi-k3", db_path=db, _now=now)
+        amortized = get_zai_amortized_rate("ours", db_path=db, _now=now)
+        assert rate == pytest.approx(amortized, rel=1e-12)
+
+    def test_friend_premium_applied_to_metered(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 100, "ours", "kimi-k3", 1000, 0.00753)
+                   for _ in range(200)])
+        _seed(db, [(now - 100, "friend", "kimi-k3", 1000, 0.00753)
+                   for _ in range(200)])
+        ours = get_zai_per_model_rate("ours", "kimi-k3", db_path=db, _now=now)
+        friend = get_zai_per_model_rate("friend", "kimi-k3", db_path=db,
+                                        _now=now)
+        assert ours is not None and friend is not None
+        assert friend == pytest.approx(ours * ZAI_FRIEND_PREMIUM, rel=1e-12)
+
+    def test_model_none_returns_provider_amortized(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 40 * 86400, "ours", "glm-5.2", 10_000_000_000, 0.0)])
+        rate = get_zai_per_model_rate("ours", None, db_path=db, _now=now)
+        assert rate == pytest.approx(0.03, rel=1e-9)
+
+    def test_unknown_model_returns_amortized(self, db):
+        """A model with no rows at all resolves to the provider amortized rate."""
+        now = _now_utc()
+        _seed(db, [(now - 40 * 86400, "ours", "glm-5.2", 10_000_000_000, 0.0)])
+        rate = get_zai_per_model_rate("ours", "never-seen-model",
+                                      db_path=db, _now=now)
+        assert rate == pytest.approx(0.03, rel=1e-9)
+
+    def test_cold_start_returns_amortized_seed(self, db):
+        """Empty DB → amortized rate degrades to the seed (always a float)."""
+        rate = get_zai_per_model_rate("ours", "kimi-k3", db_path=db,
+                                      _now=_now_utc())
+        assert rate == pytest.approx(ZAI_SEED_RATE, rel=1e-12)
+
+    def test_daily_cache_served_within_ttl(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 100, "ours", "kimi-k3", 1000, 0.00753)
+                   for _ in range(200)])
+        first = get_zai_per_model_rate("ours", "kimi-k3", db_path=db, _now=now)
+        # Mutate DB (would change the rate) — cache must serve the old value.
+        _seed(db, [(now - 100, "ours", "kimi-k3", 1000, 0.05)
+                   for _ in range(200)])
+        second = get_zai_per_model_rate("ours", "kimi-k3", db_path=db, _now=now)
+        assert second == first
+
+    def test_daily_cache_recomputes_after_ttl(self, db):
+        t0 = _now_utc()
+        _seed(db, [(t0 - 100, "ours", "kimi-k3", 1000, 0.00753)
+                   for _ in range(200)])
+        first = get_zai_per_model_rate("ours", "kimi-k3", db_path=db, _now=t0)
+        _seed(db, [(t0 - 100, "ours", "kimi-k3", 1000, 0.05)
+                   for _ in range(200)])
+        later = t0 + ZAI_CACHE_TTL_SECONDS + 1
+        second = get_zai_per_model_rate("ours", "kimi-k3", db_path=db,
+                                        _now=later)
+        assert second != pytest.approx(first, rel=1e-3)
+
+    def test_clear_cache_drops_per_model(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 100, "ours", "kimi-k3", 1000, 0.00753)
+                   for _ in range(200)])
+        first = get_zai_per_model_rate("ours", "kimi-k3", db_path=db, _now=now)
+        _seed(db, [(now - 100, "ours", "kimi-k3", 1000, 0.05)
+                   for _ in range(200)])
+        clear_cache()
+        second = get_zai_per_model_rate("ours", "kimi-k3", db_path=db, _now=now)
+        assert second != pytest.approx(first, rel=1e-3)
+
+    def test_never_raises_on_bad_db(self):
+        clear_cache()
+        missing = os.path.join(tempfile.gettempdir(), "rpt_zai_pm_rate_bad.db")
+        try:
+            rate = get_zai_per_model_rate("ours", "kimi-k3", db_path=missing,
+                                          _now=_now_utc())
+            assert rate == pytest.approx(ZAI_SEED_RATE, rel=1e-12)
+        finally:
+            if os.path.exists(missing):
+                os.unlink(missing)
+
+    def test_exported_in_public_api(self):
+        assert "get_zai_per_model_rate" in rpt.__all__
+
+
+class TestZaiPerModelRates:
+    """get_zai_per_model_rates: {model: $/M, '_default': $/M} for one provider."""
+
+    def test_returns_metered_and_subscription_with_default(self, db):
+        now = _now_utc()
+        # glm-5.2 subscription + kimi-k3 metered on the same 'ours' key.
+        _seed(db, [(now - 60 * 86400, "ours", "glm-5.2", 100_000_000, 0.0)
+                   for _ in range(200)])
+        _seed(db, [(now - 100, "ours", "kimi-k3", 1000, 0.00753)
+                   for _ in range(200)])
+        rates = get_zai_per_model_rates("ours", db_path=db, _now=now)
+        assert set(rates) == {"glm-5.2", "kimi-k3", "_default"}
+        assert rates["kimi-k3"] == pytest.approx(7.53, rel=1e-3)
+        # glm-5.2 carries the amortized provider rate.
+        assert rates["glm-5.2"] == pytest.approx(rates["_default"], rel=1e-12)
+        assert rates["glm-5.2"] == pytest.approx(0.015, rel=2e-2)
+        # The spread is visible in one dict: 7.53 vs 0.015 (>100×).
+        assert rates["kimi-k3"] / rates["glm-5.2"] > 100
+
+    def test_all_subscription_models_share_amortized_rate(self, db):
+        """Per §3.2: every subscription model gets the SAME amortized rate."""
+        now = _now_utc()
+        _seed(db, [(now - 40 * 86400, "ours", "glm-5.2", 5_000_000_000, 0.0)])
+        _seed(db, [(now - 40 * 86400, "ours", "kimi-k2.7-code",
+                   5_000_000_000, 0.0)])
+        rates = get_zai_per_model_rates("ours", db_path=db, _now=now)
+        # 10B combined → 300/(10e9/1e6) = 0.03 for both subscription models.
+        assert rates["glm-5.2"] == pytest.approx(0.03, rel=1e-9)
+        assert rates["kimi-k2.7-code"] == pytest.approx(0.03, rel=1e-9)
+        assert rates["_default"] == pytest.approx(0.03, rel=1e-9)
+
+    def test_cold_start_returns_default_seed_only(self, db):
+        rates = get_zai_per_model_rates("ours", db_path=db, _now=_now_utc())
+        assert set(rates) == {"_default"}
+        assert rates["_default"] == pytest.approx(ZAI_SEED_RATE, rel=1e-12)
+
+    def test_friend_premium_applied(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 100, "ours", "kimi-k3", 1000, 0.00753)
+                   for _ in range(200)])
+        _seed(db, [(now - 100, "friend", "kimi-k3", 1000, 0.00753)
+                   for _ in range(200)])
+        ours = get_zai_per_model_rates("ours", db_path=db, _now=now)
+        friend = get_zai_per_model_rates("friend", db_path=db, _now=now)
+        assert friend["kimi-k3"] == pytest.approx(
+            ours["kimi-k3"] * ZAI_FRIEND_PREMIUM, rel=1e-12)
+
+    def test_null_model_excluded(self, db):
+        """Un-attributed (NULL model) calls are covered by _default, not a key."""
+        now = _now_utc()
+        _seed(db, [(now - 100, "ours", None, 1000, 0.0) for _ in range(200)])
+        rates = get_zai_per_model_rates("ours", db_path=db, _now=now)
+        assert set(rates) == {"_default"}
+
+    def test_never_raises_on_bad_db(self):
+        clear_cache()
+        missing = os.path.join(tempfile.gettempdir(), "rpt_zai_pm_rates_bad.db")
+        try:
+            rates = get_zai_per_model_rates("ours", db_path=missing,
+                                            _now=_now_utc())
+            assert set(rates) == {"_default"}
+            assert rates["_default"] == pytest.approx(ZAI_SEED_RATE, rel=1e-12)
+        finally:
+            if os.path.exists(missing):
+                os.unlink(missing)
+
+    def test_exported_in_public_api(self):
+        assert "get_zai_per_model_rates" in rpt.__all__

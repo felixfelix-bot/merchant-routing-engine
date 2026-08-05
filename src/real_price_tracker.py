@@ -81,6 +81,21 @@ Trailing-rate API (T6 — Ollama 90d + paid-endpoint 30d measured rates)
         ``source`` is ``"measured"`` (real data), ``"seed"`` (cold start), or
         ``"unknown"`` (no seed entry). Powers dashboards and the gate below.
 
+z.ai per-model amortization (T4 — metered vs subscription split)
+    The z.ai flat-rate subscription hides a >100× per-model cost spread on one
+    key: ``kimi-k3`` is metered (~$7.53/M, in ``cost_usd``) while ``glm-5.2`` is
+    subscription-served (~$0.014/M amortized). These split them:
+
+    ``get_zai_per_model_rate(provider, model=None) -> float | None``
+        Metered models (``cost_usd`` > 0) → real cost_usd rate; subscription
+        models → amortized provider rate. With ``model=None`` the provider-level
+        amortized rate. Used by :func:`get_real_rate` so the two rates differ by
+        >100× on the same ``ours`` key.
+
+    ``get_zai_per_model_rates(provider='ours') -> dict[str, float]``
+        ``{model: $/M, '_default': $/M}`` for every model on the z.ai provider —
+        the nested per-model shape the router consumes.
+
     ``gate_all_rates_have_data(providers=None) -> bool``
         True iff every provider in :data:`REQUIRED_RATE_PROVIDERS` has a
         non-zero *measured* trailing rate (i.e. the system is warm and no rate
@@ -125,6 +140,9 @@ __all__ = [
     "ZAI_WINDOW_HOURS",
     "ZAI_CACHE_TTL_SECONDS",
     "ZAI_PROVIDERS",
+    # ── z.ai per-model amortization (T4: metered vs subscription split) ───────
+    "get_zai_per_model_rate",
+    "get_zai_per_model_rates",
     # ── Tunables / constants ────────────────────────────────────────────────────
     "LAST_RESORT_RATES",
     "DEFAULT_DB_PATH",
@@ -278,6 +296,11 @@ _trailing_cache: dict[tuple[str, str | None, str], tuple[float | None, float]] =
 # the T6 trailing cache because the amortized rate moves on a daily cadence.
 _zai_cache: dict[tuple[str, str], tuple[float, float]] = {}
 
+# z.ai per-model rate cache (T4). key: (provider, model, db_path) → (rate, ts).
+# Daily TTL (ZAI_CACHE_TTL_SECONDS) — same cadence as the provider-level
+# amortized rate; the metered-vs-subscription split moves slowly.
+_zai_pm_cache: dict[tuple[str, str | None, str], tuple[float | None, float]] = {}
+
 
 def clear_cache() -> None:
     """Drop every cached rate. Tests call this between assertions; production
@@ -286,6 +309,7 @@ def clear_cache() -> None:
         _cache.clear()
         _trailing_cache.clear()
         _zai_cache.clear()
+        _zai_pm_cache.clear()
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
@@ -474,6 +498,23 @@ def get_real_rate(
     since = now - window_hours * 3600.0
     count, sum_cost, sum_tokens = _query_window(db, provider, model, since)
     rate = _rate_from_sums(count, sum_cost, sum_tokens)
+
+    # T4: z.ai flat-rate subscription. Subscription models (glm-5.2 etc.) have
+    # ~$0 marginal cost_usd, so the cost_usd path returns None (no costed rows
+    # in the window) or 0.0 (costed but free) for them. Fall back to the z.ai
+    # per-model amortization that splits metered models (kimi-k3 → real
+    # cost_usd, ~$7.53/M) from subscription models (glm-5.2 → shared-budget
+    # amortized rate, ~$0.014/M). This is what makes the two rates differ by
+    # >100× on the same ``ours`` key — the cost spread the blended rate hid.
+    # Only per-model lookups (model is not None) get the split; the provider-
+    # level rate (model=None) stays the plain cost_usd aggregate and is priced
+    # via get_zai_amortized_rate elsewhere.
+    if (
+        (rate is None or rate == 0.0)
+        and model is not None
+        and provider in ZAI_PROVIDERS
+    ):
+        rate = get_zai_per_model_rate(provider, model, db_path=db, _now=now)
 
     # Cache both hits and misses so an under-populated provider doesn't get
     # hammered on every request.
@@ -915,6 +956,204 @@ def get_zai_amortized_rate(
     with _cache_lock:
         _zai_cache[key] = (rate, now)
     return rate
+
+
+# ── z.ai per-model amortization (Task T4) ────────────────────────────────────
+# The z.ai flat-rate subscription hides a >100× per-model cost spread on a
+# single provider key. ``kimi-k3`` is a metered API passthrough billed at real
+# cost (~$7.53/M, captured in ``cost_usd``); ``glm-5.2`` is served from the flat
+# $300/yr budget (~$0.014/M amortized, ~$0 marginal cost_usd). A blended
+# per-provider rate makes kimi-k3 look ~313× cheaper than it is. These helpers
+# split metered from subscription per model (plan §3.2 / task T4), so the router
+# can see the real per-model cost.
+
+
+def _query_zai_window_per_model(
+    db_path: str,
+    since_ts: float,
+) -> dict[str, dict[str, tuple[int, float, float]]]:
+    """Per-(provider, model) z.ai token + cost breakdown since ``since_ts``.
+
+    The per-model counterpart of :func:`_query_zai_window`. GROUP BY
+    ``(key_name, model)`` over the z.ai subscription keys — the canonical names
+    (``ours``/``friend``) OR the legacy ``zai_*`` aliases (see
+    src/provider_names.py). Returns a nested dict::
+
+        {key_name: {model: (call_count, sum_cost_usd, sum_total_tokens)}}
+
+    ``sum_cost_usd`` is ``COALESCE``-ed to 0 so a subscription model whose rows
+    have NULL/zero ``cost_usd`` still appears with a zero sum — that zero sum is
+    exactly how :func:`get_zai_per_model_rate` distinguishes a subscription
+    model from a metered one. NULL model names are keyed ``"_null"``. Empty dict
+    on any DB error. Never raises — on failure callers fall through to the
+    amortized/seed fallback.
+    """
+    try:
+        conn = sqlite3.connect(db_path, timeout=2)
+        try:
+            rows = conn.execute(
+                "SELECT key_name, model, COUNT(*), "
+                "COALESCE(SUM(cost_usd), 0), COALESCE(SUM(total_tokens), 0) "
+                "FROM api_calls "
+                "WHERE (key_name IN ('ours', 'friend') OR key_name LIKE 'zai%') "
+                "AND ts > ? "
+                "GROUP BY key_name, model",
+                (since_ts,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        _log.debug(
+            "real_price_tracker: zai per-model window query failed", exc_info=True
+        )
+        return {}
+    out: dict[str, dict[str, tuple[int, float, float]]] = {}
+    for key_name, model, count, sum_cost, sum_tokens in rows:
+        prov = key_name if key_name else "ours"
+        model_key = model if model else "_null"
+        out.setdefault(prov, {})[model_key] = (
+            int(count or 0),
+            float(sum_cost or 0.0),
+            float(sum_tokens or 0.0),
+        )
+    return out
+
+
+def _is_metered(count: int, sum_cost: float, sum_tokens: float) -> bool:
+    """True when a (provider, model) group carries a real per-token charge.
+
+    A z.ai model is *metered* (e.g. kimi-k3, an API passthrough billed at real
+    cost) when its rows carry a positive ``cost_usd`` sum over at least
+    :data:`MIN_CALLS_FOR_RATE` calls. A *subscription* model (e.g. glm-5.2,
+    served from the flat $300/yr budget) has ``cost_usd`` ≈ 0/NULL → not metered
+    → priced by amortization instead.
+    """
+    return count >= MIN_CALLS_FOR_RATE and sum_cost > 0 and sum_tokens > 0
+
+
+def _metered_rate(
+    count: int, sum_cost: float, sum_tokens: float, premium: float = 1.0
+) -> float | None:
+    """cost_usd rate for a metered group (``SUM(cost_usd)/SUM(tokens)*1e6``).
+
+    Returns ``None`` when the group is not metered (see :func:`_is_metered`) or
+    the computed rate is non-positive / NaN. The ``premium`` (friend surcharge)
+    is applied so the optimizer keeps preferring the ``ours`` key.
+    """
+    if not _is_metered(count, sum_cost, sum_tokens):
+        return None
+    rate = (sum_cost / sum_tokens) * 1e6 * premium
+    if rate > 0 and rate == rate:  # positive and not NaN
+        return rate
+    return None
+
+
+def get_zai_per_model_rate(
+    provider: str,
+    model: str | None = None,
+    *,
+    db_path: str | None = None,
+    _now: float | None = None,
+) -> float | None:
+    """Per-model $/M for a z.ai provider — metered vs subscription split.
+
+    Resolves one ``(provider, model)`` pair to the rate that reflects how the
+    model is actually served on the z.ai flat-rate subscription:
+
+    * **Metered models** (positive ``cost_usd`` over ≥ :data:`MIN_CALLS_FOR_RATE`
+      calls, e.g. ``kimi-k3``): the real cost_usd rate
+      ``SUM(cost_usd)/SUM(total_tokens)*1e6`` — the genuine per-token charge
+      (~$7.53/M).
+    * **Subscription models** (``cost_usd`` ≈ 0/NULL, e.g. ``glm-5.2``): the
+      amortized provider rate from :func:`get_zai_amortized_rate` — the annual
+      budget spread over trailing-365d token volume (~$0.014/M). Per plan §3.2,
+      every subscription model receives the *same* amortized rate
+      (``budget × share / share-tokens = budget / total``).
+
+    With ``model=None`` the provider-level amortized rate is returned. Results
+    are cached per ``(provider, model, db_path)`` for
+    :data:`ZAI_CACHE_TTL_SECONDS` (24 h). Thread-safe. Never raises — any error
+    degrades to the amortized rate (which itself degrades to the seed).
+
+    This is the function that makes ``get_real_rate('ours', 'kimi-k3')`` (~$7.53)
+    differ by >100× from ``get_real_rate('ours', 'glm-5.2')`` (~$0.014) on the
+    same z.ai key.
+    """
+    now = _now if _now is not None else time.time()
+    db = _resolve_db(db_path)
+    key = (provider, model, db)
+
+    with _cache_lock:
+        cached = _zai_pm_cache.get(key)
+    if cached is not None:
+        value, computed_at = cached
+        if (now - computed_at) < ZAI_CACHE_TTL_SECONDS:
+            return value
+
+    friend = provider == "friend"
+    premium = ZAI_FRIEND_PREMIUM if friend else 1.0
+    rate: float | None = None
+
+    if model is not None:
+        since = now - ZAI_WINDOW_HOURS * 3600.0
+        breakdown = _query_zai_window_per_model(db, since)
+        stats = breakdown.get(provider, {}).get(model)
+        if stats is not None:
+            rate = _metered_rate(*stats, premium=premium)
+
+    # Subscription model (cost_usd ≈ 0), model=None, or an under-observed
+    # metered model → provider-level amortized rate. get_zai_amortized_rate
+    # always returns a float (seed on cold start), so rate becomes non-None
+    # once this branch is reached.
+    if rate is None:
+        rate = get_zai_amortized_rate(provider, db_path=db, _now=now)
+
+    with _cache_lock:
+        _zai_pm_cache[key] = (rate, now)
+    return rate
+
+
+def get_zai_per_model_rates(
+    provider: str = "ours",
+    *,
+    db_path: str | None = None,
+    _now: float | None = None,
+) -> dict[str, float]:
+    """``{model: $/M, '_default': $/M}`` for every model on a z.ai provider.
+
+    The "for each z.ai model" counterpart of :func:`get_zai_per_model_rate` (plan
+    T4). Runs one GROUP BY query over trailing-365d and prices each model:
+
+    * metered models (``cost_usd`` > 0) → their real cost_usd rate;
+    * subscription models (``cost_usd`` ≈ 0) → the shared amortized rate.
+
+    A ``'_default'`` key always carries the provider-level amortized rate, so a
+    model absent from trailing data still resolves. This is the nested shape the
+    per-model pricing path consumes to see kimi-k3 at ~$7.53/M alongside glm-5.2
+    at ~$0.014/M on the same ``ours`` key. Cold start / error →
+    ``{'_default': seed}``. Thread-safe. Never raises.
+    """
+    now = _now if _now is not None else time.time()
+    db = _resolve_db(db_path)
+    friend = provider == "friend"
+    premium = ZAI_FRIEND_PREMIUM if friend else 1.0
+
+    since = now - ZAI_WINDOW_HOURS * 3600.0
+    breakdown = _query_zai_window_per_model(db, since)
+    prov_models = breakdown.get(provider, {})
+
+    # Provider-level amortized rate — the rate every subscription model carries
+    # and the _default fallback. Computed once (cached), reused per model.
+    amortized = get_zai_amortized_rate(provider, db_path=db, _now=now)
+
+    rates: dict[str, float] = {}
+    for model_name, stats in prov_models.items():
+        if model_name == "_null":  # un-attributed calls → covered by _default
+            continue
+        metered = _metered_rate(*stats, premium=premium)
+        rates[model_name] = metered if metered is not None else amortized
+    rates["_default"] = amortized
+    return rates
 
 
 def get_rate_with_fallback(
