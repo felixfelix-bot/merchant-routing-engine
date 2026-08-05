@@ -652,7 +652,16 @@ class LiveRouter:
                 name, self._base_rates.get(name, 0.001)))
             if name == "ollama_cloud" and _QUOTA_PRESSURE_ENABLED:
                 # Continuous pressure drives the reroute; skip legacy paths.
-                base_rate = base_rate * quota_pressure
+                if math.isinf(quota_pressure):
+                    # RP-EXP: usage >= 100% → the curve diverged to +inf. Treat
+                    # ollama_cloud as unreachable via the breaker (mirrors the
+                    # exhausted-regime path) so the optimizer filters it cleanly
+                    # instead of carrying +inf through the PriceKalman arithmetic.
+                    # Exclusive models (kimi-k3, …) already short-circuited to
+                    # ollama_cloud above and never reach this branch.
+                    healthy = False
+                else:
+                    base_rate = base_rate * quota_pressure
             elif name == "ollama_cloud" and extra_mult != 1.0:
                 if math.isinf(extra_mult):
                     # Exhausted: force breaker tripped so optimizer filters it
