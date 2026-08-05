@@ -249,7 +249,7 @@ class TestEndToEndQualityAwareRouting:
         quota = {
             "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
             "friend":       {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
-            "ollama_cloud": {"used_pct": 20.0, "remaining": 800_000, "total": 1_000_000},
+            "ollama_cloud": {"used_pct": 20.0, "remaining": 400_000_000, "total": 500_000_000},
             "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
             "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
             "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
@@ -261,7 +261,7 @@ class TestEndToEndQualityAwareRouting:
         chosen, _fallback = router_cpvo.select_failover(
             quota_state=quota, health_state=health, peak=False,
         )
-        assert chosen == "friend", (
+        assert chosen[0] == "friend", (
             "quality-aware optimizer must pick the reliable 'friend' over the "
             "cheap-but-flaky 'ollama_cloud'"
         )
@@ -275,7 +275,7 @@ class TestEndToEndQualityAwareRouting:
         quota = {
             "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
             "friend":       {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
-            "ollama_cloud": {"used_pct": 20.0, "remaining": 800_000, "total": 1_000_000},
+            "ollama_cloud": {"used_pct": 20.0, "remaining": 400_000_000, "total": 500_000_000},
             "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
             "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
             "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
@@ -288,4 +288,4 @@ class TestEndToEndQualityAwareRouting:
             quota_state=quota, health_state=health, peak=False,
         )
         # No quality data → base rates → ollama ($0.024) beats friend ($0.029)
-        assert chosen == "ollama_cloud"
+        assert chosen[0] == "ollama_cloud"

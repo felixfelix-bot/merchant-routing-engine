@@ -26,12 +26,19 @@ zai:
 
 # ── Ollama Cloud (secondary, flat-rate with rate limits) ────────────────────
 ollama_cloud:
-  base_url: "https://api.ollama.cloud/v1"
-  key_env: "OLLAMA_CLOUD_KEY"
+  base_url: "https://ollama.com/v1"
+  key_env: "OLLAMA_CLOUD_API_KEY"
   monthly_fee_usd: 100
   # Cost formula: 100 / tokens_consumed_this_month * 1e6 = $/M
   # When rate-limited (429): effective_price = infinity (health_factor)
-  rate_limit_resets_every_hours: 24
+  # Quota: 5h session window + 7d weekly window (consultant-verified)
+  usage_api: "https://ollama.com/api/usage"
+  session_window_hours: 5
+  weekly_window_hours: 168
+  quota_windows: [5h, weekly]
+  included_quota_tokens_session: 500000000   # 500M tokens per 5h session
+  included_quota_tokens_weekly: 3500000000   # 3.5B tokens per 7-day week
+  extra_usage_rate_per_m: 0.10               # $/M above quota
 
 # ── External per-token providers (last resort) ─────────────────────────────
 external:
@@ -114,10 +121,10 @@ strategy:
       chat: "deepseek-v4-flash"
       simple: "deepseek-v4-flash"
     ollama_cloud:
-      coding: "llama3.3-70b"
-      reasoning: "llama3.3-70b"
-      chat: "llama3.3-8b"
-      simple: "llama3.3-8b"
+      coding: "glm-5.2"
+      reasoning: "glm-5.2"
+      chat: "glm-4.5-flash"
+      simple: "glm-4.5-flash"
 
   # Circuit breaker: trip after N consecutive failures
   circuit_breaker_threshold: 5

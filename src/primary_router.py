@@ -51,7 +51,7 @@ __all__ = ["PrimaryRouter"]
 _SEED_COSTS = {
     "ours":          0.31,
     "friend":        0.375,
-    "ollama_cloud":  0.50,
+    "ollama_cloud":  0.024,
     "ppq":           0.14,
     "openrouter":    0.135,
     "deepinfra":     1.30,   # historical effective rate from daily_spend DB
@@ -60,7 +60,7 @@ _SEED_COSTS = {
 _QUOTA_TOTALS = {
     "ours":         2_000_000,
     "friend":       2_000_000,
-    "ollama_cloud": 1_000_000,
+    "ollama_cloud": 500_000_000,
     "ppq":          float("inf"),
     "openrouter":   float("inf"),
     "deepinfra":    float("inf"),

@@ -61,7 +61,7 @@ def quota_both_exhausted():
     return {
         "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
         "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
-        "ollama_cloud": {"used_pct": 20.0, "remaining": 800_000, "total": 1_000_000},
+        "ollama_cloud": {"used_pct": 20.0, "remaining": 400_000_000, "total": 500_000_000},
         "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
         "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
         "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
@@ -90,7 +90,7 @@ def quota_all_high_tier_dead():
     return {
         "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
         "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
-        "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 1_000_000},
+        "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 500_000_000},
         "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
         "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
         "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
@@ -129,9 +129,9 @@ class TestModelAwareReturnShape:
             peak=False,
         )
         assert chosen == "ollama_cloud"
-        # ollama_cloud coding → llama3.3-70b
+        # ollama_cloud coding → glm-5.2
         assert chosen_model == get_model("ollama_cloud", "coding")
-        assert chosen_model == "llama3.3-70b"
+        assert chosen_model == "glm-5.2"
 
     def test_fallback_is_provider_model_tuple(
         self, router, quota_both_exhausted, all_healthy
@@ -165,7 +165,7 @@ class TestTaskTypeModelSelection:
             task_type="coding",
         )
         assert chosen == "ollama_cloud"
-        assert model == "llama3.3-70b"
+        assert model == "glm-5.2"
 
     def test_chat_task_for_ollama(self, router, quota_both_exhausted, all_healthy):
         (chosen, model), _ = router.select_failover(
@@ -175,8 +175,8 @@ class TestTaskTypeModelSelection:
             task_type="chat",
         )
         assert chosen == "ollama_cloud"
-        # chat task for ollama → llama3.3-8b (not 70b)
-        assert model == "llama3.3-8b"
+        # chat task for ollama → glm-4.5-flash (not glm-5.2)
+        assert model == "glm-4.5-flash"
 
     def test_simple_task_for_ollama(self, router, quota_both_exhausted, all_healthy):
         (chosen, model), _ = router.select_failover(
@@ -186,7 +186,7 @@ class TestTaskTypeModelSelection:
             task_type="simple",
         )
         assert chosen == "ollama_cloud"
-        assert model == "llama3.3-8b"
+        assert model == "glm-4.5-flash"
 
     def test_different_task_types_yield_different_models(
         self, router, quota_both_exhausted, all_healthy

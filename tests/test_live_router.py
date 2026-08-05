@@ -63,7 +63,7 @@ def quota_both_exhausted():
     return {
         "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
         "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
-        "ollama_cloud": {"used_pct": 20.0, "remaining": 800_000, "total": 1_000_000},
+        "ollama_cloud": {"used_pct": 20.0, "remaining": 400_000_000, "total": 500_000_000},
         "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
         "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
         "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
@@ -76,7 +76,7 @@ def quota_ours_exhausted_friend_ok():
     return {
         "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
         "friend":       {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
-        "ollama_cloud": {"used_pct": 20.0, "remaining": 800_000, "total": 1_000_000},
+        "ollama_cloud": {"used_pct": 20.0, "remaining": 400_000_000, "total": 500_000_000},
         "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
         "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
         "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
@@ -194,7 +194,7 @@ class TestSelectFailover:
         quota_all_high_tier_dead = {
             "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
             "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
-            "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 1_000_000},
+            "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 500_000_000},
             "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
             "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
             "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
@@ -230,7 +230,7 @@ class TestSelectFailover:
         quota_all_high_tier_dead = {
             "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
             "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
-            "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 1_000_000},
+            "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 500_000_000},
             "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
             "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
             "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
@@ -257,7 +257,7 @@ class TestSelectFailover:
         quota = {
             "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
             "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
-            "ollama_cloud": {"used_pct": 20.0, "remaining": 800_000, "total": 1_000_000},
+            "ollama_cloud": {"used_pct": 20.0, "remaining": 400_000_000, "total": 500_000_000},
             "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
             "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
             "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},

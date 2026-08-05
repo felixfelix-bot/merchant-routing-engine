@@ -54,7 +54,7 @@ def quota_state_with_pct():
     return {
         "ours":          {"used_pct": 80.0, "remaining": 400_000,   "total": 2_000_000},
         "friend":        {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
-        "ollama_cloud":  {"used_pct": 20.0, "remaining": 800_000,   "total": 1_000_000},
+        "ollama_cloud":  {"used_pct": 100.0, "remaining": 0,             "total": 500_000_000},
         "ppq":           {"used_pct": 0.0,  "remaining": float("inf")},
         "openrouter":    {"used_pct": 0.0,  "remaining": float("inf")},
         "deepinfra":     {"used_pct": 0.0,  "remaining": float("inf")},
@@ -73,8 +73,8 @@ def quota_state_with_resets_at():
                           "total": 2_000_000, "resets_at": int(now + 3600)},
         "friend":        {"used_pct": 30.0, "remaining": 1_400_000,
                           "total": 2_000_000, "resets_at": int(now + 7200)},
-        "ollama_cloud":  {"used_pct": 20.0, "remaining": 800_000,
-                          "total": 1_000_000, "resets_at": int(now + 18000)},
+        "ollama_cloud":  {"used_pct": 20.0, "remaining": 400_000_000,
+                          "total": 500_000_000, "resets_at": int(now + 18000)},
         "ppq":           {"used_pct": 0.0,  "remaining": float("inf")},
         "openrouter":    {"used_pct": 0.0,  "remaining": float("inf")},
         "deepinfra":     {"used_pct": 0.0,  "remaining": float("inf")},
@@ -166,7 +166,7 @@ class TestBuildPaceWindowsFormat:
     def test_total_matches_quota_state(self, router, quota_state_with_pct):
         result = router._build_pace_windows(quota_state_with_pct)
         assert result["ours"][0][1] == 2_000_000  # total
-        assert result["ollama_cloud"][0][1] == 1_000_000
+        assert result["ollama_cloud"][0][1] == 500_000_000
 
     def test_window_duration_is_5_hours(self, router, quota_state_with_pct):
         """Default synthesized window should be 5 hours."""
@@ -299,8 +299,8 @@ class TestRouteAutoBuildsPaceWindows:
             "friend":        {"used_pct": 30.0, "remaining": 1_400_000,
                               "total": 2_000_000,
                               "resets_at": int(time.time() + 2 * 3600)},
-            "ollama_cloud":  {"used_pct": 20.0, "remaining": 800_000,
-                              "total": 1_000_000},
+            "ollama_cloud":  {"used_pct": 100.0, "remaining": 0,
+                              "total": 500_000_000},
             "ppq":           {"used_pct": 0.0, "remaining": float("inf")},
             "openrouter":    {"used_pct": 0.0, "remaining": float("inf")},
             "deepinfra":     {"used_pct": 0.0, "remaining": float("inf")},
@@ -383,7 +383,7 @@ class TestPaceWindowsFlowToOptimizer:
         quota_state = {
             "ours":          {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
             "friend":        {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
-            "ollama_cloud":  {"used_pct": 20.0, "remaining": 800_000,   "total": 1_000_000},
+            "ollama_cloud":  {"used_pct": 100.0, "remaining": 0,             "total": 500_000_000},
             "ppq":           {"used_pct": 0.0,  "remaining": float("inf")},
             "openrouter":    {"used_pct": 0.0,  "remaining": float("inf")},
             "deepinfra":     {"used_pct": 0.0,  "remaining": float("inf")},
@@ -395,6 +395,7 @@ class TestPaceWindowsFlowToOptimizer:
             health_state=healthy_state,
         )
         # Zero burn rate → pace_mult = 1.0 → ours still cheapest off-peak
+        # (ollama_cloud exhausted so it doesn't interfere)
         assert result == "ours"
 
     def test_high_burn_rate_changes_routing(self, router, monkeypatch):
@@ -426,8 +427,8 @@ class TestPaceWindowsFlowToOptimizer:
             "friend":        {"used_pct": 20.0, "remaining": 1_600_000,
                               "total": 2_000_000,
                               "resets_at": int(now + 3 * 3600)},
-            "ollama_cloud":  {"used_pct": 20.0, "remaining": 800_000,
-                              "total": 1_000_000},
+            "ollama_cloud":  {"used_pct": 100.0, "remaining": 0,
+                              "total": 500_000_000},
             "ppq":           {"used_pct": 0.0, "remaining": float("inf")},
             "openrouter":    {"used_pct": 0.0, "remaining": float("inf")},
             "deepinfra":     {"used_pct": 0.0, "remaining": float("inf")},

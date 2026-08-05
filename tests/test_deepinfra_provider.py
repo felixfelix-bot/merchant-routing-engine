@@ -216,7 +216,7 @@ class TestDeepInfraInPrimaryRouter:
         quota = {
             "ours":          {"used_pct": 99.0, "remaining": 0, "total": 2_000_000},
             "friend":        {"used_pct": 99.0, "remaining": 0, "total": 2_000_000},
-            "ollama_cloud":  {"used_pct": 99.0, "remaining": 0, "total": 1_000_000},
+            "ollama_cloud":  {"used_pct": 99.0, "remaining": 0, "total": 500_000_000},
             "ppq":           {"used_pct": 0.0, "remaining": float("inf")},
             "openrouter":    {"used_pct": 0.0, "remaining": float("inf")},
             "deepinfra":     {"used_pct": 0.0, "remaining": float("inf")},
@@ -273,7 +273,7 @@ class TestDeepInfraInShadowHook:
         quota = {
             "ours": {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
             "friend": {"used_pct": 45.0, "remaining": 1_100_000, "total": 2_000_000},
-            "ollama_cloud": {"used_pct": 20.0, "remaining": 800_000, "total": 1_000_000},
+            "ollama_cloud": {"used_pct": 20.0, "remaining": 400_000_000, "total": 500_000_000},
             "ppq": {"used_pct": 0.0, "remaining": float("inf")},
             "openrouter": {"used_pct": 0.0, "remaining": float("inf")},
             "deepinfra": {"used_pct": 0.0, "remaining": float("inf")},
@@ -288,7 +288,7 @@ class TestDeepInfraInShadowHook:
         quota = {
             "ours": {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
             "friend": {"used_pct": 45.0, "remaining": 1_100_000, "total": 2_000_000},
-            "ollama_cloud": {"used_pct": 20.0, "remaining": 800_000, "total": 1_000_000},
+            "ollama_cloud": {"used_pct": 20.0, "remaining": 400_000_000, "total": 500_000_000},
             "ppq": {"used_pct": 0.0, "remaining": float("inf")},
             "openrouter": {"used_pct": 0.0, "remaining": float("inf")},
             "deepinfra": {"used_pct": 0.0, "remaining": float("inf")},

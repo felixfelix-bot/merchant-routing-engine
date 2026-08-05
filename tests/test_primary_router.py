@@ -38,7 +38,7 @@ def normal_quota():
     return {
         "ours":          {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
         "friend":        {"used_pct": 45.0, "remaining": 1_100_000, "total": 2_000_000},
-        "ollama_cloud":  {"used_pct": 20.0, "remaining": 800_000,   "total": 1_000_000},
+        "ollama_cloud":  {"used_pct": 100.0, "remaining": 0,             "total": 500_000_000},
         "ppq":           {"used_pct": 0.0,  "remaining": float("inf")},
         "openrouter":    {"used_pct": 0.0,  "remaining": float("inf")},
         "deepinfra":     {"used_pct": 0.0,  "remaining": float("inf")},
@@ -86,16 +86,25 @@ class TestOffPeak:
 
         result = router.route(model="glm-5.2", tokens=5000,
                              quota_state=normal_quota, health_state=healthy_state)
-        # Off-peak: ours is $0.31/M, friend is $0.375/M → ours wins
+        # Off-peak: ours is $0.31/M, friend is $0.375/M, ollama exhausted → ours wins
         assert result == "ours"
 
 
 class TestPeak:
     """During peak hours, z.ai keys get 3x cost — optimizer may prefer ollama."""
 
-    def test_peak_returns_none_for_ollama(self, router, normal_quota, healthy_state, monkeypatch):
-        """During peak, ours cost = 0.31*3 = 0.93, ollama = 0.50.
+    def test_peak_returns_none_for_ollama(self, router, healthy_state, monkeypatch):
+        """During peak, ours cost = 0.31*3 = 0.93, ollama = 0.024.
         Optimizer picks ollama → returns None (proxy falls through)."""
+        # Use a quota where ollama is NOT exhausted so it gets picked
+        peak_quota = {
+            "ours":          {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
+            "friend":        {"used_pct": 45.0, "remaining": 1_100_000, "total": 2_000_000},
+            "ollama_cloud":  {"used_pct": 20.0, "remaining": 400_000_000, "total": 500_000_000},
+            "ppq":           {"used_pct": 0.0,  "remaining": float("inf")},
+            "openrouter":    {"used_pct": 0.0,  "remaining": float("inf")},
+            "deepinfra":     {"used_pct": 0.0,  "remaining": float("inf")},
+        }
         import src.primary_router as pr_mod
         class FakeTime:
             @staticmethod
@@ -105,7 +114,7 @@ class TestPeak:
         monkeypatch.setattr(pr_mod.time, "gmtime", FakeTime.gmtime)
 
         result = router.route(model="glm-5.2", tokens=5000,
-                             quota_state=normal_quota, health_state=healthy_state)
+                             quota_state=peak_quota, health_state=healthy_state)
         # Peak: ollama cheaper → optimizer picks ollama → None
         assert result is None
 
@@ -151,7 +160,7 @@ class TestQuotaExhaustion:
         quota = {
             "ours":          {"used_pct": 99.0, "remaining": 20_000,  "total": 2_000_000},
             "friend":        {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
-            "ollama_cloud":  {"used_pct": 50.0, "remaining": 500_000, "total": 1_000_000},
+            "ollama_cloud":  {"used_pct": 100.0, "remaining": 0,             "total": 500_000_000},
             "ppq":           {"used_pct": 0.0,  "remaining": float("inf")},
             "openrouter":    {"used_pct": 0.0,  "remaining": float("inf")},
             "deepinfra":     {"used_pct": 0.0,  "remaining": float("inf")},

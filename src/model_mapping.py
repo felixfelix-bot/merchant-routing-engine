@@ -122,10 +122,10 @@ MODEL_MAP: dict[tuple[str, str], str] = {
     ("openrouter", "simple"):    "deepseek-v4-flash",
 
     # ── Ollama Cloud ─────────────────────────────────────────────────────
-    ("ollama_cloud", "coding"):    "llama3.3-70b",
-    ("ollama_cloud", "reasoning"): "llama3.3-70b",
-    ("ollama_cloud", "chat"):      "llama3.3-8b",
-    ("ollama_cloud", "simple"):    "llama3.3-8b",
+    ("ollama_cloud", "coding"):    "glm-5.2",
+    ("ollama_cloud", "reasoning"): "glm-5.2",
+    ("ollama_cloud", "chat"):      "glm-4.5-flash",
+    ("ollama_cloud", "simple"):    "glm-4.5-flash",
 }
 
 #: Per-provider default model (used for unknown task types within a
@@ -136,7 +136,7 @@ _PROVIDER_DEFAULTS: dict[str, str] = {
     "deepinfra":    "deepseek-v4-flash",
     "ppq":          "deepseek-v4-flash",
     "openrouter":   "deepseek-v4-flash",
-    "ollama_cloud": "llama3.3-8b",
+    "ollama_cloud": "glm-4.5-flash",
 }
 
 #: Path to the providers config, relative to this file.

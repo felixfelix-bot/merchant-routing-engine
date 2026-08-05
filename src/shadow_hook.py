@@ -51,7 +51,7 @@ __all__ = ["ShadowHook"]
 _SEED_COSTS = {
     "ours":          0.31,   # €155/mo, ~500M tokens/mo
     "friend":        0.375,  # 21% premium over ours
-    "ollama_cloud":  0.50,   # $100/mo, ~200M tokens/mo
+    "ollama_cloud":  0.024,  # $100/mo, ~4.2B tokens/mo (500M/5h × ~8 sessions/day × 30d)
     "ppq":           0.14,   # avg of $0.09 input + $0.19 output
     "openrouter":    0.135,  # avg of $0.09 input + $0.18 output
     "deepinfra":     1.30,   # historical effective rate from daily_spend DB
@@ -61,7 +61,7 @@ _SEED_COSTS = {
 _QUOTA_TOTALS = {
     "ours":         2_000_000,    # ~2M tokens per 5h window
     "friend":       2_000_000,
-    "ollama_cloud": 1_000_000,    # rate-limited daily
+    "ollama_cloud": 500_000_000,  # 500M tokens per 5h session window
     "ppq":          float("inf"),  # pay-per-token, no hard quota
     "openrouter":   float("inf"),
     "deepinfra":    float("inf"),  # pay-per-token, no hard quota

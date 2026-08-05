@@ -34,7 +34,7 @@ def sample_quota():
     return {
         "ours":          {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
         "friend":        {"used_pct": 45.0, "remaining": 1_100_000, "total": 2_000_000},
-        "ollama_cloud":  {"used_pct": 20.0, "remaining": 800_000,   "total": 1_000_000},
+        "ollama_cloud":  {"used_pct": 100.0, "remaining": 0,             "total": 500_000_000},
         "ppq":           {"used_pct": 0.0,  "remaining": float("inf")},
         "openrouter":    {"used_pct": 0.0,  "remaining": float("inf")},
         "deepinfra":     {"used_pct": 0.0,  "remaining": float("inf")},
@@ -109,7 +109,7 @@ class TestAgreement:
         hook.compare("ours", "glm-5.2", 5000, sample_quota, all_healthy, peak=False)
         assert hook.get_stats()["agreement_rate"] == 1.0
 
-    def test_disagreement_during_peak(self, hook, sample_quota, all_healthy):
+    def test_disagreement_during_peak(self, hook, all_healthy):
         """During actual peak hours, optimizer prefers ollama (no peak surcharge).
 
         This test is hour-dependent — only asserts disagreement during
@@ -117,7 +117,16 @@ class TestAgreement:
         """
         from datetime import datetime, timezone
         hour = datetime.now(timezone.utc).hour
-        hook.compare("ours", "glm-5.2", 5000, sample_quota, all_healthy, peak=True)
+        # Use a quota where ollama is available (not exhausted)
+        peak_quota = {
+            "ours":          {"used_pct": 30.0, "remaining": 1_400_000, "total": 2_000_000},
+            "friend":        {"used_pct": 45.0, "remaining": 1_100_000, "total": 2_000_000},
+            "ollama_cloud":  {"used_pct": 20.0, "remaining": 400_000_000, "total": 500_000_000},
+            "ppq":           {"used_pct": 0.0,  "remaining": float("inf")},
+            "openrouter":    {"used_pct": 0.0,  "remaining": float("inf")},
+            "deepinfra":     {"used_pct": 0.0,  "remaining": float("inf")},
+        }
+        hook.compare("ours", "glm-5.2", 5000, peak_quota, all_healthy, peak=True)
         stats = hook.get_stats()
         assert stats["total_decisions"] == 1
         if 6 <= hour <= 10:
