@@ -157,45 +157,79 @@ QUOTA_PRESSURE_ONSET: float = float(
 )
 
 # ── Per-provider pressure parameters (universal endpoint pressure) ──────────
-# Each quota-based endpoint gets its own onset, asymptote, and kill switch.
-# The RP-EXP curve is the same; only the parameters and the window sources
-# differ. See docs/endpoint-universal-pressure.md for the full design.
+# EVERY paid endpoint gets the same RP-EXP exponential pressure curve. Each
+# endpoint is a self-contained pricing model (Routstr node pattern): the price
+# the router sees depends on remaining quota/credits. Only the onset, the window
+# source, and the kill switch differ per provider.
 #
-# FELIX DECISION (Aug 5): ALL quota endpoints get a UNIFORM asymptote of 5.0.
-# Strategy: flee from exhaustion early on every endpoint to keep all keys
-# healthy under high load. Different onset points stagger pressure activation
-# (z.ai first at 60%, then ollama at 70%, then PPQ at 80%). High asymptote on
-# all = once any key enters the ramp, router bails FAST. DeepInfra/OpenRouter
-# (infinite quota) catch overflow at flat rates. Base_rate still determines
-# preference at normal load; asymptote just controls urgency of fleeing.
+# FELIX FINAL DECISION (Aug 5 19:00): ALL endpoints asymptote=1.5 (UNIFORM LOW).
+# Strategy: squeeze cheap keys as LONG as possible — do NOT flee to expensive
+# endpoints (openrouter/deepinfra) unless absolutely necessary. The low
+# asymptote means pressure ramps gently; price only spikes near exhaustion.
 #
-# Ollama Cloud: paid extra-usage available, so extra_usage_multiplier stays
-# separate for the legacy path. The pressure curve uses its own asymptote.
-# Asymptote 4.17 = measured extra_rate / base_rate (objective cost ratio).
+# Onset points stagger pressure activation:
+#   z.ai first (0.60) — 5h window is tiny (~2M tokens), exhausts fast.
+#   ollama_cloud next (0.70) — 5h window is large (500M tokens).
+#   credit-based last (0.80) — credits deplete slowly, refill manually.
+#
+# Credit-based providers (PPQ, OpenRouter, DeepInfra) compute their usage
+# fraction from remaining balance: u = 1 - (remaining / starting).
+# Exhausted balance (≤ 0) → u ≥ 1.0 → +inf (price infinity, must divert).
+
+# Ollama Cloud: quota-windowed (5h session + 7d weekly). Paid extra-usage is
+# available so extra_usage_multiplier stays for the legacy path, but the
+# pressure curve uses the uniform asymptote (1.5).
 OLLAMA_QUOTA_PRESSURE_ASYMPTOTE: float = float(
-    os.environ.get("OLLAMA_QUOTA_PRESSURE_ASYMPTOTE", "4.17")
+    os.environ.get("OLLAMA_QUOTA_PRESSURE_ASYMPTOTE", "1.5")
 )
 
 # z.ai: 3 windows (5h × weekly × monthly) multiplied via superposition.
 #   Onset 0.60 (earlier than Ollama — z.ai's 5h window is ~2M tokens, tiny).
-#   Asymptote 2.0 (PREFERRED endpoint — low asymptote keeps it cheap longer).
 #   hard_limit=True (z.ai has no extra-usage path — at 100% you get 429s).
 ZAI_QUOTA_PRESSURE_ONSET: float = float(
     os.environ.get("ZAI_QUOTA_PRESSURE_ONSET", "0.60")
 )
 ZAI_QUOTA_PRESSURE_ASYMPTOTE: float = float(
-    os.environ.get("ZAI_QUOTA_PRESSURE_ASYMPTOTE", "2.0")
+    os.environ.get("ZAI_QUOTA_PRESSURE_ASYMPTOTE", "1.5")
 )
 
-# PPQ: credit-based (single fraction, no time windows).
-#   Onset 0.80 (credits deplete slowly; don't spike on fresh top-up).
-#   Asymptote 5.0 (LAST RESORT — high asymptote makes price spike fast).
-#   hard_limit=True (no credits = no service).
+# ── Credit-based providers (PPQ, OpenRouter, DeepInfra) ─────────────────────
+# These have no time windows — their usage fraction is derived from remaining
+# credit balance: u = 1 - (remaining / starting_balance).
+#   Onset 0.80 for all three (credits deplete slowly).
+#   hard_limit=True (exhausted balance = no service → +inf).
+
+# PPQ: credits tracked via /credits/balance API (negative = exhausted).
 PPQ_QUOTA_PRESSURE_ONSET: float = float(
     os.environ.get("PPQ_QUOTA_PRESSURE_ONSET", "0.80")
 )
 PPQ_QUOTA_PRESSURE_ASYMPTOTE: float = float(
-    os.environ.get("PPQ_QUOTA_PRESSURE_ASYMPTOTE", "5.0")
+    os.environ.get("PPQ_QUOTA_PRESSURE_ASYMPTOTE", "1.5")
+)
+
+# OpenRouter: $10 starting credits, currently EXHAUSTED ($0 balance).
+# Self-tracked via SUM(cost_usd) in api_calls WHERE key_name='openrouter'.
+OPENROUTER_CREDIT_PRESSURE_ONSET: float = float(
+    os.environ.get("OPENROUTER_CREDIT_PRESSURE_ONSET", "0.80")
+)
+OPENROUTER_CREDIT_PRESSURE_ASYMPTOTE: float = float(
+    os.environ.get("OPENROUTER_CREDIT_PRESSURE_ASYMPTOTE", "1.5")
+)
+OPENROUTER_STARTING_BALANCE: float = float(
+    os.environ.get("OPENROUTER_STARTING_BALANCE", "10.0")
+)
+
+# DeepInfra: $5 starting balance. NO balance API — self-tracked via
+# SUM(cost_usd) in api_calls WHERE key_name='deepinfra'.
+# remaining = starting_balance - cumulative_spend.
+DEEPINFRA_CREDIT_PRESSURE_ONSET: float = float(
+    os.environ.get("DEEPINFRA_CREDIT_PRESSURE_ONSET", "0.80")
+)
+DEEPINFRA_CREDIT_PRESSURE_ASYMPTOTE: float = float(
+    os.environ.get("DEEPINFRA_CREDIT_PRESSURE_ASYMPTOTE", "1.5")
+)
+DEEPINFRA_STARTING_BALANCE: float = float(
+    os.environ.get("DEEPINFRA_STARTING_BALANCE", "5.0")
 )
 
 
@@ -495,7 +529,7 @@ def quota_pressure_factor(
     - ``hard_limit=True`` (z.ai, PPQ): returns **+inf**. These providers have
       no extra-usage path — the optimizer MUST divert to another endpoint.
 
-    Superimposed price table (onset=0.70, asymptote=4.17, base=$0.024/M)::
+    Superimposed price table (onset=0.70, asymptote=1.5, base=$0.024/M)::
 
         Session  Weekly  Factor      $/M      Notes
         ───────  ──────  ────────    ─────    ─────────────────────────
@@ -728,13 +762,14 @@ def compute_effective_price(
     # 3 superimposed windows (5h session × 7d weekly × 30d monthly) and a HARD
     # limit — at 100% in ANY window the factor diverges to +inf (z.ai has no
     # extra-usage path; the optimizer must divert to friend/ollama/externals).
-    # asymptote=2.0 keeps z.ai cheap long into the ramp — it is the preferred
-    # endpoint (docs/asymptote-preference-analysis.md §0/§1.2).
+    # asymptote=1.5 (uniform across all endpoints — squeeze cheap keys longer).
     #
     # All other providers (and z.ai at cold start, when no window data is
     # available) fall back to the legacy LINEAR scarcity_factor(quota_pct).
     # The peak multiplier stays a separate concern — it is applied on top,
-    # never folded into the pressure curve.
+    # never folded into the pressure curve. Asymptote=1.5 (uniform across all
+    # endpoints per Felix's final decision — squeeze cheap keys as long as
+    # possible; see docs/endpoint-universal-pressure.md).
     prov_lower = str(provider).lower()
     is_zai = prov_lower.startswith("zai") or prov_lower in ("ours", "friend")
     if is_zai and zai_session_usage is not None:

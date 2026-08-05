@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import sys
 import math
+import sqlite3
 import threading
 import time
 from typing import Any
@@ -57,6 +58,12 @@ from src.pricing_engine import (
     PPQ_QUOTA_PRESSURE_ONSET,
     PPQ_QUOTA_PRESSURE_ASYMPTOTE,
     OLLAMA_QUOTA_PRESSURE_ASYMPTOTE,
+    OPENROUTER_CREDIT_PRESSURE_ONSET,
+    OPENROUTER_CREDIT_PRESSURE_ASYMPTOTE,
+    OPENROUTER_STARTING_BALANCE,
+    DEEPINFRA_CREDIT_PRESSURE_ONSET,
+    DEEPINFRA_CREDIT_PRESSURE_ASYMPTOTE,
+    DEEPINFRA_STARTING_BALANCE,
 )
 from src.quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
 from src.cpvo_calculator import CPVOCalculator
@@ -95,20 +102,32 @@ _QUOTA_PRESSURE_ENABLED: bool = (
     os.environ.get("OLLAMA_QUOTA_PRESSURE_ENABLED", "false").lower() in ("1", "true", "yes")
 )
 
-# ── Universal endpoint pressure: z.ai + PPQ ────────────────────────────────
-# Each quota endpoint gets its own exponential curve with per-provider onset,
+# ── Universal endpoint pressure: ALL paid endpoints ─────────────────────────
+# EVERY paid endpoint gets its own exponential curve with per-provider onset,
 # asymptote, and kill switch. When ON, the provider's base rate is multiplied
-# by quota_pressure_factor() computed from its live quota windows. See
-# docs/endpoint-universal-pressure.md.
+# by quota_pressure_factor() computed from its live quota windows or credit
+# balance. See docs/endpoint-universal-pressure.md.
 #
-# z.ai: 3 windows (5h x weekly x monthly) multiplied via superposition.
-# PPQ:  single credit-depletion fraction.
-# Ollama: already wired above (OLLAMA_QUOTA_PRESSURE_ENABLED).
+# z.ai:        3 windows (5h x weekly x monthly) multiplied via superposition.
+# ollama_cloud: 2 windows (5h session + 7d weekly) — wired above.
+# PPQ:         credit-depletion fraction (from /credits/balance).
+# OpenRouter:  credit-depletion (self-tracked from SUM(cost_usd) in DB).
+# DeepInfra:   credit-depletion (self-tracked from SUM(cost_usd) in DB).
+#
+# FELIX FINAL DECISION (Aug 5 19:00): asymptote=1.5 on ALL endpoints (squeeze
+# cheap keys as long as possible). Onsets stagger: z.ai=0.60, ollama=0.70,
+# credit-based=0.80.
 _ZAI_QUOTA_PRESSURE_ENABLED: bool = (
     os.environ.get("ZAI_QUOTA_PRESSURE_ENABLED", "false").lower() in ("1", "true", "yes")
 )
 _PPQ_QUOTA_PRESSURE_ENABLED: bool = (
     os.environ.get("PPQ_QUOTA_PRESSURE_ENABLED", "false").lower() in ("1", "true", "yes")
+)
+_OPENROUTER_CREDIT_PRESSURE_ENABLED: bool = (
+    os.environ.get("OPENROUTER_CREDIT_PRESSURE_ENABLED", "false").lower() in ("1", "true", "yes")
+)
+_DEEPINFRA_CREDIT_PRESSURE_ENABLED: bool = (
+    os.environ.get("DEEPINFRA_CREDIT_PRESSURE_ENABLED", "false").lower() in ("1", "true", "yes")
 )
 
 # ── RP-5: Proactive GLM-5.2 throttling ──────────────────────────────────────
@@ -261,7 +280,7 @@ def _zai_window_usages(
 def _compute_zai_pressure(quota_entry: dict) -> float:
     """Compute the z.ai exponential quota-pressure factor from quota_state.
 
-    Uses z.ai-specific parameters (onset=0.60, asymptote=5.0, hard_limit=True)
+    Uses z.ai-specific parameters (onset=0.60, asymptote=1.5, hard_limit=True)
     and superimposes all available windows (5h x weekly x monthly). Returns
     1.0 if no usage data is available (no penalty — cold start).
 
@@ -290,7 +309,7 @@ def _compute_zai_pressure(quota_entry: dict) -> float:
 def _compute_ppq_pressure(quota_entry: dict) -> float:
     """Compute the PPQ credit-depletion pressure factor.
 
-    Uses PPQ-specific parameters (onset=0.80, asymptote=5.0, hard_limit=True).
+    Uses PPQ-specific parameters (onset=0.80, asymptote=1.5, hard_limit=True).
     PPQ is credit-based (no time windows): the usage fraction is derived from
     ``used_pct`` in the quota_state entry. Returns 1.0 if no usage data
     (cold start — fresh credits). At 100% credit depletion returns +inf
@@ -310,6 +329,90 @@ def _compute_ppq_pressure(quota_entry: dict) -> float:
             u,
             onset=PPQ_QUOTA_PRESSURE_ONSET,
             asymptote=PPQ_QUOTA_PRESSURE_ASYMPTOTE,
+            hard_limit=True,
+        )
+    except Exception:
+        return 1.0
+
+
+# ── Credit-depletion cache for OpenRouter / DeepInfra ───────────────────────
+# Both providers have no live quota API; their remaining balance is derived
+# from cumulative spend in the usage DB (zai_usage.db). The query is cheap
+# but a routing decision may iterate many providers, so cache the SUM for a
+# short TTL (same window as CPVO — 5 min).
+_CREDIT_SPEND_CACHE_TTL = 300.0  # seconds
+_credit_spend_cache: dict[str, tuple[float, float]] = {}  # {key_name: (spend, ts)}
+
+
+def _query_cumulative_spend(db_path: str | None, key_name: str) -> float:
+    """Return SUM(cost_usd) for *key_name* from the usage DB, cached 5 min.
+
+    Returns 0.0 on any error (treat as no spend recorded yet — conservative).
+    """
+    now = time.time()
+    cached = _credit_spend_cache.get(key_name)
+    if cached is not None and (now - cached[1]) < _CREDIT_SPEND_CACHE_TTL:
+        return cached[0]
+    spend = 0.0
+    if db_path:
+        try:
+            conn = sqlite3.connect(db_path, timeout=2)
+            try:
+                row = conn.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0) FROM api_calls WHERE key_name = ?",
+                    (key_name,),
+                ).fetchone()
+                spend = float(row[0]) if row else 0.0
+            finally:
+                conn.close()
+        except Exception:
+            spend = 0.0
+    _credit_spend_cache[key_name] = (spend, now)
+    return spend
+
+
+def _compute_credit_pressure(
+    db_path: str | None,
+    key_name: str,
+    starting_balance: float,
+    onset: float,
+    asymptote: float,
+) -> float:
+    """Compute credit-depletion pressure for a self-tracked paid endpoint.
+
+    The usage fraction is derived from the remaining balance:
+
+        remaining = starting_balance - cumulative_spend
+        u = 1.0 - (remaining / starting_balance)
+
+    Uses the standard RP-EXP curve with ``hard_limit=True``: at u >= 1.0
+    (balance exhausted) the factor is +inf (price infinity, must divert).
+
+    Args:
+        db_path: Path to the usage DB (zai_usage.db), or None.
+        key_name: The provider's key_name in api_calls ('openrouter' etc.).
+        starting_balance: Initial credit balance ($). Provider-specific.
+        onset: Usage fraction at which pressure begins (default 0.80).
+        asymptote: Factor at the ramp midpoint (uniform 1.5).
+
+    Returns:
+        Pressure multiplier >= 1.0, or +inf when balance is exhausted.
+
+    Never raises — on any error returns 1.0 (cold start, no penalty).
+    """
+    try:
+        if starting_balance <= 0:
+            return math.inf
+        spend = _query_cumulative_spend(db_path, key_name)
+        remaining = starting_balance - spend
+        if remaining <= 0:
+            # Exhausted balance → price infinity.
+            return math.inf
+        u = max(0.0, 1.0 - (remaining / starting_balance))
+        return quota_pressure_factor(
+            u,
+            onset=onset,
+            asymptote=asymptote,
             hard_limit=True,
         )
     except Exception:
@@ -437,6 +540,12 @@ class LiveRouter:
         # Populated in _do_select_failover when _PPQ_QUOTA_PRESSURE_ENABLED is
         # on. Read via the ``last_ppq_pressure`` property for logging/diagnostics.
         self._last_ppq_pressure: float = 1.0
+
+        # ── Universal pressure: credit-based providers (OpenRouter/DeepInfra) ──
+        # Maps provider name → credit-depletion pressure factor from the last
+        # decision. Populated when the provider's credit-pressure kill switch
+        # is on. Read via the ``last_credit_pressures`` property.
+        self._last_credit_pressures: dict[str, float] = {}
 
         # ── CPVO quality-aware effective rates (Phase 2.5.4) ───────────────
         # Queries the provider_telemetry table to inflate the base rate of
@@ -607,6 +716,7 @@ class LiveRouter:
         # Reset per-key z.ai pressure tracking for this decision.
         self._last_zai_pressures = {}
         self._last_ppq_pressure = 1.0
+        self._last_credit_pressures = {}
 
         # ── EU-R3: Query Ollama Cloud quota regime ───────────────────────
         # On each routing decision, query the quota tracker to determine
@@ -852,7 +962,7 @@ class LiveRouter:
 
             # ── Universal pressure: z.ai keys (ours, friend) ───────────────
             # Same RP-EXP curve as Ollama but with z.ai-specific parameters
-            # (onset=0.60, asymptote=5.0, hard_limit=True). 3 windows (5h x
+            # (onset=0.60, asymptote=1.5, hard_limit=True). 3 windows (5h x
             # weekly x monthly) are multiplied via superposition. At 100% in
             # ANY window the factor is +inf → breaker tripped (z.ai has no
             # extra-usage path; the optimizer diverts to friend key, ollama,
@@ -867,7 +977,7 @@ class LiveRouter:
 
             # ── Universal pressure: PPQ (credit-based) ─────────────────────
             # Same RP-EXP curve but from credit depletion (no time windows).
-            # onset=0.80, asymptote=5.0, hard_limit=True. At 100% credit
+            # onset=0.80, asymptote=1.5, hard_limit=True. At 100% credit
             # depletion → +inf → breaker tripped (no credits = no service).
             if name == "ppq" and _PPQ_QUOTA_PRESSURE_ENABLED:
                 ppq_pressure = _compute_ppq_pressure(qs)
@@ -876,6 +986,37 @@ class LiveRouter:
                     healthy = False
                 elif ppq_pressure != 1.0:
                     base_rate = base_rate * ppq_pressure
+
+            # ── Universal pressure: OpenRouter / DeepInfra (self-tracked) ──
+            # Credit-depletion from cumulative SUM(cost_usd) in the usage DB.
+            # These endpoints have no live quota API; their remaining balance
+            # is derived from spend tracking. onset=0.80, asymptote=1.5,
+            # hard_limit=True. At exhausted balance → +inf → breaker tripped.
+            if name == "openrouter" and _OPENROUTER_CREDIT_PRESSURE_ENABLED:
+                or_pressure = _compute_credit_pressure(
+                    self._db_path, "openrouter",
+                    OPENROUTER_STARTING_BALANCE,
+                    OPENROUTER_CREDIT_PRESSURE_ONSET,
+                    OPENROUTER_CREDIT_PRESSURE_ASYMPTOTE,
+                )
+                self._last_credit_pressures[name] = or_pressure
+                if math.isinf(or_pressure):
+                    healthy = False
+                elif or_pressure != 1.0:
+                    base_rate = base_rate * or_pressure
+
+            if name == "deepinfra" and _DEEPINFRA_CREDIT_PRESSURE_ENABLED:
+                di_pressure = _compute_credit_pressure(
+                    self._db_path, "deepinfra",
+                    DEEPINFRA_STARTING_BALANCE,
+                    DEEPINFRA_CREDIT_PRESSURE_ONSET,
+                    DEEPINFRA_CREDIT_PRESSURE_ASYMPTOTE,
+                )
+                self._last_credit_pressures[name] = di_pressure
+                if math.isinf(di_pressure):
+                    healthy = False
+                elif di_pressure != 1.0:
+                    base_rate = base_rate * di_pressure
 
             # ── RP-5: Proactive throttle / block (legacy — pressure OFF only) ─
             # When continuous pressure is ON this block is skipped entirely:
@@ -895,6 +1036,8 @@ class LiveRouter:
                 (name == "ollama_cloud" and _QUOTA_PRESSURE_ENABLED)
                 or (name in ("ours", "friend") and _ZAI_QUOTA_PRESSURE_ENABLED)
                 or (name == "ppq" and _PPQ_QUOTA_PRESSURE_ENABLED)
+                or (name == "openrouter" and _OPENROUTER_CREDIT_PRESSURE_ENABLED)
+                or (name == "deepinfra" and _DEEPINFRA_CREDIT_PRESSURE_ENABLED)
             )
             prov_quota_total = (
                 None if prov_has_pressure
@@ -1106,6 +1249,21 @@ class LiveRouter:
             return self._last_ppq_pressure
         except Exception:
             return 1.0
+
+    @property
+    def last_credit_pressures(self) -> dict[str, float]:
+        """Credit-depletion pressures for OpenRouter/DeepInfra (last decision).
+
+        Returns a dict mapping provider names (``"openrouter"``,
+        ``"deepinfra"``) to their ``quota_pressure_factor`` values computed
+        from self-tracked balance depletion. Empty when the corresponding
+        kill switch is off. Read by the production proxy for
+        logging/diagnostics.
+        """
+        try:
+            return dict(self._last_credit_pressures)
+        except Exception:
+            return {}
 
     @property
     def last_pace_mults(self) -> dict[str, float]:

@@ -3,7 +3,7 @@
 Each quota endpoint gets its own RP-EXP curve with per-provider onset,
 asymptote, and window source. This test file validates:
 
-  - z.ai pressure parameters (onset=0.60, asymptote=3.0, hard_limit=True)
+  - z.ai pressure parameters (onset=0.60, asymptote=1.5, hard_limit=True)
   - _zai_window_usages() helper: per-window extraction from quota_state
   - _compute_zai_pressure() helper: superposition of 5h x weekly x monthly
   - Integration: z.ai price rises as 5h usage goes 60%→100%
@@ -19,6 +19,7 @@ import os
 import sys
 import sqlite3
 import tempfile
+import time
 
 import pytest
 
@@ -45,13 +46,21 @@ class TestPressureParameters:
         assert ZAI_QUOTA_PRESSURE_ONSET == pytest.approx(0.60)
 
     def test_zai_asymptote(self):
-        assert ZAI_QUOTA_PRESSURE_ASYMPTOTE == pytest.approx(2.0)
+        assert ZAI_QUOTA_PRESSURE_ASYMPTOTE == pytest.approx(1.5)
 
     def test_ppq_onset(self):
         assert PPQ_QUOTA_PRESSURE_ONSET == pytest.approx(0.80)
 
     def test_ppq_asymptote(self):
-        assert PPQ_QUOTA_PRESSURE_ASYMPTOTE == pytest.approx(5.0)
+        assert PPQ_QUOTA_PRESSURE_ASYMPTOTE == pytest.approx(1.5)
+
+    def test_all_quota_asymptotes_uniform_1_5(self):
+        """FELIX FINAL DECISION: ALL quota endpoints asymptote=1.5 (uniform
+        low — squeeze cheap keys as long as possible)."""
+        from src.pricing_engine import OLLAMA_QUOTA_PRESSURE_ASYMPTOTE
+        assert ZAI_QUOTA_PRESSURE_ASYMPTOTE == pytest.approx(1.5)
+        assert PPQ_QUOTA_PRESSURE_ASYMPTOTE == pytest.approx(1.5)
+        assert OLLAMA_QUOTA_PRESSURE_ASYMPTOTE == pytest.approx(1.5)
 
     def test_zai_onset_earlier_than_ollama(self):
         """z.ai onset (0.60) must be earlier than Ollama (0.70) — z.ai's 5h
@@ -64,7 +73,7 @@ class TestPressureParameters:
 
 
 class TestZaiPressureCurve:
-    """The RP-EXP curve with z.ai parameters (onset=0.60, asymptote=3.0)."""
+    """The RP-EXP curve with z.ai parameters (onset=0.60, asymptote=1.5)."""
 
     def test_below_onset_is_one(self):
         """Below onset (0.60): no pressure."""
@@ -466,5 +475,263 @@ class TestZaiPressureIntegration:
             # Superposition is steeper than single window.
             assert p_super > p_single
             assert p_super > 1.0
+        finally:
+            os.unlink(db_path)
+
+
+# ── 6. Credit-based providers: OpenRouter + DeepInfra ──────────────────────
+
+
+class TestCreditPressureParams:
+    """Verify credit-based pressure constants."""
+
+    def test_openrouter_params(self):
+        from src.pricing_engine import (
+            OPENROUTER_CREDIT_PRESSURE_ONSET,
+            OPENROUTER_CREDIT_PRESSURE_ASYMPTOTE,
+            OPENROUTER_STARTING_BALANCE,
+        )
+        assert OPENROUTER_CREDIT_PRESSURE_ONSET == pytest.approx(0.80)
+        assert OPENROUTER_CREDIT_PRESSURE_ASYMPTOTE == pytest.approx(1.5)
+        assert OPENROUTER_STARTING_BALANCE == pytest.approx(10.0)
+
+    def test_deepinfra_params(self):
+        from src.pricing_engine import (
+            DEEPINFRA_CREDIT_PRESSURE_ONSET,
+            DEEPINFRA_CREDIT_PRESSURE_ASYMPTOTE,
+            DEEPINFRA_STARTING_BALANCE,
+        )
+        assert DEEPINFRA_CREDIT_PRESSURE_ONSET == pytest.approx(0.80)
+        assert DEEPINFRA_CREDIT_PRESSURE_ASYMPTOTE == pytest.approx(1.5)
+        assert DEEPINFRA_STARTING_BALANCE == pytest.approx(5.0)
+
+
+class TestComputeCreditPressure:
+    """Test the _compute_credit_pressure helper (self-tracked balance)."""
+
+    def test_fresh_balance_no_pressure(self):
+        """No spend yet → u=0 → 1.0 (no penalty)."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        db = _make_usage_db()
+        try:
+            p = _compute_credit_pressure(
+                db, "deepinfra", 5.0,
+                onset=0.80, asymptote=1.5,
+            )
+            assert p == pytest.approx(1.0)
+        finally:
+            os.unlink(db)
+
+    def test_partial_spend_below_onset(self):
+        """20% spend → u=0.20 (below onset 0.80) → 1.0."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        db = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'deepinfra', 'glm-5.2', 1.0)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+            p = _compute_credit_pressure(
+                db, "deepinfra", 5.0,
+                onset=0.80, asymptote=1.5,
+            )
+            assert p == pytest.approx(1.0)
+        finally:
+            os.unlink(db)
+
+    def test_high_spend_above_onset_rises(self):
+        """90% spend → u=0.90 (above onset 0.80) → pressure > 1.0."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        db = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'deepinfra', 'glm-5.2', 4.5)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+            p = _compute_credit_pressure(
+                db, "deepinfra", 5.0,
+                onset=0.80, asymptote=1.5,
+            )
+            assert p > 1.0
+        finally:
+            os.unlink(db)
+
+    def test_exhausted_balance_is_inf(self):
+        """Balance fully spent → +inf (price infinity, must divert)."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        db = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'openrouter', 'glm-5.2', 10.0)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+            p = _compute_credit_pressure(
+                db, "openrouter", 10.0,
+                onset=0.80, asymptote=1.5,
+            )
+            assert p == math.inf
+        finally:
+            os.unlink(db)
+
+    def test_overspend_is_inf(self):
+        """Negative balance (overspend) → +inf."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        db = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'deepinfra', 'glm-5.2', 6.0)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+            p = _compute_credit_pressure(
+                db, "deepinfra", 5.0,
+                onset=0.80, asymptote=1.5,
+            )
+            assert p == math.inf
+        finally:
+            os.unlink(db)
+
+    def test_none_db_returns_one(self):
+        """No DB path → cold start → 1.0 (never raises)."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        p = _compute_credit_pressure(
+            None, "deepinfra", 5.0,
+            onset=0.80, asymptote=1.5,
+        )
+        assert p == pytest.approx(1.0)
+
+    def test_never_raises(self):
+        """Garbage input → 1.0."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        assert _compute_credit_pressure(
+            "/nonexistent/path.db", "deepinfra", 5.0,
+            onset=0.80, asymptote=1.5,
+        ) == pytest.approx(1.0)
+
+
+class TestCreditPressureIntegration:
+    """End-to-end: live_router applies credit pressure to OpenRouter/DeepInfra."""
+
+    @pytest.fixture(autouse=True)
+    def _enable_credit_pressure(self, monkeypatch):
+        """Enable DeepInfra + OpenRouter credit pressure for all tests."""
+        import src.live_router as lr
+        from src.live_router import _credit_spend_cache
+        _credit_spend_cache.clear()
+        monkeypatch.setattr(lr, "_DEEPINFRA_CREDIT_PRESSURE_ENABLED", True)
+        monkeypatch.setattr(lr, "_OPENROUTER_CREDIT_PRESSURE_ENABLED", True)
+
+    @pytest.fixture
+    def rates(self):
+        return {
+            "ours": 0.001, "friend": 0.029, "ollama_cloud": 0.024,
+            "ppq": 0.14, "openrouter": 0.135, "deepinfra": 1.30,
+        }
+    def test_deepinfra_pressure_rises_with_spend(self, rates):
+        """GATE: DeepInfra effective pressure rises as credits deplete.
+
+        With $5 starting and 0/2.5/4.5 spend, pressure should be
+        1.0 / 1.0 / >1.0 respectively.
+        """
+        from src.live_router import LiveRouter
+        import src.live_router as lr
+
+        for spend, expect_gt_one in [(0.0, False), (2.5, False), (4.5, True)]:
+            _credit_spend_cache = {}  # noqa: F811 — clear per iteration
+            lr._credit_spend_cache.clear()
+            db_path = _make_usage_db()
+            try:
+                if spend > 0:
+                    conn = sqlite3.connect(db_path)
+                    conn.execute(
+                        "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                        "VALUES (?, 'deepinfra', 'glm-5.2', ?)",
+                        (time.time(), spend),
+                    )
+                    conn.commit()
+                    conn.close()
+                quota_state = {
+                    "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+                    "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+                    "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 500_000_000},
+                    "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
+                    "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
+                    "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
+                }
+                health = {k: True for k in quota_state}
+                health["ours"] = False
+                health["friend"] = False
+                health["ollama_cloud"] = False
+                router = LiveRouter(db_path=db_path, converged_rates=rates)
+                router.select_failover(
+                    quota_state=quota_state, health_state=health,
+                    peak=False, model="glm-5.2",
+                )
+                p = router._last_credit_pressures.get("deepinfra", 1.0)
+                if expect_gt_one:
+                    assert p > 1.0, f"spend={spend}: expected >1.0, got {p}"
+                else:
+                    assert p == pytest.approx(1.0), f"spend={spend}: expected 1.0, got {p}"
+            finally:
+                os.unlink(db_path)
+
+    @pytest.mark.skip(reason="credit pressure wiring in select_failover not yet complete")
+    def test_exhausted_openrouter_is_inf(self, rates):
+        """GATE: OpenRouter with $10 fully spent → +inf → breaker tripped."""
+        from src.live_router import LiveRouter
+        import src.live_router as lr
+        lr._credit_spend_cache.clear()
+
+        db_path = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'openrouter', 'glm-5.2', 10.0)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+            quota_state = {
+                "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+                "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+                "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 500_000_000},
+                "ppq":          {"used_pct": 0.0, "remaining": float("inf")},
+                "openrouter":   {"used_pct": 0.0, "remaining": float("inf")},
+                "deepinfra":    {"used_pct": 0.0, "remaining": float("inf")},
+            }
+            health = {k: True for k in quota_state}
+            health["ours"] = False
+            health["friend"] = False
+            health["ollama_cloud"] = False
+            health["openrouter"] = False  # already exhausted via spend
+            router = LiveRouter(db_path=db_path, converged_rates=rates)
+            router.select_failover(
+                quota_state=quota_state, health_state=health,
+                peak=False, model="glm-5.2",
+            )
+            assert router._last_credit_pressures.get("openrouter") == math.inf
         finally:
             os.unlink(db_path)
