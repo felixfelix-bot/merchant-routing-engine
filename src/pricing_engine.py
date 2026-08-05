@@ -466,17 +466,18 @@ def quota_pressure_factor(
     if weekly is not None:
         u = max(usage, weekly)
 
+    # At/above 100% the curve has reached its asymptote → +inf. Checked FIRST so
+    # that 100% usage ALWAYS yields +inf regardless of the onset value (FELIX:
+    # "At 100%: infinity"). The provider is "unreachable" to the optimizer, which
+    # always reroutes to a cheaper alternative (RP-EXP: "router ALWAYS finds
+    # cheaper alternative first"). Ollama-exclusive models are unaffected —
+    # live_router short-circuits them to ollama_cloud before this price is compared.
+    if u >= 1.0:
+        return math.inf
+
     # Below the onset there is plenty of quota → no penalty.
     if u <= onset:
         return 1.0
-
-    # At/above 100% the curve has reached its asymptote → +inf. The provider is
-    # "unreachable" to the optimizer, which always reroutes to a cheaper
-    # alternative (RP-EXP: "router ALWAYS finds cheaper alternative first").
-    # Ollama-exclusive models are unaffected — live_router short-circuits them
-    # to ollama_cloud before this price is ever compared.
-    if u >= 1.0:
-        return math.inf
 
     # RP-EXP rational curve: 1 + K * t / (1 - t), where
     #   t = (u - onset) / (1 - onset)   (normalised position over [onset, 1.0])
