@@ -1258,8 +1258,49 @@ class LiveRouter:
             #   RP-5 throttle/block price logic — rerouting is purely price-based.
             # EU-R3 (legacy, pressure OFF): binary extra_usage multiplier.
             # RP-5  (legacy, pressure OFF): throttle/block tier+price effects.
-            base_rate = float(effective_rates.get(
-                name, self._base_rates.get(name, 0.001)))
+            # ── PM-T3: Per-model base rate (THE KEY FIX) ─────────────────────
+            # When a model is requested AND the per-model kill switch is on,
+            # price this provider by that model's OWN measured rate instead of
+            # the flat per-provider blend. This closes the kimi-k3 485× cost
+            # blindspot: kimi-k3 was priced at ollama_cloud's $0.024/M blend
+            # instead of its real ~$7.53/M cost, so the optimizer happily
+            # flooded traffic to an expensive model. See
+            # docs/plan-per-model-pricing.md §6 T3.
+            #
+            # If the provider does NOT serve this model — model absent from the
+            # nested rate dict AND no usable ``_default`` — mark it unreachable
+            # (healthy=False) so the optimizer filters it; we never route a
+            # model to a provider that can't serve it. We detect "served"
+            # explicitly (model present OR a positive _default) rather than by
+            # comparing the resolved rate against the $1.0/M floor sentinel,
+            # because a real model can legitimately cost more than the floor —
+            # kimi-k3 itself is $7.53/M — so the floor-comparison from the
+            # plan's code sketch is unsafe and would mis-classify kimi-k3.
+            #
+            # Backward compatible: when ``model`` is None or the kill switch is
+            # off, the legacy flat per-provider effective rate is used and
+            # behavior is byte-for-byte identical to before this change.
+            if model and _PER_MODEL_PRICING_ENABLED:
+                _prov_rates = self._base_rates_per_model.get(name, {})
+                _prov_default = _prov_rates.get("_default")
+                _model_served = (
+                    model in _prov_rates
+                    or (_prov_default is not None and _prov_default > 0)
+                )
+                if not _model_served:
+                    # Provider can't serve this model → unreachable for it.
+                    healthy = False
+                    # base_rate is moot once healthy=False; keep a sane legacy
+                    # value so the downstream pressure multipliers below don't
+                    # operate on a bare 0.
+                    base_rate = float(effective_rates.get(
+                        name, self._base_rates.get(name, 0.001)))
+                else:
+                    base_rate = _resolve_model_rate(
+                        self._base_rates_per_model, name, model)
+            else:
+                base_rate = float(effective_rates.get(
+                    name, self._base_rates.get(name, 0.001)))
             if name == "ollama_cloud" and _QUOTA_PRESSURE_ENABLED:
                 # Continuous pressure drives the reroute; skip legacy paths.
                 if math.isinf(quota_pressure):
