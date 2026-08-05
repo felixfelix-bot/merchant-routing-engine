@@ -328,39 +328,60 @@ function computePricing(): any {
 // QUOTA, REQUESTS, SYSTEM, COST COMPUTATIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
-function computeQuota(): any {
+// Ollama API cache — avoid hitting ollama.com on every snapshot
+let ollamaApiCache: { at: number; session: number; weekly: number } = { at: 0, session: 0, weekly: 0 };
+const OLLAMA_CACHE_TTL = 30_000; // 30s
+
+async function computeQuota(): Promise<any> {
   const q = proxyCache.quota;
   const out: any = {};
-  if (!q) return out;
   // z.ai flat-rate keys — real quota windows from proxy
-  for (const key of ["ours", "friend"]) {
-    const k = q[key];
-    if (!k) continue;
-    const win = (k.windows || []).find((w: any) => /hour|token/i.test(w.name || "") || w.type === "TOKENS_LIMIT")
-      || (k.windows || [])[0];
-    const usedPct = win?.used_pct ?? 0;
-    out[key] = {
-      used_pct: round(usedPct, 1),
-      remaining: k.predictions?.[0]?.estimated_capacity_tokens ?? null,
-      healthy: !k.locked,
-      locked: !!k.locked,
-      resets_in_min: win?.resets_at ? Math.max(0, Math.round((win.resets_at - Date.now() / 1000) / 60)) : null,
-    };
+  if (q) {
+    for (const key of ["ours", "friend"]) {
+      const k = q[key];
+      if (!k) continue;
+      const win = (k.windows || []).find((w: any) => /hour|token/i.test(w.name || "") || w.type === "TOKENS_LIMIT")
+        || (k.windows || [])[0];
+      const usedPct = win?.used_pct ?? 0;
+      out[key] = {
+        used_pct: round(usedPct, 1),
+        remaining: k.predictions?.[0]?.estimated_capacity_tokens ?? null,
+        healthy: !k.locked,
+        locked: !!k.locked,
+        resets_in_min: win?.resets_at ? Math.max(0, Math.round((win.resets_at - Date.now() / 1000) / 60)) : null,
+      };
+    }
   }
-  // Ollama Cloud — 5h + weekly quota, $100/mo standard tier
-  // Proxy doesn't expose real ollama windows yet; estimate from health + token usage
-  const ollamaTok = qone(zaiDb,
-    `SELECT COALESCE(SUM(total_tokens),0) v FROM api_calls WHERE key_name='ollama_cloud' AND ts > ?`,
-    [Math.floor(Date.now() / 1000) - 5 * 3600])?.v || 0;
-  const ollama5hCap = 500000; // ~500K tokens per 5h on standard tier
-  const ollamaUsed5h = Math.min(100, (ollamaTok / ollama5hCap) * 100);
+  // Ollama Cloud — real quota from ollama.com/api/usage (cached 30s)
+  let ollamaSessionPct = ollamaApiCache.session;
+  let ollamaWeeklyPct = ollamaApiCache.weekly;
+  if (Date.now() - ollamaApiCache.at > OLLAMA_CACHE_TTL) {
+    const ollamaKey = process.env.OLLAMA_CLOUD_API_KEY || "";
+    if (ollamaKey) {
+      try {
+        const resp = await fetch("https://ollama.com/api/usage", {
+          headers: { Authorization: `Bearer ${ollamaKey}` },
+          signal: AbortSignal.timeout(2000),
+        });
+        if (resp.ok) {
+          const data = await resp.json() as any;
+          ollamaSessionPct = round((data?.limits?.session?.usage || 0) * 100, 1);
+          ollamaWeeklyPct = round((data?.limits?.weekly?.usage || 0) * 100, 1);
+          ollamaApiCache = { at: Date.now(), session: ollamaSessionPct, weekly: ollamaWeeklyPct };
+        }
+      } catch (e: any) {
+        console.warn(`[cvm] ollama quota fetch failed: ${e.message}`);
+      }
+    }
+  }
   out.ollama = {
-    used_pct: round(ollamaUsed5h, 1),
-    remaining: Math.round(Math.max(0, ollama5hCap - ollamaTok)),
+    used_pct: ollamaSessionPct,
+    weekly_pct: ollamaWeeklyPct,
+    remaining: null,
     healthy: true,
     locked: false,
-    resets_in_min: 300, // 5h window
-    note: "standard tier — 5h + weekly limits",
+    resets_in_min: 300,
+    note: `session ${ollamaSessionPct}% / weekly ${ollamaWeeklyPct}%`,
   };
   // PPQ — pay-per-use, no quota cap
   out.ppq = {
@@ -714,7 +735,7 @@ type ToolHandler = (args: any) => any | Promise<any>;
 const TOOLS: Record<string, ToolHandler> = {
   // ── Tool 1: get_snapshot ──────────────────────────────────────────────────
   // Returns everything the display dashboard needs in one call.
-  get_snapshot: (_args: any) => {
+  get_snapshot: async (_args: any) => {
     const gate = computeGate();
     const pricing = computePricing();
     const econ = ledgerSnapshot();
@@ -725,7 +746,7 @@ const TOOLS: Record<string, ToolHandler> = {
     let priceHistory = (TOOLS.get_price_history({ hours: 24 })?.points) || [];
     return {
       ts: Math.floor(Date.now() / 1000),
-      quota: computeQuota(),
+      quota: await computeQuota(),
       pricing: {
         ours: pricing.ours,
         friend: pricing.friend,
@@ -1124,13 +1145,13 @@ async function main(): Promise<void> {
 
   Bun.serve({
     port: httpPort,
-    fetch(req) {
+    async fetch(req) {
       const url = new URL(req.url);
       if (req.method === "OPTIONS") {
         return new Response(null, { status: 204, headers: corsHeaders });
       }
       if (url.pathname === "/snapshot") {
-        const data = TOOLS.get_snapshot({});
+        const data = await TOOLS.get_snapshot({});
         return Response.json(data, { headers: corsHeaders });
       }
       if (url.pathname === "/price-history") {
@@ -1155,7 +1176,7 @@ async function main(): Promise<void> {
   // ═══════════════════════════════════════════════════════════════════════════
   setInterval(async () => {
     try {
-      const snap = TOOLS.get_snapshot({});
+      const snap = await TOOLS.get_snapshot({});
       const content = JSON.stringify(snap);
       const signedEvent = finalizeEvent({
         kind: 30315,
