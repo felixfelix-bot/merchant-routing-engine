@@ -205,10 +205,9 @@ class TestPressureRerouteToZai:
     ):
         """last_quota_pressure rises smoothly as session_usage increases.
 
-        The exponential ramp diverges toward infinity as u → 1.0, but at u >= 1.0
-        the factor is capped at the asymptote (≈4.17). So monotonicity is only
-        asserted within the ramp range [onset, 0.99]; the over-quota cap is
-        verified separately.
+        The RP-EXP rational curve diverges toward +inf as u → 1.0, where it is
+        clipped to +inf (provider unreachable). Monotonicity holds across the
+        ramp range [onset, 0.99]; at 100% the value is +inf.
         """
         pressures = {}
         db_path = _make_usage_db()
@@ -228,7 +227,7 @@ class TestPressureRerouteToZai:
                 )
                 pressures[u] = router.last_quota_pressure
 
-            # Below onset (0.75): no pressure.
+            # Below onset (0.70): no pressure.
             assert pressures[0.50] == pytest.approx(1.0)
             # Monotonically increasing strictly within the ramp range.
             assert (
@@ -238,9 +237,9 @@ class TestPressureRerouteToZai:
                 < pressures[0.95]
                 < pressures[0.99]
             )
-            # At 100% usage, pressure equals the asymptote (EXTRA_USAGE_MULTIPLIER).
-            from src.pricing_engine import EXTRA_USAGE_MULTIPLIER
-            assert pressures[1.0] == pytest.approx(EXTRA_USAGE_MULTIPLIER, abs=0.01)
+            # At 100% usage, pressure is +inf (RP-EXP asymptote — provider
+            # unreachable to the optimizer, which reroutes to a cheaper alt).
+            assert pressures[1.0] == math.inf
         finally:
             os.unlink(db_path)
 
@@ -252,10 +251,11 @@ class TestOverQuotaRerouteToExternal:
     def test_over_quota_reroutes_to_openrouter(
         self, rates, quota_all_externals, both_zai_down, monkeypatch,
     ):
-        """GATE: at 110% usage, ollama > openrouter ($0.135) → openrouter.
+        """GATE: at 110% usage, ollama is +inf → openrouter ($0.135) chosen.
 
-        pressure(1.10) ≈ 1 + 3.17*((1.10-0.75)/0.25)^2 = 1 + 3.17*1.96 ≈ 7.21
-        ollama $0.024*7.21 ≈ $0.173 > openrouter $0.135.
+        RP-EXP: pressure(1.10) = +inf (u >= 100% → unreachable). The optimizer
+        filters the infinite-priced ollama_cloud and picks the cheapest paid
+        external (openrouter).
         """
         db_path = _make_usage_db()
         import src.live_router as lr
