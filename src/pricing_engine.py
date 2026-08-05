@@ -734,7 +734,7 @@ def compute_effective_price(
             ``"ours"``/``"friend"``) AND this is not None, the SCARCITY slot
             switches from the linear :func:`scarcity_factor` to the exponential
             :func:`quota_pressure_factor` with 3 superimposed windows and a
-            HARD limit (``hard_limit=True``, ``asymptote``=2.0). At 100% in any
+            HARD limit (``hard_limit=True``, ``asymptote``=1.5). At 100% in any
             provided window the result is +inf (must divert). ``None`` (default)
             → cold-start fallback to linear scarcity.
         zai_weekly_usage: 7-day weekly usage fraction (0.0–1.0) for a z.ai key,

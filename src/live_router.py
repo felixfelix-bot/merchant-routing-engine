@@ -808,7 +808,7 @@ class LiveRouter:
         # alternative. Ollama-exclusive models are still protected by the
         # short-circuit below (fires before the price comparison).
         #
-        # FELIX DECISION (Aug 5): uniform asymptote 5.0 for ALL quota endpoints.
+        # FELIX DECISION (Aug 5): uniform asymptote 1.5 for ALL quota endpoints.
         quota_pressure = 1.0
         if _QUOTA_PRESSURE_ENABLED and (session_usage > 0 or weekly_usage > 0):
             try:
