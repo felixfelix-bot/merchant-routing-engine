@@ -111,7 +111,9 @@ CREATE TABLE IF NOT EXISTS routing_shadow_decisions (
     -- PM-T6: per-model pricing columns (added via migration) ---
     requested_model TEXT,
     per_model_base_rate REAL,
-    per_model_source TEXT
+    per_model_source TEXT,
+    -- EUv2-7: quota regime at decision time (included/extra/exhausted) ---
+    quota_regime TEXT
 );
 """
 
@@ -119,8 +121,8 @@ CREATE TABLE IF NOT EXISTS routing_shadow_decisions (
 _INSERT_SQL = (
     "INSERT INTO routing_shadow_decisions "
     "(ts, live_provider, live_model, shadow_provider, shadow_model, "
-    " shadow_cost, live_cost, tokens, agree, reason) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+    " shadow_cost, live_cost, tokens, agree, reason, quota_regime) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
 )
 
 # P6 INSERT — full pressure-routing row.
@@ -130,8 +132,8 @@ _INSERT_PRESSURE_SQL = (
     " shadow_cost, live_cost, tokens, agree, reason, "
     " pressure_provider, pressure_model, pressure_cost, actual_cost, "
     " divergence, is_429, paid_provider, "
-    " requested_model, per_model_base_rate, per_model_source) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
+    " requested_model, per_model_base_rate, per_model_source, quota_regime) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);"
 )
 
 # New columns to add when migrating an old DB.  (name, type, default-clause)
@@ -147,6 +149,8 @@ _MIGRATION_COLUMNS = [
     ("requested_model", "TEXT", None),
     ("per_model_base_rate", "REAL", None),
     ("per_model_source", "TEXT", None),
+    # EUv2-7: quota regime at decision time.
+    ("quota_regime", "TEXT", None),
 ]
 
 
@@ -273,6 +277,7 @@ class ShadowLogger:
         tokens,
         reason: Optional[str] = "",
         live_cost: Optional[float] = None,
+        quota_regime: Optional[str] = None,
     ) -> None:
         """Insert a row into ``routing_shadow_decisions`` (original API).
 
@@ -306,6 +311,7 @@ class ShadowLogger:
                     tokens,
                     agree,
                     reason if reason is not None else "",
+                    quota_regime,
                 ),
             )
             self._conn.commit()
@@ -325,6 +331,7 @@ class ShadowLogger:
         requested_model: Optional[str] = None,
         per_model_base_rate: Any = None,
         per_model_source: Optional[str] = None,
+        quota_regime: Optional[str] = None,
     ) -> None:
         """Log a pressure-routing divergence decision (P6-SHADOW).
 
@@ -396,6 +403,7 @@ class ShadowLogger:
                     requested_model,
                     _sanitize(per_model_base_rate) if per_model_base_rate is not None else None,
                     per_model_source,
+                    quota_regime,
                 ),
             )
             self._conn.commit()

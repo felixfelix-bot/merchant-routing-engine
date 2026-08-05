@@ -469,6 +469,7 @@ class ShadowHook:
             requested_model=requested_model,
             per_model_base_rate=pm_base_rate,
             per_model_source=pm_source,
+            quota_regime=getattr(router, "last_quota_regime", None),
         )
 
     def get_stats(self) -> dict:
