@@ -69,6 +69,13 @@ Trailing-rate API (T6 — Ollama 90d + paid-endpoint 30d measured rates)
         :data:`PROVIDER_WINDOW_HOURS`, seeds filling the cold ones. This is the
         one-call shape that drops straight into ``live_router``'s base-rate dict.
 
+    ``get_all_trailing_rates_per_model() -> dict[str, dict[str, float]]``
+        ``{provider: {model: $/M, '_default': $/M}}`` — the per-model version of
+        :func:`get_all_trailing_rates`. One ``_default`` key per provider carries
+        the provider-level fallback (measured → seed → conservative). Cold-start
+        providers return ``{'_default': seed}``. Powers the per-model pricing path
+        (plan §3.6 / T1).
+
     ``get_rate_readiness(providers=None) -> dict``
         Structured ``{provider: {rate, source, has_data, window_hours}}``.
         ``source`` is ``"measured"`` (real data), ``"seed"`` (cold start), or
@@ -103,6 +110,7 @@ __all__ = [
     "get_trailing_rate",
     "get_trailing_rate_with_seed",
     "get_all_trailing_rates",
+    "get_all_trailing_rates_per_model",
     "get_rate_readiness",
     "gate_all_rates_have_data",
     "PROVIDER_WINDOW_HOURS",
@@ -658,6 +666,73 @@ def get_all_trailing_rates(
     return {
         p: get_trailing_rate_with_seed(p, db_path=db_path, _now=_now) for p in provs
     }
+
+
+def get_all_trailing_rates_per_model(
+    *,
+    db_path: str | None = None,
+    _now: float | None = None,
+) -> dict[str, dict[str, float]]:
+    """``{provider: {model: $/M, '_default': $/M}}`` for every provider+model.
+
+    The per-model version of :func:`get_all_trailing_rates`. It produces the
+    nested shape the per-model pricing plan
+    (docs/plan-per-model-pricing.md §3.6, task T1) needs: for each provider in
+    :data:`PROVIDER_WINDOW_HOURS`, a dict mapping every *measured* model name to
+    its token-weighted $/M, plus a ``'_default'`` key carrying the
+    provider-level fallback rate a caller should use when the requested model is
+    not present in the dict.
+
+    ``_default`` resolution (§3.6 steps 4→6, the provider-level fallback)::
+
+        1. get_trailing_rate(provider)   — provider-level measured rate
+        2. SEED_RATES[provider]          — cold-start seed
+        3. UNKNOWN_PROVIDER_FALLBACK     — conservative rate for unknown providers
+
+    Per-model entries come from a single :func:`get_all_rates` query (already
+    grouped by ``provider + model``); only positive measured rates are kept.
+    Models with a NULL name in ``api_calls`` are skipped — un-attributed calls
+    are already represented by the provider-level ``_default``. Per-model
+    measured rates correspond to §3.6 step 1; the API-sourced / list-price
+    layers (steps 2→3) are wired in by the downstream collectors (T4/T6), not
+    here.
+
+    This is the one-call shape the ``live_router`` per-model pricing path
+    (T2/T3) consumes. Cold-start providers — those with no measured data —
+    return just ``{'_default': seed}`` so the ``_default`` key is always
+    present for every provider. Thread-safe via the underlying cached queries;
+    never raises.
+    """
+    # One query for every measured (provider, model) rate. A 168h window keeps
+    # the per-model numbers fresh; the provider-level _default below uses each
+    # provider's own trailing window (90d/30d/365d) for stability.
+    measured = get_all_rates(window_hours=168.0, db_path=db_path, _now=_now)
+
+    result: dict[str, dict[str, float]] = {}
+    for prov in PROVIDER_WINDOW_HOURS:
+        prov_measured = measured.get(prov, {})
+        model_rates: dict[str, float] = {}
+
+        # Per-model measured rates (§3.6 step 1). Skip NULL model names and
+        # non-positive rates; the aggregate is captured via _default.
+        for model, rate in prov_measured.items():
+            if model is None:
+                continue
+            if rate and rate > 0:
+                model_rates[model] = rate
+
+        # _default: provider-level measured rate (§3.6 step 4) → seed (step 5)
+        # → conservative fallback (step 6).
+        provider_rate = get_trailing_rate(prov, db_path=db_path, _now=_now)
+        if provider_rate is not None and provider_rate > 0:
+            model_rates["_default"] = provider_rate
+        elif prov in SEED_RATES:
+            model_rates["_default"] = SEED_RATES[prov]
+        else:
+            model_rates["_default"] = UNKNOWN_PROVIDER_FALLBACK
+
+        result[prov] = model_rates
+    return result
 
 
 def get_rate_readiness(

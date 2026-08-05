@@ -49,6 +49,7 @@ from src.real_price_tracker import (
     gate_all_rates_have_data,
     get_all_rates,
     get_all_trailing_rates,
+    get_all_trailing_rates_per_model,
     get_rate_readiness,
     get_rate_with_fallback,
     get_real_rate,
@@ -714,6 +715,100 @@ class TestGetAllTrailingRates(_OllamaBillingNeutered):
         rates = get_all_trailing_rates(providers=["ppq", "deepinfra"],
                                        db_path=db, _now=_now_utc())
         assert set(rates) == {"ppq", "deepinfra"}
+
+
+class TestGetAllTrailingRatesPerModel(_OllamaBillingNeutered):
+    """T1 gate: nested {provider: {model: rate, '_default': rate}}.
+
+    Every provider gets a '_default'; cold-start providers carry their seed as
+    '_default'; per-model measured rates surface when data is present.
+    """
+
+    def test_gate_cold_start_default_key_and_seed_for_every_provider(self, db):
+        """GATE: nested dict with _default for every provider; cold-start → seed."""
+        rates = get_all_trailing_rates_per_model(db_path=db,
+                                                  _now=_now_utc())
+        # One entry per known provider.
+        assert set(rates) == set(PROVIDER_WINDOW_HOURS)
+        for prov in PROVIDER_WINDOW_HOURS:
+            inner = rates[prov]
+            # Every provider carries a '_default' key that is a float.
+            assert "_default" in inner, prov
+            assert isinstance(inner["_default"], float), prov
+            # Cold-start → _default is the seed, nothing else measured.
+            assert inner["_default"] == pytest.approx(
+                SEED_RATES[prov], rel=1e-12), prov
+            assert set(inner) == {"_default"}, prov
+
+    def test_cold_start_is_nested_dict_of_floats(self, db):
+        rates = get_all_trailing_rates_per_model(db_path=db,
+                                                  _now=_now_utc())
+        for prov, inner in rates.items():
+            assert isinstance(inner, dict), prov
+            for model, rate in inner.items():
+                assert isinstance(model, str), (prov, model)
+                assert isinstance(rate, float), (prov, model)
+
+    def test_per_model_measured_rate_surfaces(self, db):
+        now = _now_utc()
+        # 100 calls of ppq/kimi-k3 at $0.0001 each → 0.1 $/M.
+        _seed(db, [(now - 100, "ppq", "kimi-k3", 1000, 0.0001)
+                   for _ in range(100)])
+        rates = get_all_trailing_rates_per_model(db_path=db, _now=now)
+        assert rates["ppq"]["kimi-k3"] == pytest.approx(0.1, rel=1e-9)
+        # Provider has measured data → _default is the measured provider rate,
+        # NOT the seed.
+        assert rates["ppq"]["_default"] == pytest.approx(0.1, rel=1e-9)
+        assert rates["ppq"]["_default"] != pytest.approx(SEED_RATES["ppq"])
+
+    def test_distinct_models_get_distinct_rates(self, db):
+        """kimi-k3 priced 75x glm — per-model dict must reflect that, not blend."""
+        now = _now_utc()
+        rows = (
+            [(now - 100, "ppq", "glm", 1000, 0.0001) for _ in range(100)]
+            + [(now - 100, "ppq", "kimi-k3", 1000, 0.00753) for _ in range(100)]
+        )
+        _seed(db, rows)
+        rates = get_all_trailing_rates_per_model(db_path=db, _now=now)
+        assert rates["ppq"]["glm"] == pytest.approx(0.1, rel=1e-9)
+        assert rates["ppq"]["kimi-k3"] == pytest.approx(7.53, rel=1e-9)
+        # _default is the blended provider-level rate (distinct from either).
+        assert rates["ppq"]["_default"] == pytest.approx(
+            (0.01 + 0.753) / 200_000 * 1e6, rel=1e-9)
+        assert "_default" in rates["ppq"]
+
+    def test_mixed_measured_and_cold(self, db):
+        now = _now_utc()
+        _seed(db, [(now - 100, "ppq", "m", 1000, 0.0001) for _ in range(100)])
+        rates = get_all_trailing_rates_per_model(db_path=db, _now=now)
+        # ppq is warm.
+        assert rates["ppq"]["_default"] == pytest.approx(0.1, rel=1e-9)
+        # Everyone else cold → seed _default, no per-model entries.
+        for prov in PROVIDER_WINDOW_HOURS:
+            if prov == "ppq":
+                continue
+            assert rates[prov]["_default"] == pytest.approx(
+                SEED_RATES[prov], rel=1e-12), prov
+            assert set(rates[prov]) == {"_default"}, prov
+
+    def test_bad_db_path_never_raises_returns_seeds(self, db):
+        """A missing/unreadable DB degrades to seeds, never an exception."""
+        import tempfile
+        missing = tempfile.mkstemp(suffix=".db")[1]
+        try:
+            os.unlink(missing)  # ensure path does not exist
+        except OSError:
+            pass
+        rates = get_all_trailing_rates_per_model(db_path=missing,
+                                                  _now=_now_utc())
+        assert set(rates) == set(PROVIDER_WINDOW_HOURS)
+        for prov in PROVIDER_WINDOW_HOURS:
+            assert "_default" in rates[prov]
+            assert rates[prov]["_default"] == pytest.approx(
+                SEED_RATES[prov], rel=1e-12), prov
+
+    def test_exported_in_public_api(self):
+        assert "get_all_trailing_rates_per_model" in rpt.__all__
 
 
 class TestGetRateReadiness(_OllamaBillingNeutered):
