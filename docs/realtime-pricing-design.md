@@ -881,3 +881,222 @@ This change is additive to the §4 phased plan. It slots into **Phase 2**
 DB tables, no new collectors, no new cron jobs — just one new function in
 `pricing_engine.py` and the deletion of three threshold constants from
 `live_router.py`.
+
+---
+
+## 9. Endpoint-Per-Model Pricing Architecture
+
+> **Felix's core vision (2025-08-05):** "Separate models for every AI endpoint
+> so prices are set correctly, and the consumer can just choose based on the
+> price per token exposed from these different endpoints. In future, these
+> models live in a Routstr node; the consumer lives in a Routstr client."
+
+Sections 1–8 describe a **centralised** pipeline: one `RealtimePricing`
+singleton feeds Kalman filters → shared multiplier layer (`pricing_engine.py`)
+→ smart optimizer that filters by tier, health, exhaustion, scarcity, then
+sorts. This section describes the **inversion**: each endpoint becomes a
+self-contained price model owning ALL pricing logic; the optimizer shrinks to
+a one-line `min()`.
+
+### 9.1 The inversion
+
+| | Current (§1–8) | Target (§9) |
+|---|---|---|
+| **State lives in** | Optimizer + pricing_engine dicts | Each endpoint model |
+| **Price computed by** | `compute_effective_price(base, peak, scarcity, health, pace, extra)` — 10 args | `model.get_price()` — zero args |
+| **Optimizer does** | Filter tier, check health, check exhaustion, compute scarcity, sort | `min(models, key=lambda m: m.get_price())` |
+| **Adding an endpoint** | Edit optimizer, add Kalman, add multipliers, add tier | Subclass `PriceModel`, implement 3 methods |
+| **Coupling** | Optimizer imports pricing_engine, price_kalman, consumption_kalman | Optimizer imports only the `PriceModel` protocol |
+
+### 9.2 Abstract base — the `PriceModel` protocol
+
+```python
+@runtime_checkable
+class PriceModel(Protocol):
+    """One endpoint = one self-contained price model. Owns ALL pricing
+    complexity. Exposes exactly ONE number: $/M for the next token.
+
+    Contract:
+      • get_price() — O(1), lock-free, NEVER raises. +inf = unavailable.
+      • refresh()   — batch state update from billing APIs. Cron-driven.
+      • get_metadata() — frozen dict for dashboards/debugging.
+    """
+    @property
+    def endpoint_id(self) -> str: ...          # 'ollama_cloud:glm-5.2'
+
+    def get_price(self, ctx: "RequestContext | None" = None) -> float: ...
+    def refresh(self) -> None: ...
+    def get_metadata(self) -> dict: ...         # source, confidence, tier, breakdown
+```
+
+`RequestContext` is a frozen dataclass (`required_tier`, `estimated_tokens`,
+`task_type`) describing the *request* — not the endpoint. A model that can't
+serve the context returns `+inf` (wrong tier, insufficient quota). Without a
+context, returns the model's default price.
+
+### 9.3 Per-endpoint models
+
+#### `OllamaCloudPriceModel`
+
+Owns session/weekly windows, burn rate (`ConsumptionKalman`), per-model
+billing rates, health, tier. The `quota_price_factor` from §8.2 lives HERE.
+
+```
+get_price():
+  if breaker_tripped or exhausted: return +inf
+  p_extra = predict_p_extra(burn_rate, time_remaining, quota_total)  # §8.2
+  rate = (1 - p_extra) * base_included + p_extra * base_extra
+  rate *= health_graduated(failure_count)     # 1.0 / 1.5 / 3.0 / 10.0
+  if ctx and tier_rank[tier] < ctx.required_tier: return +inf
+  return max(rate, MIN_EFFECTIVE_PRICE)
+```
+
+#### `ZaiSubscriptionPriceModel`
+
+Owns monthly fee, tokens consumed this month, peak hours (UTC 06–09 ×3.0),
+quota windows (5h/weekly/monthly), friend premium (21%), health.
+
+```
+get_price():
+  if breaker_tripped: return +inf
+  amortized = monthly_fee / (tokens_this_month / 1e6)    # $/M (ours: $155/mo)
+  if is_friend: amortized *= 1.21                        # ADR-005 premium
+  if hour_utc in peak_hours: amortized *= peak_multiplier
+  amortized *= pace_factor_multi(quota_windows, burn_rate)
+  amortized *= health_graduated(failure_count)
+  if ctx and tier_rank[tier] < ctx.required_tier: return +inf
+  return max(amortized, MIN_EFFECTIVE_PRICE)
+```
+
+At month-start (tokens ≈ 0), the model holds its last stable rate until
+`tokens_this_month` exceeds `MIN_SAMPLE_TOKENS` (1M), matching §2 confidence
+gating — prevents the amortized rate from exploding.
+
+#### `PpqPayPerUsePriceModel` / `OpenRouterPriceModel` / `DeepInfraPriceModel`
+
+Pay-per-token providers have constant marginal cost but still track balance,
+depletion, and health. All three share this structure:
+
+```
+get_price():
+  if breaker_tripped or balance_depleted: return +inf
+  rate = published_rate_per_m * health_graduated(failure_count)
+  if balance_low: rate *= scarcity_for_balance(balance_usd)
+  if ctx and tier_rank[tier] < ctx.required_tier: return +inf
+  return max(rate, MIN_EFFECTIVE_PRICE)
+```
+
+OpenRouter's `published_rate_per_m` shifts from `providers.yaml` list prices
+(`source='published_list'`) to per-request `usage.cost` extraction once Phase
+3.6 lands. PPQ tracks balance from `api_burn.db`; DeepInfra from
+`daily_spend.actual_cost`.
+
+### 9.4 What moves inside the price
+
+Every multiplier in `pricing_engine.py` and every filter in
+`routing_optimizer._evaluate_provider` migrates INTO the model:
+
+| Current function | Moves to | How |
+|---|---|---|
+| `peak_multiplier()` (3.0× UTC 06–09) | `ZaiSubscriptionPriceModel` | Only z.ai has peak; baked into `get_price()` |
+| `scarcity_factor()` (ramp >50% quota) | Each quota-bearing model | Model knows its own usage |
+| `health_pricing_factor()` (1→1.5→3→10→∞) | Every model | Each tracks own `failure_count` |
+| `pace_factor()` (predictive burn pacing) | Each quota-bearing model | Subsumed by `p_extra` for Ollama; standalone for z.ai |
+| `extra_usage_multiplier()` (regime step) | `OllamaCloudPriceModel` | Replaced by continuous `p_extra` (§8.2) |
+| tier gate (`TIER_RANK < required`) | Every model | Returns `+inf` for incompatible `ctx.required_tier` |
+| exhaustion gate (`will_exhaust && low`) | Each model | Returns `+inf` if can't serve `ctx.estimated_tokens` |
+| RP-5 throttle (0.85/1.0 thresholds) | `OllamaCloudPriceModel` | Price ramp handles it continuously |
+
+After migration, `pricing_engine.py` retains only pure helpers
+(`scarcity_factor`, `health_graduated`, `pace_factor`) as building blocks.
+The orchestrating `compute_effective_price()` is deleted — each model
+composes its own price.
+
+### 9.5 The dumb consumer
+
+```python
+class PriceConsumer:
+    """Reads prices, picks cheapest. Knows nothing about internals."""
+    def select(self, ctx: RequestContext) -> PriceModel | None:
+        priced = [(m, m.get_price(ctx)) for m in self._models]
+        cheapest = min(priced, key=lambda p: p[1])
+        return None if cheapest[1] == float("inf") else cheapest[0]
+```
+
+- **Failover** is implicit: on failure, the model's `failure_count`
+  increments → price rises via `health_graduated` → next-cheapest wins on
+  re-query. No separate failover list.
+- **Capacity** is a price adjustment: quota depletion raises price (scarcity,
+  pace, p_extra); when price exceeds competitors, traffic reroutes
+  automatically. Zero capacity = `+inf` = excluded.
+- **Tie-breaking** among equally-priced models (e.g. two z.ai keys) is the
+  consumer's only non-trivial decision: round-robin within a ±5% band, or
+  deterministic hash on request ID. Not routing logic.
+
+### 9.6 Mapping to Routstr
+
+| Merchant-routing-engine | Routstr |
+|---|---|
+| `PriceModel` instance | **Node** — runs independently, owns one endpoint |
+| `PriceConsumer` | **Client** — subscribes to price events, routes requests |
+| `get_price()` | `price_usd_per_m` tag in a Nostr event |
+| `get_metadata()` | Other tags in the same event |
+| `refresh()` cron | Node's internal update loop |
+
+**Event design:** NIP-33 parameterized replaceable event, kind `31999`
+(application-specific range), per `(node_pubkey, model)`:
+
+```jsonc
+{ "kind": 31999, "pubkey": "<node>",
+  "tags": [
+    ["d", "ollama_cloud:glm-5.2"],
+    ["price_usd_per_m", "0.0155"],
+    ["tier", "high"], ["model", "glm-5.2"],
+    ["available", "true"],
+    ["capacity_remaining", "450000000"],
+    ["source", "ollama_billing_api"], ["confidence", "0.92"]
+  ], "content": "" }
+```
+
+The client subscribes `["REQ", "sub", {"kinds": [31999]}]`, builds local
+`PriceModel` adapters from events, runs the same `min(price)` selection.
+When a node's price changes, it republishes — the client updates within
+seconds. **Capacity and availability are encoded in the price and `available`
+tag** — no separate protocol. `available=false` or `price=inf` → not selected.
+
+Our `RealtimePricing` module (§2) IS the prototype Routstr node: it runs
+collectors, maintains state, exposes a price. The only addition is publishing
+that price as a Nostr event.
+
+### 9.7 Migration path
+
+Structural refactor in four phases, each revertible via
+`REALTIME_PRICING_ENABLED`.
+
+**Phase A — Protocol + adapters (no behavior change).** Define `PriceModel`.
+Write thin adapters wrapping the existing `PriceKalman` +
+`pricing_engine.compute_effective_price` pipeline. Optimizer gains
+`select_v2()` using adapters; old `route()` stays default. Verify identical
+decisions on replay.
+
+**Phase B — Move state into models.** Migrate per-provider state (quota,
+health, failure_count, tier) from optimizer dicts into each model. Models call
+`pricing_engine` helpers internally. Delete tier/health/exhaustion gates and
+scarcity computation from the optimizer — now inside models. Verify same
+decisions; `routing_optimizer.py` loses ~100 lines.
+
+**Phase C — Absorb the multiplier layer.** Move `peak_multiplier`,
+`extra_usage_multiplier`, RP-5 throttle into their models. Delete
+`compute_effective_price()`; keep only pure helpers. Optimizer becomes the
+one-liner from §9.5. Verify replay suite passes.
+
+**Phase D — Routstr split.** Each model becomes an independent process
+publishing price events. Consumer subscribes. Requires the Nostr event layer
+(§9.6); out of scope for this repo. The `PriceModel` interface is
+forward-compatible: a Nostr-backed model implements the same protocol, with
+`refresh()` reading from a relay subscription.
+
+> Phases A–C are internal to merchant-routing-engine and don't depend on §4
+> shipping first — adapters can wrap cold-start Kalman seeds. The full vision
+> (measured rates inside self-contained models) requires both §4 (collection)
+> and §9 (inversion) to land.
