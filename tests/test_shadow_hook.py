@@ -104,7 +104,7 @@ class TestCompare:
 class TestAgreement:
     def test_agreement_when_same_provider(self, hook, sample_quota, all_healthy):
         """If both live and shadow choose same provider, agreement=1."""
-        # Off-peak: ours is cheapest (0.31 $/M), friend is 0.375
+        # Off-peak: ours is cheapest (~$0.001/M marginal cost)
         # optimizer should pick ours, matching the live choice
         hook.compare("ours", "glm-5.2", 5000, sample_quota, all_healthy, peak=False)
         assert hook.get_stats()["agreement_rate"] == 1.0

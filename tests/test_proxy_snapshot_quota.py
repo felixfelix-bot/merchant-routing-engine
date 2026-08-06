@@ -180,19 +180,26 @@ class TestSnapshotQuotaOllamaCloud:
 # ── Test: dynamic ollama_cloud cost per 1M ────────────────────────────────────
 
 class TestDynamicOllamaCost:
-    """Verify _get_ollama_cloud_cost_per_1m() returns regime-based rates."""
+    """Verify _get_ollama_cloud_cost_per_1m() returns regime-based rates.
 
-    def test_included_regime_returns_base_rate(self, proxy_module):
+    RP-4: Rates are sourced from real_price_tracker (measured data or
+    LAST_RESORT_RATES), not hardcoded constants. Tests assert behavioral
+    properties (positive rate, extra > included, extra > PPQ threshold)
+    rather than specific dollar values.
+    """
+
+    def test_included_regime_returns_positive_rate(self, proxy_module):
         with patch.object(proxy_module, "_get_ollama_quota_status",
                           return_value={"regime": "included"}):
             rate = proxy_module._get_ollama_cloud_cost_per_1m()
-        assert rate == 0.024
+        assert rate > 0, f"Included rate should be positive, got {rate}"
+        assert rate < 0.14, f"Included rate should be below PPQ $0.14/M, got {rate}"
 
     def test_extra_regime_returns_extra_rate(self, proxy_module):
         with patch.object(proxy_module, "_get_ollama_quota_status",
                           return_value={"regime": "extra"}):
             rate = proxy_module._get_ollama_cloud_cost_per_1m()
-        assert rate == 0.15
+        assert rate == pytest.approx(0.15, rel=0.01)
 
     def test_exhausted_regime_returns_inf(self, proxy_module):
         with patch.object(proxy_module, "_get_ollama_quota_status",
@@ -207,23 +214,38 @@ class TestDynamicOllamaCost:
             rate = proxy_module._get_ollama_cloud_cost_per_1m()
         assert rate > 0.14, f"Extra rate ${rate}/M must be above PPQ $0.14/M"
 
+    def test_included_cheaper_than_extra(self, proxy_module):
+        """Included regime rate must be cheaper than extra regime rate."""
+        with patch.object(proxy_module, "_get_ollama_quota_status",
+                          return_value={"regime": "included"}):
+            included = proxy_module._get_ollama_cloud_cost_per_1m()
+        with patch.object(proxy_module, "_get_ollama_quota_status",
+                          return_value={"regime": "extra"}):
+            extra = proxy_module._get_ollama_cloud_cost_per_1m()
+        assert included < extra, f"Included ({included}) should be < extra ({extra})"
+
 
 # ── Test: _estimate_cost_usd with dynamic pricing ─────────────────────────────
 
 class TestEstimateCostDynamic:
-    """Verify _estimate_cost_usd applies dynamic pricing for ollama_cloud."""
+    """Verify _estimate_cost_usd applies dynamic pricing for ollama_cloud.
+
+    RP-4: Rates come from real_price_tracker, not hardcoded constants.
+    """
 
     def test_included_regime_cost(self, proxy_module):
         with patch.object(proxy_module, "_get_ollama_quota_status",
                           return_value={"regime": "included"}):
             cost = proxy_module._estimate_cost_usd("ollama_cloud", 1_000_000)
-        assert cost == pytest.approx(0.024)
+        # RP-4: Rate from tracker — just verify it's positive and below PPQ
+        assert cost > 0, f"Cost should be positive, got {cost}"
+        assert cost < 0.14, f"Cost should be below PPQ $0.14/M, got {cost}"
 
     def test_extra_regime_cost(self, proxy_module):
         with patch.object(proxy_module, "_get_ollama_quota_status",
                           return_value={"regime": "extra"}):
             cost = proxy_module._estimate_cost_usd("ollama_cloud", 1_000_000)
-        assert cost == pytest.approx(0.15)
+        assert cost == pytest.approx(0.15, rel=0.01)
 
     def test_exhausted_regime_cost_is_inf(self, proxy_module):
         with patch.object(proxy_module, "_get_ollama_quota_status",
@@ -231,10 +253,10 @@ class TestEstimateCostDynamic:
             cost = proxy_module._estimate_cost_usd("ollama_cloud", 1_000_000)
         assert cost == float("inf")
 
-    def test_non_ollama_key_uses_static_dict(self, proxy_module):
-        """Non-ollama_cloud keys should still use _MODEL_COST_PER_1M."""
+    def test_non_ollama_key_uses_tracker(self, proxy_module):
+        """RP-4: Non-ollama_cloud keys use real_price_tracker for rate lookup."""
         cost = proxy_module._estimate_cost_usd("friend", 1_000_000)
-        assert cost == pytest.approx(0.029)
+        assert cost >= 0, f"Cost should be non-negative, got {cost}"
 
     def test_zero_tokens_returns_zero(self, proxy_module):
         cost = proxy_module._estimate_cost_usd("ollama_cloud", 0)
@@ -257,9 +279,10 @@ class TestKillSwitch:
         assert status["regime"] == "included"
 
     def test_kill_switch_disabled_cost_is_base(self, proxy_module, monkeypatch):
+        """RP-4: When kill switch is off, rate comes from tracker (included regime)."""
         monkeypatch.setattr(proxy_module, "_OLLAMA_EXTRA_USAGE_ENABLED", False)
         rate = proxy_module._get_ollama_cloud_cost_per_1m()
-        assert rate == 0.024
+        assert rate > 0, f"Base rate should be positive, got {rate}"
 
 
 # ── Test: fallback on tracker failure ─────────────────────────────────────────

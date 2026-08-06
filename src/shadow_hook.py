@@ -44,17 +44,26 @@ from src.shadow_logger import ShadowLogger
 from src.provider_names import normalize_provider_name
 from src.pricing_engine import pace_factor_multi
 
+# RP-4: real_price_tracker replaces hardcoded seed costs.
+try:
+    from src.real_price_tracker import get_rate_with_fallback as _rpt_get_rate
+except Exception:
+    _rpt_get_rate = None
+
 __all__ = ["ShadowHook"]
 
 
-# ── Seed costs ($/M) — reasonable starting points; Kalman converges ──────────
+# ── Seed costs ($/M) — last-resort fallback only ─────────────────────────────
+# RP-4: Real rates are resolved from real_price_tracker at init time. These
+# values mirror LAST_RESORT_RATES in real_price_tracker.py and are used ONLY
+# when the tracker is unavailable or returns no data.
 _SEED_COSTS = {
-    "ours":          0.31,   # €155/mo, ~500M tokens/mo
-    "friend":        0.375,  # 21% premium over ours
-    "ollama_cloud":  0.024,  # $100/mo, ~4.2B tokens/mo (500M/5h × ~8 sessions/day × 30d)
-    "ppq":           0.14,   # avg of $0.09 input + $0.19 output
-    "openrouter":    0.135,  # avg of $0.09 input + $0.18 output
-    "deepinfra":     1.30,   # historical effective rate from daily_spend DB
+    "ours":         0.001,    # z.ai flat-rate → marginal $0, floored
+    "friend":       0.001,    # shared z.ai subscription → marginal $0
+    "ollama_cloud": 0.0155,   # measured included rate (pre-RP-3)
+    "ppq":          0.14,     # known list price
+    "openrouter":   0.135,    # known list price
+    "deepinfra":    1.30,     # known list price
 }
 
 # Quota totals (approximate, for scarcity factor)
@@ -101,8 +110,8 @@ class ShadowHook:
             db_path: SQLite path for ShadowLogger. Defaults to production usage DB.
             converged_rates: Converged base rates ($/M) from historical data.
                 When provided, PriceKalman instances are seeded with these
-                values instead of the static ``_SEED_COSTS`` defaults.  Keys
-                not present in the dict fall back to ``_SEED_COSTS``.
+                values instead of the tracker-resolved rates.  Keys not
+                present in the dict fall back to tracker or ``_SEED_COSTS``.
         """
         if db_path is None:
             db_path = os.path.expanduser("~/.hermes/bot/zai_usage.db")
@@ -110,9 +119,22 @@ class ShadowHook:
         self._logger = ShadowLogger(db_path)
         self._last_update = time.time()
 
-        # Build the effective seed table: converged overrides take precedence
-        # over the static _SEED_COSTS defaults.
+        # RP-4: Build the effective seed table from real_price_tracker.
+        # Resolution: tracker (real measured rates) → converged_rates override
+        # → _SEED_COSTS (last-resort fallback).
         effective_seeds: dict[str, float] = dict(_SEED_COSTS)
+
+        # 1. Try real_price_tracker for each provider
+        if _rpt_get_rate is not None:
+            for name in _SEED_COSTS:
+                try:
+                    rate = _rpt_get_rate(name, db_path=db_path)
+                    if rate is not None and rate == rate and rate >= 0:
+                        effective_seeds[name] = float(rate)
+                except Exception:
+                    pass  # keep last-resort seed
+
+        # 2. Explicit converged_rates override takes precedence
         if converged_rates:
             for name, rate in converged_rates.items():
                 effective_seeds[name] = rate

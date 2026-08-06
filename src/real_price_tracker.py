@@ -189,12 +189,13 @@ UNKNOWN_PROVIDER_FALLBACK: float = 1.0  # $/M
 # documents their provenance. Every entry here is stale the moment real data
 # arrives; the warnings logged when it is used make that visible.
 LAST_RESORT_RATES: dict[str, float] = {
-    "ours":         0.001,    # z.ai flat-rate subscription → marginal $0, floored
-    "friend":       0.001,    # shared z.ai subscription → marginal $0, floored
-    "ollama_cloud": 0.0155,   # MEASURED included rate (pre-RP-3 observation)
-    "ppq":          0.14,     # known list price
-    "openrouter":   0.135,    # known list price
-    "deepinfra":    1.30,     # known list price
+    "ours":               0.001,    # z.ai flat-rate subscription → marginal $0, floored
+    "friend":             0.001,    # shared z.ai subscription → marginal $0, floored
+    "ollama_cloud":       0.0155,   # MEASURED included rate (pre-RP-3 observation)
+    "ollama_cloud_extra": 0.15,     # above-quota rate (above PPQ $0.14/M so optimizer reroutes)
+    "ppq":                0.14,     # known list price
+    "openrouter":         0.135,    # known list price
+    "deepinfra":          1.30,     # known list price
 }
 
 # ── Trailing-rate configuration (T6) ─────────────────────────────────────────

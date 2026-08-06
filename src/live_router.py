@@ -76,6 +76,7 @@ from src.real_price_tracker import (
     get_zai_amortized_rate,
     get_all_trailing_rates_per_model,
     SEED_RATES as _RPT_SEED_RATES,
+    LAST_RESORT_RATES as _RPT_LAST_RESORT_RATES,
 )
 
 __all__ = ["LiveRouter"]
@@ -188,19 +189,18 @@ _OLLAMA_EXCLUSIVE_MODELS: frozenset[str] = frozenset({
 _OLLAMA_ONLY_MODELS = _OLLAMA_EXCLUSIVE_MODELS
 
 # ── Converged rates (cold-start fallback only) ──────────────────────────────
-# These hardcoded seeds back the PriceKalman filters at construction time.
-# When ``converged_rates`` is passed to ``__init__``, they are overridden.
-# When :data:`_DYNAMIC_RATES_ENABLED` is on and no override is passed, the
-# router instead seeds from :func:`_resolve_dynamic_base_rates` (real measured
-# rates from real_price_tracker); this dict then only serves as the
-# never-fail fallback for the resolver. See docs/REAL_PRICE_SYSTEM_DESIGN.md.
+# RP-4: These values are derived from LAST_RESORT_RATES in real_price_tracker
+# (single source of truth for all fallback estimates). They seed the PriceKalman
+# filters at construction time. When ``converged_rates`` is passed to
+# ``__init__``, they are overridden. When :data:`_DYNAMIC_RATES_ENABLED` is on
+# and no override is passed, the router instead seeds from
+# :func:`_resolve_dynamic_base_rates` (real measured rates from
+# real_price_tracker); this dict then only serves as the never-fail fallback
+# for the resolver. See docs/REAL_PRICE_SYSTEM_DESIGN.md.
 _DEFAULT_CONVERGED_RATES: dict[str, float] = {
-    "ours":          0.001,    # clamped from -0.000968
-    "friend":        0.028983,
-    "ollama_cloud":  0.023952,
-    "ppq":           0.14,
-    "openrouter":    0.135,
-    "deepinfra":     1.30,
+    name: rate
+    for name, rate in _RPT_LAST_RESORT_RATES.items()
+    if name != "ollama_cloud_extra"
 }
 
 # ── P5-RATES: dynamic base rates from real_price_tracker ────────────────────

@@ -38,9 +38,13 @@ ollama_cloud:
   quota_windows: [5h, weekly]
   included_quota_tokens_session: 500000000   # 500M tokens per 5h session
   included_quota_tokens_weekly: 3500000000   # 3.5B tokens per 7-day week
-  extra_usage_rate_per_m: 0.15               # $/M above quota (EU-R3: $0.024 * 6.25 = $0.15/M)
+  extra_usage_rate_per_m: 0.15               # LEGACY: real_price_tracker is source of truth (RP-4). Value kept for reference only.
+                                              # Tracker resolves via get_rate_with_fallback('ollama_cloud_extra').
 
 # ── External per-token providers (last resort) ─────────────────────────────
+# RP-4: cost_per_1m fields below are LEGACY reference values. Real rates are
+# sourced from real_price_tracker.get_rate_with_fallback() at runtime.
+# Values kept for documentation only — the tracker is the source of truth.
 external:
   ppq:
     base_url: "https://api.ppq.ai/v1"
@@ -49,8 +53,8 @@ external:
     # Fixed price — no Kalman needed (constant)
     models:
       deepseek-v4-flash:
-        cost_per_1m_input: 0.09
-        cost_per_1m_output: 0.19
+        cost_per_1m_input: 0.09    # LEGACY: tracker is source of truth (RP-4)
+        cost_per_1m_output: 0.19   # LEGACY: tracker is source of truth (RP-4)
 
   openrouter:
     base_url: "https://openrouter.ai/api/v1"
@@ -61,8 +65,8 @@ external:
     pricing_model: per_token
     models:
       deepseek-v4-flash:
-        cost_per_1m_input: 0.09
-        cost_per_1m_output: 0.18
+        cost_per_1m_input: 0.09    # LEGACY: tracker is source of truth (RP-4)
+        cost_per_1m_output: 0.18   # LEGACY: tracker is source of truth (RP-4)
 
   deepinfra:
     base_url: "https://api.deepinfra.com/v1/openai"
@@ -70,8 +74,8 @@ external:
     pricing_model: per_token
     models:
       deepseek-v4-flash:
-        cost_per_1m_input: 0.09
-        cost_per_1m_output: 0.19
+        cost_per_1m_input: 0.09    # LEGACY: tracker is source of truth (RP-4)
+        cost_per_1m_output: 0.19   # LEGACY: tracker is source of truth (RP-4)
 
 # ── Strategy configuration ─────────────────────────────────────────────────
 strategy:
