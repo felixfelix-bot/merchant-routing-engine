@@ -104,13 +104,15 @@ def main() -> int:
 
     if summary["provider_shifts"]:
         print(f"\n  Top provider shifts (actual → pressure):")
-        for shift, n in list(summary["provider_shifts"])[:5]:
+        for shift, n in sorted(summary["provider_shifts"].items(),
+                               key=lambda x: -x[1])[:5]:
             print(f"    {shift:40s}  {n:,}")
 
     print(f"\n  Exit criteria:")
     for name, c in gate["criteria"].items():
         status = "✅" if c["passed"] else "❌"
-        print(f"    {status} {name:20s}  val={c['value']}  threshold={c['threshold']}")
+        thresh = c.get("threshold", "—")
+        print(f"    {status} {name:20s}  val={c['value']}  threshold={thresh}")
     print(f"    {'✅' if gate['all_passed'] else '❌'} all_passed: {gate['all_passed']}")
 
     print(f"\n  Session span: {span:.1f}h")

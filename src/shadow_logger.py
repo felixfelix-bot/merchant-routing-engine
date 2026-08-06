@@ -615,23 +615,26 @@ class ShadowLogger:
 
         The exit-criteria gate checks ``get_divergence_rate() < 0.15``.
 
-        Only counts rows that actually have a ``divergence`` value (logged via
-        :meth:`log_pressure_decision`); legacy ``log_decision`` rows are
-        ignored because their divergence is NULL.
+        Only counts rows that have genuine pressure data
+        (``pressure_provider IS NOT NULL`` — logged via
+        :meth:`log_pressure_decision` or :meth:`log_decision_with_pressure`
+        with a pressure pick).  Legacy ``log_decision`` rows are excluded
+        because their divergence defaults to 0.0 (from the schema migration)
+        which would dilute the average and mask real divergence.
         """
         if since_ts is None:
             with self._lock:
                 row = self._conn.execute(
                     "SELECT AVG(divergence), COUNT(*) "
                     "FROM routing_shadow_decisions "
-                    "WHERE divergence IS NOT NULL;"
+                    "WHERE pressure_provider IS NOT NULL;"
                 ).fetchone()
         else:
             with self._lock:
                 row = self._conn.execute(
                     "SELECT AVG(divergence), COUNT(*) "
                     "FROM routing_shadow_decisions "
-                    "WHERE divergence IS NOT NULL AND ts >= ?;",
+                    "WHERE pressure_provider IS NOT NULL AND ts >= ?;",
                     (float(since_ts),),
                 ).fetchone()
         avg, count = row
