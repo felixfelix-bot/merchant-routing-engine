@@ -238,32 +238,56 @@ class TestZaiAmortized:
 
 class TestOllamaBilling:
     def test_ollama_billing_rate(self):
-        """Parse activity.cost / activity.tokens → provider-level aggregate."""
+        """Provider-level rate = activity.cost / 4-week ollama token volume.
+
+        Real API shape: activity = {cost, period, models: [{name, request_count, cost}]}.
+        The API gives no per-model tokens, so the DB's 4-week volume (100M here)
+        is the denominator and the proportional-estimation basis.
+        """
+        now = time.time()
+        # 100 calls x 1M tokens = 100M tokens, 100 calls (avg 1M/call)
+        rows = [(now - 100, "ollama_cloud", "glm-5.2", 1_000_000)] * 100
+        zai = _make_zai_db(api_calls_rows=rows)
         mock_response = {
             "limits": {"session": {"usage": 0.1}, "weekly": {"usage": 0.2}},
             "activity": {
-                "glm-5.2": {"cost": 1.55, "total_tokens": 100_000_000, "request_count": 0},
-                "glm-4.5-flash": {"cost": 0.0, "total_tokens": 50_000_000, "request_count": 0},
+                "cost": "1.55",
+                "period": {"type": "last_4_weeks"},
+                "models": [
+                    {"name": "glm-5.2", "request_count": 10, "cost": "1.55"},
+                ],
             },
         }
         with patch("src.ollama_extra_usage.fetch_ollama_usage", return_value=mock_response):
-            rp = _make_instance()
+            rp = _make_instance(zai_db=zai)
             rp.refresh()
         ob = rp.get_rate("ollama_cloud")
         assert ob.source == SRC_OLLAMA_BILLING
         assert ob.is_measured is True
-        # total cost 1.55 / total tokens 150M = 0.01033... $/M
-        assert ob.rate_per_m == pytest.approx(1.55 / 150.0, rel=0.01)
+        # total cost 1.55 / 100M tokens = 0.0155 $/M
+        assert ob.rate_per_m == pytest.approx(0.0155, rel=0.01)
 
     def test_ollama_extra_usage_detection(self):
-        """Models with request_count > 0 get per-model extra-usage observations."""
+        """Models with request_count > 0 get per-model extra-usage observations.
+
+        Per-model tokens are estimated proportionally: request_count *
+        avg_tokens_per_call (from the 4-week DB volume). avg = 1M/call, 1 extra
+        request -> est_tokens = 1M -> rate = 0.46 / 1M = $0.46/M.
+        """
+        now = time.time()
+        rows = [(now - 100, "ollama_cloud", "glm-5.2", 1_000_000)] * 100
+        zai = _make_zai_db(api_calls_rows=rows)
         mock_response = {
             "activity": {
-                "glm-5.2": {"cost": 0.46, "tokens": 1_000_000, "request_count": 100},
+                "cost": "0.46",
+                "period": {"type": "last_4_weeks"},
+                "models": [
+                    {"name": "glm-5.2", "request_count": 1, "cost": "0.46"},
+                ],
             },
         }
         with patch("src.ollama_extra_usage.fetch_ollama_usage", return_value=mock_response):
-            rp = _make_instance()
+            rp = _make_instance(zai_db=zai)
             rp.refresh()
         ob = rp.get_rate("ollama_cloud", "glm-5.2")
         assert ob.source == SRC_OLLAMA_BILLING
@@ -424,13 +448,20 @@ class TestConfidence:
 class TestKalmanIntegration:
     def test_kalman_converges_to_measured_rate(self):
         """Feed 10 real observations at 0.0155; base_rate must converge within 15%."""
+        now = time.time()
+        rows = [(now - 100, "ollama_cloud", "glm-5.2", 1_000_000)] * 100
+        zai = _make_zai_db(api_calls_rows=rows)
         mock_response = {
             "activity": {
-                "glm-5.2": {"cost": 1.55, "total_tokens": 100_000_000, "request_count": 0},
+                "cost": "1.55",
+                "period": {"type": "last_4_weeks"},
+                "models": [
+                    {"name": "glm-5.2", "request_count": 10, "cost": "1.55"},
+                ],
             },
         }
         with patch("src.ollama_extra_usage.fetch_ollama_usage", return_value=mock_response):
-            rp = _make_instance()
+            rp = _make_instance(zai_db=zai)
             for _ in range(10):
                 rp.refresh()
         ob = rp.get_rate("ollama_cloud")
@@ -983,14 +1014,19 @@ class TestKillSwitch:
 
     def test_toggle_runtime(self):
         """Toggling the env var between calls works (checked at call time)."""
+        now = time.time()
+        rows = [(now - 100, "ollama_cloud", "glm-5.2", 1_000_000)] * 100
+        zai = _make_zai_db(api_calls_rows=rows)
         mock_response = {
             "activity": {
-                "glm-5.2": {"cost": 1.55, "total_tokens": 100_000_000, "request_count": 0},
+                "cost": "1.55",
+                "period": {"type": "last_4_weeks"},
+                "models": [{"name": "glm-5.2", "request_count": 10, "cost": "1.55"}],
             },
         }
         # Enabled first: refresh produces measured rates
         with patch("src.ollama_extra_usage.fetch_ollama_usage", return_value=mock_response):
-            rp = _make_instance()
+            rp = _make_instance(zai_db=zai)
             rp.refresh()
         assert rp.get_rate("ollama_cloud").source == SRC_OLLAMA_BILLING
 
@@ -998,7 +1034,7 @@ class TestKillSwitch:
         measured_rate = rp.get_rate("ollama_cloud").rate_per_m
         with patch.dict(os.environ, {"REALTIME_PRICING_ENABLED": "false"}):
             with patch("src.ollama_extra_usage.fetch_ollama_usage",
-                       return_value={"activity": {"glm-5.2": {"cost": 999.0, "total_tokens": 100_000, "request_count": 0}}}):
+                       return_value={"activity": {"cost": "999.0", "models": [{"name": "glm-5.2", "request_count": 10, "cost": "999.0"}]}}):
                 rp.refresh()
         assert rp.snapshot().by_provider["ollama_cloud"].source == SRC_OLLAMA_BILLING
         assert rp.get_rate("ollama_cloud").rate_per_m == pytest.approx(measured_rate)

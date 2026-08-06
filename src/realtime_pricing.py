@@ -648,14 +648,25 @@ class RealtimePricing:
         return result
 
     def _measure_ollama_billing(self) -> dict[tuple[str, str | None], RateObservation]:
-        """Ollama Cloud: parse fetch_ollama_usage() response for per-model
-        activity.cost / activity.tokens. Source: 'ollama_billing_api'
-        (is_measured=True). Fallback chain: amortize $100/mo over tokens →
-        cold_start.
+        """Ollama Cloud: parse fetch_ollama_usage() for extra-usage billing.
 
-        KEY DISCOVERY: activity.request_count = ONLY extra-usage-billed
-        requests. Models with request_count > 0 are in extra-usage mode; their
-        individual cost/tokens gives the real extra rate.
+        The ``/api/usage`` ``activity`` payload is::
+
+            {"cost": "60.00",                       # total extra spend (4wk)
+             "period": {"type": "last_4_weeks", ...},
+             "models": [                            # ONLY extra-usage models
+                {"name": "glm-5.2", "request_count": 954, "cost": "32.25"}, ...]}
+
+        ``activity.cost`` is total extra-usage spend over ``period``; each entry
+        in ``activity.models`` is an extra-usage-billed model with its extra cost
+        and request count. The API does NOT report per-model token counts, so we
+        estimate them proportionally — ``request_count * avg_tokens_per_call``
+        (from the trailing 4-week api_calls volume) — the method documented in
+        docs/extra-usage-real-data-analysis.md (validates glm-5.2 ≈ $0.46/M).
+
+        Source: 'ollama_billing' (is_measured=True). Fallback chain when the API
+        is unavailable or returns no models: amortize $100/mo over tokens →
+        cold_start.
         """
         now = time.time()
         result: dict[tuple[str, str | None], RateObservation] = {}
@@ -670,60 +681,89 @@ class RealtimePricing:
 
         if api_data is not None:
             activity = api_data.get("activity")
-            if isinstance(activity, dict):
-                total_cost = 0.0
-                total_tokens = 0
-                for model_name, entry in activity.items():
+            activity_total_cost = (
+                _safe_float(activity.get("cost")) if isinstance(activity, dict) else None
+            )
+            models_list = (
+                activity.get("models") if isinstance(activity, dict) else None
+            )
+
+            if isinstance(models_list, list) and models_list:
+                # Trailing 4-week ollama token volume (matches activity.period
+                # "last_4_weeks"): basis for proportional per-model token
+                # estimation and the provider-level blended rate.
+                window_total_tokens = 0
+                window_total_calls = 0
+                try:
+                    win_cutoff = now - 28 * 86400
+                    conn = sqlite3.connect(self._zai_db, timeout=2)
+                    try:
+                        row = conn.execute(
+                            "SELECT COALESCE(SUM(total_tokens), 0), COUNT(*) "
+                            "FROM api_calls "
+                            "WHERE key_name = 'ollama_cloud' AND ts >= ?",
+                            (win_cutoff,),
+                        ).fetchone()
+                    finally:
+                        conn.close()
+                    window_total_tokens = int(row[0] or 0)
+                    window_total_calls = int(row[1] or 0)
+                except Exception:
+                    _log.debug("ollama 4w token window query failed", exc_info=True)
+
+                avg_tokens_per_call = (
+                    window_total_tokens / window_total_calls
+                    if window_total_calls > 0
+                    else 0.0
+                )
+
+                for entry in models_list:
                     if not isinstance(entry, dict):
                         continue
-                    # Use explicit None checks — 0.0 is a valid cost/token value
-                    # but falsy, so `or` chains would skip it.
+                    model_name = entry.get("name")
+                    if not model_name:
+                        continue
                     cost = _safe_float(entry.get("cost"))
-                    if cost is None:
-                        cost = _safe_float(entry.get("spend"))
-                    tokens_val = _safe_float(entry.get("total_tokens"))
-                    if tokens_val is None:
-                        tokens_val = _safe_float(entry.get("tokens"))
-                    if tokens_val is None:
-                        tokens_val = 0.0
                     req_count = _safe_float(entry.get("request_count"))
                     if req_count is None:
                         req_count = _safe_float(entry.get("requests"))
-                    if req_count is None:
-                        req_count = 0.0
-                    if cost is None or tokens_val is None or tokens_val <= 0:
+                    # request_count > 0 signals extra-usage billing (the API
+                    # only reports extra-usage-billed requests). Skip otherwise.
+                    if cost is None or cost <= 0 or req_count is None or req_count <= 0:
                         continue
-                    total_cost += cost
-                    total_tokens += int(tokens_val)
-
-                    # Per-model observation. request_count > 0 signals extra
-                    # usage (the API only reports extra-usage-billed requests).
-                    if req_count and req_count > 0 and cost > 0:
-                        extra_rate = _floor_rate(cost / (tokens_val / 1e6))
+                    # Proportional token estimate for this model's extra usage.
+                    est_tokens = int(req_count * avg_tokens_per_call)
+                    if est_tokens > 0:
+                        extra_rate = _floor_rate(cost / (est_tokens / 1e6))
                         result[("ollama_cloud", model_name)] = RateObservation(
                             provider="ollama_cloud",
                             model=model_name,
                             rate_per_m=extra_rate,
                             source=SRC_OLLAMA_BILLING,
                             is_measured=True,
-                            confidence=_confidence(int(tokens_val), True),
-                            sample_tokens=int(tokens_val),
+                            confidence=_confidence(est_tokens, True),
+                            sample_tokens=est_tokens,
                             sample_cost_usd=cost,
                             ts=now,
                         )
 
-                # Provider-level aggregate (all activity combined).
-                if total_tokens > 0 and total_cost >= 0:
-                    rate = _floor_rate(total_cost / (total_tokens / 1e6))
+                # Provider-level blended rate: total extra spend over the 4-week
+                # token volume (the MEASURED effective rate per the analysis
+                # doc). Falls through to the amortization/cold-start fallbacks
+                # below if there is no token volume to divide by.
+                if activity_total_cost is not None and window_total_tokens > 0:
+                    rate = _floor_rate(
+                        activity_total_cost / (window_total_tokens / 1e6)
+                    )
                     result[("ollama_cloud", None)] = RateObservation(
                         provider="ollama_cloud",
                         model=None,
                         rate_per_m=rate,
                         source=SRC_OLLAMA_BILLING,
                         is_measured=True,
-                        confidence=_confidence(total_tokens, True),
-                        sample_tokens=total_tokens,
-                        sample_cost_usd=total_cost,
+                        confidence=_confidence(window_total_tokens, True),
+                        sample_tokens=window_total_tokens,
+                        sample_cost_usd=activity_total_cost,
                         ts=now,
                     )
                     return result
