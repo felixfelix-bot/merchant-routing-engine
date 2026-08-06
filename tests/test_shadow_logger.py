@@ -871,3 +871,296 @@ class TestConstants:
 
     def test_weekly_window_hours(self):
         assert WEEKLY_WINDOW_HOURS == 168.0
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# T7 / C1 fix: log_decision_with_pressure — three-dimension decision logging
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestLogDecisionWithPressure:
+    """Tests for log_decision_with_pressure() — the C1 fix.
+
+    This method populates BOTH the legacy optimizer columns AND the P6
+    pressure-routing columns in a single row, fixing the degenerate-gate
+    problem identified in docs/shadow-7d-report.md §3.
+    """
+
+    def test_basic_write_with_pressure(self, logger):
+        """All three dimensions populate correctly."""
+        logger.log_decision_with_pressure(
+            ts=time.time(),
+            live_provider="zai_ours", live_model="glm-5.2",
+            shadow_provider="ollama_cloud", shadow_model="glm-5.2",
+            shadow_cost=0.024,
+            tokens=1000,
+            reason="cheapest viable",
+            live_cost=0.03,
+            quota_regime="included",
+            pressure_provider="ollama_cloud", pressure_model="glm-5.2",
+            pressure_cost=0.024,
+            actual_cost=0.03,
+        )
+        row = _raw(
+            logger,
+            "SELECT live_provider, shadow_provider, shadow_cost, live_cost, "
+            "pressure_provider, pressure_cost, actual_cost, divergence, "
+            "is_429, paid_provider, agree "
+            "FROM routing_shadow_decisions;",
+        )[0]
+        # Legacy optimizer columns
+        assert row[0] == "ours"             # live_provider (zai_ours→ours)
+        assert row[1] == "ollama_cloud"       # shadow_provider (optimizer pick)
+        assert row[2] == pytest.approx(0.024) # shadow_cost
+        assert row[3] == pytest.approx(0.03)  # live_cost (actual)
+        # P6 pressure columns
+        assert row[4] == "ollama_cloud"       # pressure_provider
+        assert row[5] == pytest.approx(0.024) # pressure_cost
+        assert row[6] == pytest.approx(0.03)  # actual_cost
+        # Divergence: |0.03 - 0.024| / max(0.03, 0.024) = 0.006/0.03 = 0.2
+        assert row[7] == pytest.approx(0.2, abs=0.001)
+        assert row[8] == 0   # is_429
+        assert row[9] == 0   # paid_provider (zai_ours is not paid)
+        # agree: live (zai_ours) != shadow (ollama_cloud) → 0
+        assert row[10] == 0
+
+    def test_agree_is_optimizer_comparison(self, logger):
+        """agree should reflect live==optimizer (NOT live==pressure)."""
+        logger.log_decision_with_pressure(
+            ts=time.time(),
+            live_provider="ours", live_model="m",
+            shadow_provider="ours", shadow_model="m",
+            shadow_cost=0.3,
+            tokens=100,
+            pressure_provider="ollama_cloud", pressure_cost=0.024,
+            actual_cost=0.3,
+        )
+        # live (ours) == shadow (ours) → agree=1, even though
+        # live (ours) != pressure (ollama_cloud)
+        agree = _raw(logger, "SELECT agree FROM routing_shadow_decisions;")[0][0]
+        assert agree == 1
+
+    def test_divergence_zero_on_same_provider(self, logger):
+        """Same actual and pressure provider → divergence 0."""
+        logger.log_decision_with_pressure(
+            ts=time.time(),
+            live_provider="ours", live_model="m",
+            shadow_provider="ours", shadow_model="m",
+            shadow_cost=0.3,
+            tokens=100,
+            pressure_provider="ours", pressure_cost=0.5,
+            actual_cost=0.3,
+        )
+        div = _raw(logger, "SELECT divergence FROM routing_shadow_decisions;")[0][0]
+        assert div == 0.0
+
+    def test_divergence_on_mismatch(self, logger):
+        """Different actual and pressure provider with cost delta."""
+        logger.log_decision_with_pressure(
+            ts=time.time(),
+            live_provider="ppq", live_model="m",
+            shadow_provider="ours", shadow_model="m",
+            shadow_cost=0.3,
+            tokens=100,
+            pressure_provider="ollama_cloud", pressure_cost=0.024,
+            actual_cost=0.14,
+        )
+        # |0.14 - 0.024| / max(0.14, 0.024) = 0.116 / 0.14 ≈ 0.8286
+        div = _raw(logger, "SELECT divergence FROM routing_shadow_decisions;")[0][0]
+        assert div == pytest.approx(0.8286, abs=0.001)
+
+    def test_paid_provider_flag(self, logger):
+        """paid_provider should be set from the actual provider."""
+        logger.log_decision_with_pressure(
+            ts=time.time(),
+            live_provider="openrouter", live_model="m",
+            shadow_provider="ours", shadow_model="m",
+            shadow_cost=0.3,
+            tokens=100,
+            pressure_provider="ollama_cloud", pressure_cost=0.024,
+            actual_cost=0.135,
+        )
+        paid = _raw(logger, "SELECT paid_provider FROM routing_shadow_decisions;")[0][0]
+        assert paid == 1
+
+    def test_429_flag(self, logger):
+        logger.log_decision_with_pressure(
+            ts=time.time(),
+            live_provider="ours", live_model="m",
+            shadow_provider="ours", shadow_model="m",
+            shadow_cost=0.3,
+            tokens=100,
+            pressure_provider="ours", pressure_cost=0.3,
+            actual_cost=0.3,
+            is_429=True,
+        )
+        is429 = _raw(logger, "SELECT is_429 FROM routing_shadow_decisions;")[0][0]
+        assert is429 == 1
+
+    def test_actual_cost_backfills_live_cost(self, logger):
+        """When live_cost is None, actual_cost should populate live_cost."""
+        logger.log_decision_with_pressure(
+            ts=time.time(),
+            live_provider="ours", live_model="m",
+            shadow_provider="ours", shadow_model="m",
+            shadow_cost=0.3,
+            tokens=100,
+            # live_cost intentionally omitted
+            pressure_provider="ours", pressure_cost=0.3,
+            actual_cost=0.045,
+        )
+        row = _raw(logger, "SELECT live_cost, actual_cost FROM routing_shadow_decisions;")[0]
+        assert row[0] == pytest.approx(0.045)  # live_cost backfilled from actual_cost
+        assert row[1] == pytest.approx(0.045)  # actual_cost
+
+    def test_nan_cost_sanitised(self, logger):
+        logger.log_decision_with_pressure(
+            ts=time.time(),
+            live_provider="ours", live_model="m",
+            shadow_provider="ours", shadow_model="m",
+            shadow_cost=float("nan"),
+            tokens=100,
+            pressure_provider="ppq", pressure_cost=float("inf"),
+            actual_cost=float("nan"),
+        )
+        row = _raw(
+            logger,
+            "SELECT shadow_cost, pressure_cost, actual_cost "
+            "FROM routing_shadow_decisions;",
+        )[0]
+        assert row[0] == 0.0
+        assert row[1] == 0.0
+        assert row[2] == 0.0
+
+    def test_null_ts_substituted(self, logger):
+        before = time.time()
+        logger.log_decision_with_pressure(
+            ts=None,
+            live_provider="ours", live_model="m",
+            shadow_provider="ours", shadow_model="m",
+            shadow_cost=0.3,
+            tokens=100,
+            pressure_provider="ours", pressure_cost=0.3,
+            actual_cost=0.3,
+        )
+        ts = _raw(logger, "SELECT ts FROM routing_shadow_decisions;")[0][0]
+        assert ts >= before
+
+    def test_null_inputs_no_exception(self, logger):
+        logger.log_decision_with_pressure(
+            None, None, None, None, None, None, None,
+            pressure_provider=None, pressure_cost=None,
+        )
+        assert logger.get_count() == 1
+
+    def test_backward_compat_no_pressure(self, logger):
+        """When pressure params are omitted, should still write a valid row."""
+        logger.log_decision_with_pressure(
+            ts=time.time(),
+            live_provider="ours", live_model="m",
+            shadow_provider="ours", shadow_model="m",
+            shadow_cost=0.3,
+            tokens=100,
+        )
+        row = _raw(
+            logger,
+            "SELECT pressure_provider, divergence, live_cost "
+            "FROM routing_shadow_decisions;",
+        )[0]
+        assert row[0] is None   # pressure_provider NULL (None preserved, not "unknown")
+        assert row[1] == 0.0    # divergence 0 (no pressure data)
+        assert row[2] is None   # live_cost NULL (no actual_cost given)
+
+
+# ── get_pressure_divergence_summary ──────────────────────────────────────────
+
+
+class TestGetPressureDivergenceSummary:
+    """Tests for the daily-report query method."""
+
+    def test_empty_db(self, logger):
+        s = logger.get_pressure_divergence_summary()
+        assert s["total_rows"] == 0
+        assert s["pressure_rows"] == 0
+        assert s["pressure_pct"] == 0.0
+        assert s["avg_divergence"] == 0.0
+
+    def test_all_legacy_rows(self, logger):
+        """Legacy log_decision rows → pressure_pct = 0 (degenerate flag)."""
+        for _ in range(5):
+            logger.log_decision(time.time(), "ours", "m", "ours", "m", 0.3, 100)
+        s = logger.get_pressure_divergence_summary()
+        assert s["total_rows"] == 5
+        assert s["pressure_rows"] == 0
+        assert s["pressure_pct"] == 0.0
+
+    def test_mixed_rows(self, logger):
+        """Mix of legacy and pressure rows."""
+        # 3 legacy
+        for _ in range(3):
+            logger.log_decision(time.time(), "ours", "m", "ours", "m", 0.3, 100)
+        # 7 pressure
+        for i in range(7):
+            logger.log_decision_with_pressure(
+                ts=time.time(),
+                live_provider="ours", live_model="m",
+                shadow_provider="ours", shadow_model="m",
+                shadow_cost=0.3,
+                tokens=100,
+                pressure_provider="ollama_cloud" if i % 2 == 0 else "ours",
+                pressure_cost=0.024,
+                actual_cost=0.03,
+            )
+        s = logger.get_pressure_divergence_summary()
+        assert s["total_rows"] == 10
+        assert s["pressure_rows"] == 7
+        assert s["pressure_pct"] == pytest.approx(0.7)
+        # Some divergence (ours vs ollama_cloud with different costs)
+        assert s["avg_divergence"] > 0.0
+
+    def test_provider_shifts(self, logger):
+        logger.log_decision_with_pressure(
+            ts=time.time(), live_provider="ours", live_model="m",
+            shadow_provider="ours", shadow_model="m", shadow_cost=0.3,
+            tokens=100, pressure_provider="ollama_cloud", pressure_cost=0.024,
+            actual_cost=0.03,
+        )
+        logger.log_decision_with_pressure(
+            ts=time.time(), live_provider="ours", live_model="m",
+            shadow_provider="ours", shadow_model="m", shadow_cost=0.3,
+            tokens=100, pressure_provider="ollama_cloud", pressure_cost=0.024,
+            actual_cost=0.03,
+        )
+        s = logger.get_pressure_divergence_summary()
+        assert "ours->ollama_cloud" in s["provider_shifts"]
+        assert s["provider_shifts"]["ours->ollama_cloud"] == 2
+
+    def test_since_ts_filter(self, logger):
+        logger.log_decision_with_pressure(
+            ts=1000.0, live_provider="ours", live_model="m",
+            shadow_provider="ours", shadow_model="m", shadow_cost=0.3,
+            tokens=100, pressure_provider="ollama_cloud", pressure_cost=0.024,
+            actual_cost=0.03,
+        )
+        logger.log_decision_with_pressure(
+            ts=2000.0, live_provider="ours", live_model="m",
+            shadow_provider="ours", shadow_model="m", shadow_cost=0.3,
+            tokens=100, pressure_provider="ppq", pressure_cost=0.14,
+            actual_cost=0.03,
+        )
+        s_old = logger.get_pressure_divergence_summary(since_ts=1500.0)
+        assert s_old["total_rows"] == 1
+        s_all = logger.get_pressure_divergence_summary()
+        assert s_all["total_rows"] == 2
+
+    def test_429_and_paid_counts(self, logger):
+        logger.log_decision_with_pressure(
+            ts=time.time(), live_provider="openrouter", live_model="m",
+            shadow_provider="ours", shadow_model="m", shadow_cost=0.3,
+            tokens=100, pressure_provider="ours", pressure_cost=0.3,
+            actual_cost=0.135, is_429=True,
+        )
+        s = logger.get_pressure_divergence_summary()
+        assert s["429_count"] == 1
+        assert s["paid_provider_count"] == 1
+

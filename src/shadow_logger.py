@@ -408,6 +408,132 @@ class ShadowLogger:
             )
             self._conn.commit()
 
+    def log_decision_with_pressure(
+        self,
+        ts,
+        live_provider,
+        live_model,
+        shadow_provider,
+        shadow_model,
+        shadow_cost,
+        tokens,
+        reason: Optional[str] = "",
+        live_cost: Optional[float] = None,
+        quota_regime: Optional[str] = None,
+        # ── P6 pressure-routing dimension (T7 / C1 fix) ──
+        pressure_provider: Optional[str] = None,
+        pressure_model: Optional[str] = None,
+        pressure_cost: Any = None,
+        actual_cost: Any = None,
+        is_429: bool = False,
+        requested_model: Optional[str] = None,
+        per_model_base_rate: Any = None,
+        per_model_source: Optional[str] = None,
+    ) -> None:
+        """Log a full three-dimension decision: optimizer + pressure + actual.
+
+        This is the **C1 fix** from the T7c divergence report
+        (``docs/shadow-7d-report.md`` §3, §6).  The live request path was
+        calling :meth:`log_decision` (legacy API) which left all P6
+        pressure-routing columns NULL — making the divergence and 429 exit
+        gates degenerate (they passed trivially because their inputs were
+        empty).
+
+        This method populates **both** the legacy optimizer columns (what
+        the price-first ``RoutingOptimizer`` would choose) **and** the P6
+        pressure-routing columns (what the ``LiveRouter``'s quota-pressure
+        selection would choose) in a single row, so:
+
+        * ``shadow_provider`` / ``shadow_cost`` → optimizer pick (unchanged
+          semantics for existing queries / cost-comparison analysis).
+        * ``pressure_provider`` / ``pressure_cost`` → LiveRouter pick (the
+          new dimension that the divergence gate checks).
+        * ``live_provider`` / ``live_cost`` → what production actually used.
+        * ``divergence`` → ``|Δcost| / max(act, prs)`` between actual and
+          pressure picks (the P6 exit-gate metric).
+        * ``agree`` → ``live == shadow`` (optimizer agreement, unchanged).
+
+        Args:
+            ts: Event timestamp (epoch seconds). ``None`` → ``time.time()``.
+            live_provider / live_model: the provider/model production
+                actually used.
+            shadow_provider / shadow_model: what the price-first optimizer
+                *would have* chosen.
+            shadow_cost: effective $/M of the optimizer's pick.
+            tokens: token count (0 if unknown).
+            reason: free-text annotation.
+            live_cost: effective $/M of the **actual** provider. When
+                ``None``, falls back to ``actual_cost`` if provided.
+            quota_regime: quota regime at decision time.
+            pressure_provider / pressure_model: what the LiveRouter's
+                pressure routing *would have* chosen.
+            pressure_cost: effective $/M the pressure router computed.
+            actual_cost: effective $/M of the actual provider (P6 column).
+                When provided, also populates ``live_cost`` if that is None.
+            is_429: ``True`` if the actual request received a 429.
+            requested_model: the model the client asked for (PM-T6).
+            per_model_base_rate / per_model_source: per-model pricing data.
+
+        Never raises — sanitises all NaN/inf to 0 before storage.
+        """
+        if ts is None:
+            ts = time.time()
+
+        live_provider = normalize_provider_name(live_provider)
+        shadow_provider = normalize_provider_name(shadow_provider)
+        # Preserve None so the daily report can distinguish rows that
+        # genuinely have pressure data (pressure_provider IS NOT NULL)
+        # from legacy-only rows.  normalize_provider_name(None) → "unknown"
+        # would break that distinction.
+        pressure_provider_n = (
+            normalize_provider_name(pressure_provider)
+            if pressure_provider is not None
+            else None
+        )
+
+        agree = 1 if live_provider == shadow_provider else 0
+
+        # actual_cost doubles as live_cost when live_cost is not explicitly set.
+        eff_live_cost = live_cost if live_cost is not None else actual_cost
+
+        # Divergence is only meaningful when we have a pressure pick.
+        if pressure_provider_n is not None:
+            divergence = _compute_divergence(
+                live_provider, pressure_provider_n, eff_live_cost, pressure_cost
+            )
+        else:
+            divergence = 0.0
+        paid = 1 if _is_paid_provider(live_provider) else 0
+
+        with self._lock:
+            self._conn.execute(
+                _INSERT_PRESSURE_SQL,
+                (
+                    float(ts),
+                    live_provider,
+                    live_model,
+                    shadow_provider,
+                    shadow_model,
+                    _sanitize(shadow_cost) if shadow_cost is not None else None,
+                    _sanitize(eff_live_cost) if eff_live_cost is not None else None,
+                    int(tokens) if tokens is not None else 0,
+                    agree,
+                    reason if reason is not None else "",
+                    pressure_provider_n,
+                    pressure_model,
+                    _sanitize(pressure_cost) if pressure_cost is not None else None,
+                    _sanitize(eff_live_cost) if eff_live_cost is not None else None,
+                    divergence,
+                    1 if is_429 else 0,
+                    paid,
+                    requested_model,
+                    _sanitize(per_model_base_rate) if per_model_base_rate is not None else None,
+                    per_model_source,
+                    quota_regime,
+                ),
+            )
+            self._conn.commit()
+
     # ── Read paths ───────────────────────────────────────────────────────
 
     def get_agreement_rate(self, since_ts: Optional[float] = None) -> float:
@@ -584,6 +710,118 @@ class ShadowLogger:
         if not count or count < 2 or mn is None or mx is None:
             return 0.0
         return (float(mx) - float(mn)) / 3600.0
+
+    def get_pressure_divergence_summary(
+        self, since_ts: Optional[float] = None
+    ) -> dict:
+        """One-shot summary of the P6 pressure-routing dimension for daily reports.
+
+        Returns a dict with per-provider counts, divergence stats, and the
+        fraction of rows that actually have pressure data populated (vs.
+        legacy ``log_decision`` rows with NULL pressure columns).
+
+        This is the query the daily divergence report script calls. It
+        separates rows with genuine pressure data (``pressure_provider IS
+        NOT NULL``) from legacy rows so the report can flag a degenerate
+        dataset (the T7c finding).
+
+        Args:
+            since_ts: optional lower-bound timestamp.
+
+        Returns::
+
+            {
+                "total_rows": int,
+                "pressure_rows": int,           # rows with pressure_provider set
+                "pressure_pct": float,          # pressure_rows / total_rows
+                "avg_divergence": float,         # only over pressure_rows
+                "max_divergence": float,
+                "p95_divergence": float,
+                "zero_divergence_pct": float,    # % with divergence == 0
+                "avg_actual_cost": float,
+                "avg_pressure_cost": float,
+                "provider_shifts": dict[str,int], # {"ours->ollama_cloud": N, ...}
+                "429_count": int,
+                "paid_provider_count": int,
+            }
+        """
+        ts_clause = "WHERE ts >= ?" if since_ts is not None else ""
+        ts_args: tuple = (float(since_ts),) if since_ts is not None else ()
+
+        with self._lock:
+            # Overall counts
+            row = self._conn.execute(
+                f"SELECT COUNT(*), "
+                f"SUM(CASE WHEN pressure_provider IS NOT NULL THEN 1 ELSE 0 END) "
+                f"FROM routing_shadow_decisions {ts_clause};",
+                ts_args,
+            ).fetchone()
+            total, pressure_rows = row[0] or 0, row[1] or 0
+
+            # Divergence stats (only over pressure rows)
+            div_row = self._conn.execute(
+                f"SELECT AVG(divergence), MAX(divergence), "
+                f"SUM(CASE WHEN divergence = 0.0 THEN 1 ELSE 0 END) "
+                f"FROM routing_shadow_decisions "
+                f"WHERE pressure_provider IS NOT NULL "
+                f"{'AND ts >= ?' if since_ts is not None else ''};",
+                ts_args,
+            ).fetchone()
+            avg_div, max_div, zero_count = (
+                div_row[0] or 0.0,
+                div_row[1] or 0.0,
+                div_row[2] or 0,
+            )
+
+            # Cost averages (pressure rows)
+            cost_row = self._conn.execute(
+                f"SELECT AVG(actual_cost), AVG(pressure_cost) "
+                f"FROM routing_shadow_decisions "
+                f"WHERE pressure_provider IS NOT NULL "
+                f"{'AND ts >= ?' if since_ts is not None else ''};",
+                ts_args,
+            ).fetchone()
+            avg_act, avg_pres = cost_row[0] or 0.0, cost_row[1] or 0.0
+
+            # Provider shift counts (top 10)
+            shift_rows = self._conn.execute(
+                f"SELECT live_provider || '->' || pressure_provider, COUNT(*) "
+                f"FROM routing_shadow_decisions "
+                f"WHERE pressure_provider IS NOT NULL "
+                f"  AND live_provider != pressure_provider "
+                f"{'AND ts >= ?' if since_ts is not None else ''} "
+                f"GROUP BY live_provider || '->' || pressure_provider "
+                f"ORDER BY COUNT(*) DESC LIMIT 10;",
+                ts_args,
+            ).fetchall()
+            shifts = {r[0]: r[1] for r in shift_rows}
+
+            # 429 and paid counts
+            misc_row = self._conn.execute(
+                f"SELECT SUM(is_429), SUM(paid_provider) "
+                f"FROM routing_shadow_decisions "
+                f"WHERE pressure_provider IS NOT NULL "
+                f"{'AND ts >= ?' if since_ts is not None else ''};",
+                ts_args,
+            ).fetchone()
+            count_429, count_paid = misc_row[0] or 0, misc_row[1] or 0
+
+        pressure_pct = (pressure_rows / total) if total else 0.0
+        zero_pct = (zero_count / pressure_rows) if pressure_rows else 0.0
+
+        return {
+            "total_rows": total,
+            "pressure_rows": pressure_rows,
+            "pressure_pct": round(pressure_pct, 4),
+            "avg_divergence": round(float(avg_div), 6),
+            "max_divergence": round(float(max_div), 6),
+            "zero_divergence_pct": round(zero_pct, 4),
+            "avg_actual_cost": round(float(avg_act), 6),
+            "avg_pressure_cost": round(float(avg_pres), 6),
+            "provider_shifts": shifts,
+            "429_count": int(count_429),
+            "paid_provider_count": int(count_paid),
+        }
 
     # ── P6: exit-criteria evaluation ──────────────────────────────────────
 
