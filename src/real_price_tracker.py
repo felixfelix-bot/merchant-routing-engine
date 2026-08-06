@@ -111,6 +111,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import sys
 import threading
 import time
 from typing import Any
@@ -128,6 +129,8 @@ __all__ = [
     "get_all_trailing_rates_per_model",
     "get_rate_readiness",
     "gate_all_rates_have_data",
+    # ── Periodic collector (RP-5b: hourly rate-refresh cron) ───────────────────
+    "collect_rates",
     "PROVIDER_WINDOW_HOURS",
     "SEED_RATES",
     "REQUIRED_RATE_PROVIDERS",
@@ -849,6 +852,119 @@ def gate_all_rates_have_data(
     return True
 
 
+# ── Periodic collector (RP-5b: hourly rate-refresh cron) ─────────────────────
+
+
+def collect_rates(
+    *,
+    db_path: str | None = None,
+    _now: float | None = None,
+) -> dict[str, Any]:
+    """Force a full refresh of every measured rate and return a status report.
+
+    This is the cron entry point (RP-5b). The module is normally lazily cached
+    (``CACHE_TTL_SECONDS`` = 5 min for cost_usd rates, ``ZAI_CACHE_TTL_SECONDS``
+    = 1 day for the z.ai amortized rate). ``collect_rates`` drops those caches
+    and immediately recomputes the full trailing-rate set so that:
+
+    * the dashboard (RP-5a) and the router see fresh numbers without waiting for
+      the first request after a cache expiry to re-warm them;
+    * the readiness/gate status reflects the *current* ``api_calls`` table, not a
+      value computed up to 5 min (or 1 day) ago;
+    * notable price changes (>50% 24h-vs-7d deviation) are surfaced so the cron
+      can act as a silent-when-healthy watchdog.
+
+    Resolution order mirrors the public API: ``clear_cache`` →
+    ``get_all_trailing_rates_per_model`` (the nested ``{provider: {model: $/M,
+    '_default': $/M}}`` shape) → ``get_rate_readiness`` →
+    ``gate_all_rates_have_data`` → ``detect_price_change`` per provider.
+
+    **Never raises** — runs unattended from cron, so every failure path degrades
+    to a structured ``{"ok": False, "error": "..."}`` report rather than a
+    traceback. Thread-safe (every underlying call is).
+
+    Parameters
+    ----------
+    db_path
+        Override the DB path (tests pass a temp DB). Defaults to
+        :data:`DEFAULT_DB_PATH`.
+    _now
+        Injection point for ``time.time()`` (tests).
+
+    Returns
+    -------
+    dict
+        Status report with the keys:
+
+        * ``ok`` — ``True`` when the full collection completed without raising.
+        * ``collected_at`` — ISO-8601 UTC timestamp of the run.
+        * ``rates`` — ``{provider: {model: $/M, '_default': $/M}}`` (the nested
+          trailing-rate shape), or ``{}`` on failure.
+        * ``readiness`` — ``{provider: {rate, source, has_data, window_hours}}``
+          from :func:`get_rate_readiness`.
+        * ``gate_passed`` — :func:`gate_all_rates_have_data` result (``False``
+          while any required provider is still on a cold-start seed).
+        * ``n_providers`` — number of providers in the report.
+        * ``n_measured_models`` — count of distinct measured model rates
+          (excludes ``_default`` keys).
+        * ``price_changes`` — list of provider names whose 24h rate deviates
+          >50% from their 7d rate (empty when nothing moved).
+        * ``error`` — present (string) only when ``ok`` is ``False``.
+    """
+    now = _now if _now is not None else time.time()
+    from datetime import datetime, timezone
+
+    report: dict[str, Any] = {
+        "ok": True,
+        "collected_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        "rates": {},
+        "readiness": {},
+        "gate_passed": False,
+        "n_providers": 0,
+        "n_measured_models": 0,
+        "price_changes": [],
+    }
+    try:
+        # 1. Drop every cached value so the recompute below reads the live
+        #    api_calls table, not a value staled up to CACHE_TTL_SECONDS ago.
+        clear_cache()
+
+        # 2. Full nested trailing-rate set — warms the fresh cache for every
+        #    (provider, model) pair in one pass.
+        rates = get_all_trailing_rates_per_model(db_path=db_path, _now=now)
+        report["rates"] = rates
+        report["n_providers"] = len(rates)
+        report["n_measured_models"] = sum(
+            # every key except the '_default' fallback is a measured model rate
+            max(len(models) - 1, 0) if "_default" in models else len(models)
+            for models in rates.values()
+        )
+
+        # 3. Per-provider readiness (measured / seed / unknown) for the status
+        #    report and the dashboard.
+        report["readiness"] = get_rate_readiness(db_path=db_path, _now=now)
+
+        # 4. T6 gate — are all required providers off their cold-start seeds?
+        report["gate_passed"] = gate_all_rates_have_data(db_path=db_path, _now=now)
+
+        # 5. Price-change watchdog — providers whose 24h rate deviates >50% from
+        #    their 7d baseline. Provider-level (model=None) is the stable signal;
+        #    empty when there is not enough data on both sides to be confident.
+        changes: list[str] = []
+        for prov in PROVIDER_WINDOW_HOURS:
+            try:
+                if detect_price_change(prov, None, db_path=db_path, _now=now):
+                    changes.append(prov)
+            except Exception:  # never let one provider break the whole run
+                _log.debug("real_price_tracker: change detect failed for %s", prov, exc_info=True)
+        report["price_changes"] = changes
+    except Exception as exc:  # cron must never emit a traceback
+        _log.exception("real_price_tracker: collect_rates failed")
+        report["ok"] = False
+        report["error"] = repr(exc)
+    return report
+
+
 # ── z.ai amortized rate (Task T5) ────────────────────────────────────────────
 
 
@@ -1252,3 +1368,60 @@ def detect_price_change(
         return False
     deviation = abs(recent - baseline) / baseline
     return deviation > CHANGE_THRESHOLD
+
+
+# ── CLI / cron entry point (RP-5b) ───────────────────────────────────────────
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Collect rates once, print a JSON status line, exit 0/1.
+
+    Mirrors the ``src.ppq_balance_collector`` / ``src.openrouter_balance_collector``
+    contract so the sibling ``scripts/rate_refresh_cron.sh`` wrapper can parse
+    the status line and apply silent-when-healthy watchdog semantics.
+
+    The JSON line always contains:
+
+    * ``ok``            — did the collection complete without raising?
+    * ``gate_passed``   — are all required providers off cold-start seeds?
+    * ``n_providers``   — provider count in the report.
+    * ``n_measured_models`` — distinct measured model rates.
+    * ``price_changes`` — providers whose 24h rate moved >50% vs 7d.
+    * ``collected_at``  — ISO-8601 UTC timestamp.
+
+    Exit 0 on success (``ok=True``), 1 on failure. ``--db <path>`` overrides the
+    DB. Never raises — a swallowed failure still prints ``{"ok": false}`` and
+    returns 1.
+    """
+    import json
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    db_override: str | None = None
+    if "--db" in argv:
+        try:
+            db_override = argv[argv.index("--db") + 1]
+        except (IndexError, ValueError):
+            db_override = None
+
+    report = collect_rates(db_path=db_override)
+
+    # Compact one-line status for the cron wrapper to parse; the full nested
+    # rates/readiness dicts are omitted from stdout (they can be large) but are
+    # available to programmatic callers of collect_rates().
+    status = {
+        "ok": report["ok"],
+        "gate_passed": report["gate_passed"],
+        "n_providers": report["n_providers"],
+        "n_measured_models": report["n_measured_models"],
+        "price_changes": report["price_changes"],
+        "collected_at": report["collected_at"],
+        "db_path": db_override or DEFAULT_DB_PATH,
+    }
+    if not report["ok"]:
+        status["error"] = report.get("error", "unknown")
+    print(json.dumps(status, default=str))
+    return 0 if report["ok"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

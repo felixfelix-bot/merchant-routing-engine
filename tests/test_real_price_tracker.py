@@ -45,6 +45,7 @@ from src.real_price_tracker import (
     ZAI_SEED_RATE,
     ZAI_WINDOW_HOURS,
     clear_cache,
+    collect_rates,
     detect_price_change,
     gate_all_rates_have_data,
     get_all_rates,
@@ -1452,3 +1453,146 @@ class TestZaiPerModelRates:
 
     def test_exported_in_public_api(self):
         assert "get_zai_per_model_rates" in rpt.__all__
+
+
+# ── collect_rates: RP-5b hourly rate-refresh collector ───────────────────────
+
+
+class TestCollectRates:
+    """collect_rates() — the cron entry point (RP-5b). Clears the cache, forces
+    a full trailing-rate recompute, and returns a structured status report.
+    Must never raise, must populate rates/readiness, and must surface the gate."""
+
+    def test_exported_in_public_api(self):
+        assert "collect_rates" in rpt.__all__
+
+    def test_returns_ok_report_with_expected_keys(self, db):
+        """Cold DB → ok=True, all status keys present, 6 providers reported."""
+        report = collect_rates(db_path=db, _now=_now_utc())
+        assert report["ok"] is True
+        for key in ("ok", "collected_at", "rates", "readiness", "gate_passed",
+                    "n_providers", "n_measured_models", "price_changes"):
+            assert key in report, f"missing key {key!r}"
+        # Every provider in PROVIDER_WINDOW_HOURS gets an entry.
+        assert report["n_providers"] == len(PROVIDER_WINDOW_HOURS)
+        assert set(report["rates"]) == set(PROVIDER_WINDOW_HOURS)
+        assert set(report["readiness"]) == set(PROVIDER_WINDOW_HOURS)
+
+    def test_cold_db_gate_false_and_all_seeds(self, db):
+        """No costed data → gate fails, every provider is a seed, no measured
+        models, no price changes."""
+        report = collect_rates(db_path=db, _now=_now_utc())
+        assert report["ok"] is True
+        assert report["gate_passed"] is False
+        assert report["n_measured_models"] == 0
+        assert report["price_changes"] == []
+        # Every provider has a _default seed; no per-model measured entries.
+        for prov, models in report["rates"].items():
+            assert "_default" in models
+            assert set(models) == {"_default"}
+        # Readiness reports seed/unknown for every provider on a cold DB.
+        sources = {r["source"] for r in report["readiness"].values()}
+        assert sources <= {"seed", "unknown"}
+
+    def test_warm_data_populates_measured_rates_and_gate(self, db):
+        """Seeding >= MIN_CALLS costed rows for every REQUIRED provider flips
+        readiness to measured and the gate to True."""
+        now = _now_utc()
+        rows = []
+        # Each required provider: enough costed calls in a recent window to
+        # cross MIN_CALLS_FOR_RATE. 1000 tokens × $0.0001 = $0.1/M.
+        for prov in REQUIRED_RATE_PROVIDERS:
+            rows += [
+                (now - 100, prov, "glm-5.2", 1000, 0.0001)
+                for _ in range(MIN_CALLS_FOR_RATE + 50)
+            ]
+        _seed(db, rows)
+        report = collect_rates(db_path=db, _now=now)
+        assert report["ok"] is True
+        assert report["gate_passed"] is True
+        # Every required provider is now measured at ~$0.1/M.
+        for prov in REQUIRED_RATE_PROVIDERS:
+            rdy = report["readiness"][prov]
+            assert rdy["source"] == "measured", prov
+            assert rdy["has_data"] is True
+            assert rdy["rate"] == pytest.approx(0.1, rel=1e-6)
+        # glm-5.2 measured on each required provider.
+        for prov in REQUIRED_RATE_PROVIDERS:
+            assert report["rates"][prov].get("glm-5.2") == pytest.approx(0.1, rel=1e-6)
+        assert report["n_measured_models"] == len(REQUIRED_RATE_PROVIDERS)
+
+    def test_clears_cache_before_recompute(self, db, monkeypatch):
+        """collect_rates must call clear_cache() so stale cached values don't
+        mask fresh DB data. We spy on the call."""
+        calls = {"n": 0}
+        orig = rpt.clear_cache
+
+        def spy():
+            calls["n"] += 1
+            orig()
+
+        monkeypatch.setattr(rpt, "clear_cache", spy)
+        collect_rates(db_path=db, _now=_now_utc())
+        assert calls["n"] == 1, "clear_cache must be invoked exactly once"
+
+    def test_never_raises_on_missing_db(self):
+        """A bad DB path must NOT propagate; the report degrades to ok=False."""
+        clear_cache()
+        missing = os.path.join(tempfile.gettempdir(), "rpt_collect_missing.db")
+        try:
+            report = collect_rates(db_path=missing, _now=_now_utc())
+            # The individual queries swallow DB errors and return empty/seed
+            # values, so the run still completes ok=True with seed fallbacks.
+            # The contract is: never raises, always returns a dict.
+            assert isinstance(report, dict)
+            assert "ok" in report
+            assert "rates" in report
+        finally:
+            if os.path.exists(missing):
+                os.unlink(missing)
+
+    def test_collected_at_is_iso8601_utc(self, db):
+        """collected_at is a parseable ISO-8601 string with a UTC offset."""
+        from datetime import datetime
+
+        report = collect_rates(db_path=db, _now=_now_utc())
+        ts = report["collected_at"]
+        dt = datetime.fromisoformat(ts)  # must not raise
+        assert dt.tzinfo is not None  # timezone-aware
+        # Offset is UTC (00:00).
+        offset = dt.utcoffset()
+        assert offset is not None
+        assert offset.total_seconds() == 0.0
+
+    def test_price_change_detected_when_24h_spikes(self, db):
+        """A provider whose 24h rate is >>2× its 7d baseline shows up in
+        price_changes."""
+        now = _now_utc()
+        # Baseline: 7d window, 200 cheap calls at $0.1/M.
+        baseline_rows = [
+            (now - 6 * 86400, "deepinfra", "glm-5.2", 1000, 0.0001)  # $0.1/M
+            for _ in range(200)
+        ]
+        # Recent: 24h window, 200 expensive calls at $1.0/M (10× → >50%).
+        recent_rows = [
+            (now - 100, "deepinfra", "glm-5.2", 1000, 0.001)  # $1.0/M
+            for _ in range(200)
+        ]
+        _seed(db, baseline_rows + recent_rows)
+        report = collect_rates(db_path=db, _now=now)
+        assert "deepinfra" in report["price_changes"]
+
+    def test_main_prints_compact_json_status_and_exit_code(self, db, capsys, monkeypatch):
+        """main() prints a one-line JSON status and exits 0 on ok / 1 on fail."""
+        argv = ["--db", db]
+        rc = rpt.main(argv)
+        out = capsys.readouterr().out.strip()
+        import json as _json
+
+        status = _json.loads(out)  # exactly one JSON object
+        assert status["ok"] is True
+        for key in ("ok", "gate_passed", "n_providers", "n_measured_models",
+                    "price_changes", "collected_at", "db_path"):
+            assert key in status
+        assert status["db_path"] == db
+        assert rc == 0

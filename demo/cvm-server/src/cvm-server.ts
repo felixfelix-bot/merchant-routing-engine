@@ -42,6 +42,12 @@ const CFG = {
   burnDbPath: "/home/c03rad0r/.hermes/bot/api_burn.db",
   kalmanStatePath: "/home/c03rad0r/.hermes/bot/kalman_price_state.json",
   proxyUrl: (process.env.PROXY_URL || "http://localhost:9099").replace(/\/$/, ""),
+  // RP-5a: JSON written by `python3 -m src.rate_export --out <path>` (refreshed
+  // by the RP-5b cron). Carries the Python source-of-truth measured rates from
+  // real_price_tracker.get_rate_with_fallback(). When present, the snapshot
+  // surfaces it as `real_rates_tracker` and the dashboard prefers it over the
+  // TS-reimplemented computeRealRates().
+  trackerRatesPath: process.env.TRACKER_RATES_PATH || process.env.HOME + "/.hermes/bot/real_rates_export.json",
   // Demo economy
   ledgerDbPath: process.env.LEDGER_DB || join(DEMO_ROOT, "demo_ledger.db"),
   whitelistPath: join(DEMO_ROOT, "demo-whitelist.json"),
@@ -82,6 +88,39 @@ function scarcityBandLabel(pct: number): string {
   }
   return "≥80%";
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REAL RATE TRACKING CONFIG
+// Mirrors src/real_price_tracker.py constants. The CVM server queries the
+// same api_calls table directly (no Python round-trip) to surface measured
+// $/M rates per provider per model.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const REAL_RATE_CONFIG = {
+  MIN_CALLS_FOR_RATE: 100,       // provider-level: below this → insufficient data
+  PER_MODEL_MIN_CALLS: 10,       // per-model: lower threshold for finer granularity
+  PER_MODEL_WINDOW_S: 7 * 86400, // 7d window for per-model measured rates
+  ZAI_MONTHLY_USD: 155,          // z.ai subscription monthly cost
+  // Per-provider trailing window (seconds) for the _default rate
+  WINDOWS_S: {
+    ours:         365 * 86400,   // z.ai amortization (365d)
+    friend:       365 * 86400,
+    ollama_cloud: 90 * 86400,    // slow-moving subscription (90d)
+    ppq:          30 * 86400,    // pay-per-token (30d)
+    deepinfra:    30 * 86400,
+    openrouter:   30 * 86400,
+  } as Record<string, number>,
+  // Cold-start seed $/M — used when no measured data exists
+  SEEDS: {
+    ours:         0.001,
+    friend:       0.001,
+    ollama_cloud: 0.0155,
+    ppq:          0.14,
+    openrouter:   0.135,
+    deepinfra:    1.30,
+  } as Record<string, number>,
+  CHANGE_THRESHOLD: 0.50,        // 50% deviation from estimate = price change alert
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // NOSTR KEY MANAGEMENT
@@ -234,12 +273,41 @@ function satToUsdPerM(priceSats: number): number {
 // PROXY CACHE (refreshed in background)
 // ═══════════════════════════════════════════════════════════════════════════
 
-const proxyCache: { quota: any; gate: any; kalman: any; at: number } = {
-  quota: null, gate: null, kalman: null, at: 0,
+const proxyCache: { quota: any; gate: any; kalman: any; trackerRates: any; at: number } = {
+  quota: null, gate: null, kalman: null, trackerRates: null, at: 0,
 };
 
 function readKalmanFile(): any {
   try { return JSON.parse(readFileSync(CFG.kalmanStatePath, "utf8")); } catch { return null; }
+}
+
+// RP-5a: read the Python source-of-truth rate export written by
+// `python3 -m src.rate_export --out <path>`. Returns null when the file is
+// absent, stale (>10 min), or malformed — the dashboard then falls back to the
+// TS-reimplemented computeRealRates(). Never throws.
+const TRACKER_RATES_MAX_AGE_MS = 10 * 60_000; // 10 min
+function readTrackerRates(): any {
+  try {
+    const raw = readFileSync(CFG.trackerRatesPath, "utf8");
+    const parsed = JSON.parse(raw);
+    // Validate shape: must carry a non-empty `providers` array of entries with
+    // the RP-5a fields. Anything else is treated as absent.
+    const provs = parsed?.providers;
+    if (!Array.isArray(provs) || !provs.length) return null;
+    for (const e of provs) {
+      if (!e || typeof e.provider !== "string" || typeof e.rate_per_m !== "number") return null;
+    }
+    // Staleness guard: a `generated_at` older than TRACKER_RATES_MAX_AGE_MS means
+    // the RP-5b cron stopped refreshing — surface null so the dashboard shows the
+    // TS fallback rather than stale Python numbers.
+    const genAt = parsed.generated_at ? Date.parse(parsed.generated_at) : NaN;
+    if (!Number.isNaN(genAt) && Date.now() - genAt > TRACKER_RATES_MAX_AGE_MS) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 
 async function fetchJson(url: string, timeoutMs: number): Promise<any> {
@@ -261,6 +329,7 @@ async function refreshProxyCache(): Promise<void> {
   if (gate) proxyCache.gate = gate;
   const kalman = readKalmanFile();
   if (kalman) proxyCache.kalman = kalman;
+  proxyCache.trackerRates = readTrackerRates();
   proxyCache.at = Date.now();
 }
 
@@ -322,6 +391,141 @@ function computePricing(): any {
       },
     },
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// REAL RATE COMPUTATION
+// Queries api_calls.cost_usd directly to compute measured $/M per provider per
+// model. Mirrors src/real_price_tracker.py logic in TypeScript (no Python
+// round-trip needed — the CVM server has readonly DB access).
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface RealRateEntry {
+  rate: number;           // $/M
+  source: "measured" | "amortized" | "seed";
+  calls: number;          // call count in the measurement window
+  window: string;         // human-readable window label (e.g. "7d", "90d")
+}
+
+function computeRealRates(): Record<string, Record<string, RealRateEntry>> {
+  const now = Math.floor(Date.now() / 1000);
+  const since7d = now - REAL_RATE_CONFIG.PER_MODEL_WINDOW_S;
+
+  // ── Per-model measured rates (7d window) ────────────────────────────────
+  // Groups by (key_name, model) where cost_usd IS NOT NULL. Rate = cost/tok*1e6.
+  // Only positive-cost entries count as "measured" — rate === 0 means a
+  // flat-rate subscription with $0 marginal cost, handled at the provider level.
+  const rows = qall(zaiDb,
+    `SELECT key_name, model, COUNT(*) as calls,
+            COALESCE(SUM(cost_usd), 0) as cost,
+            COALESCE(SUM(total_tokens), 0) as tokens
+     FROM api_calls
+     WHERE ts > ? AND cost_usd IS NOT NULL
+     GROUP BY key_name, model`,
+    [since7d]);
+
+  const measured: Record<string, Record<string, { rate: number; calls: number }>> = {};
+  for (const r of rows) {
+    if (!r.key_name || !r.model) continue;
+    const calls: number = r.calls || 0;
+    const cost: number = r.cost || 0;
+    const tokens: number = r.tokens || 0;
+    if (calls < REAL_RATE_CONFIG.PER_MODEL_MIN_CALLS || tokens <= 0) continue;
+    const rate = cost / tokens * 1e6;
+    if (rate !== rate || rate < 0) continue;   // NaN or nonsensical
+    if (rate > 0) {
+      const prov: string = r.key_name;
+      if (!measured[prov]) measured[prov] = {};
+      measured[prov][r.model] = { rate: round(rate, 6), calls };
+    }
+  }
+
+  // ── Build per-provider result with _default ─────────────────────────────
+  const result: Record<string, Record<string, RealRateEntry>> = {};
+
+  for (const prov of Object.keys(REAL_RATE_CONFIG.WINDOWS_S)) {
+    const windowS = REAL_RATE_CONFIG.WINDOWS_S[prov];
+    const windowDays = Math.round(windowS / 86400);
+    const windowLabel = `${windowDays}d`;
+    const provMeasured = measured[prov] || {};
+    const entry: Record<string, RealRateEntry> = {};
+
+    // Per-model measured entries
+    for (const [model, data] of Object.entries(provMeasured)) {
+      entry[model] = {
+        rate: data.rate,
+        source: "measured",
+        calls: data.calls,
+        window: "7d",
+      };
+    }
+
+    // _default — provider-level rate
+    if (prov === "ours" || prov === "friend") {
+      // z.ai flat-rate: amortize monthly fee over trailing tokens
+      const tok = qone(zaiDb,
+        `SELECT COALESCE(SUM(total_tokens), 0) v FROM api_calls WHERE key_name = ? AND ts > ?`,
+        [prov, now - windowS])?.v || 0;
+      if (tok > 0) {
+        const amortized = REAL_RATE_CONFIG.ZAI_MONTHLY_USD / (tok / 1e6);
+        entry._default = { rate: round(amortized, 6), source: "amortized", calls: 0, window: windowLabel };
+      } else {
+        entry._default = { rate: REAL_RATE_CONFIG.SEEDS[prov] ?? 1.0, source: "seed", calls: 0, window: windowLabel };
+      }
+    } else {
+      // Ollama + paid providers: measured cost_usd aggregate, or amortized/seed
+      const provRow = qone(zaiDb,
+        `SELECT COUNT(*) as calls, COALESCE(SUM(cost_usd), 0) as cost, COALESCE(SUM(total_tokens), 0) as tokens
+         FROM api_calls WHERE key_name = ? AND ts > ? AND cost_usd IS NOT NULL`,
+        [prov, now - windowS]);
+      if (provRow && provRow.calls >= REAL_RATE_CONFIG.MIN_CALLS_FOR_RATE && provRow.tokens > 0 && provRow.cost > 0) {
+        const rate = (provRow.cost / provRow.tokens) * 1e6;
+        entry._default = { rate: round(rate, 6), source: "measured", calls: provRow.calls, window: windowLabel };
+      } else if (prov === "ollama_cloud") {
+        // Ollama fallback: amortize monthly fee
+        entry._default = { rate: round(ollamaAmortizedPerM(), 6), source: "amortized", calls: 0, window: windowLabel };
+      } else {
+        entry._default = { rate: REAL_RATE_CONFIG.SEEDS[prov] ?? 1.0, source: "seed", calls: provRow?.calls || 0, window: windowLabel };
+      }
+    }
+
+    result[prov] = entry;
+  }
+
+  return result;
+}
+
+function computeEstimatedVsMeasured(
+  pricing: any,
+  realRates: Record<string, Record<string, RealRateEntry>>,
+): Record<string, any> {
+  // Map display keys (used by computePricing) → DB provider names
+  const keyMap: Record<string, string> = {
+    ours: "ours",
+    friend: "friend",
+    ollama: "ollama_cloud",
+    ppq: "ppq",
+  };
+  const out: Record<string, any> = {};
+  for (const [displayKey, provider] of Object.entries(keyMap)) {
+    const est = pricing[displayKey];
+    const real = realRates[provider]?._default;
+    if (!est || !real) continue;
+    const estimated: number = est.cost_basis ?? 0;
+    const measured: number = real.rate;
+    const deviation = estimated > 0
+      ? ((measured - estimated) / estimated) * 100
+      : 0;
+    const isPriceChange = Math.abs(deviation) > REAL_RATE_CONFIG.CHANGE_THRESHOLD * 100;
+    out[displayKey] = {
+      estimated_rate: round(estimated, 6),
+      measured_rate: round(measured, 6),
+      deviation_pct: round(deviation, 1),
+      source: real.source,
+      price_change_alert: isPriceChange,
+    };
+  }
+  return out;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -823,6 +1027,7 @@ const TOOLS: Record<string, ToolHandler> = {
   get_snapshot: async (_args: any) => {
     const gate = computeGate();
     const pricing = computePricing();
+    const realRates = computeRealRates();
     const econ = ledgerSnapshot();
     // Task 13: include 24h price history in the snapshot so the display's
     // Panel 3 charts can bootstrap immediately in Nostr mode (which skips the
@@ -839,6 +1044,9 @@ const TOOLS: Record<string, ToolHandler> = {
         ppq: pricing.ppq,
       },
       pricing_meta: pricing._meta,
+      real_rates: realRates,
+      real_rates_tracker: proxyCache.trackerRates || null,
+      estimated_vs_measured: computeEstimatedVsMeasured(pricing, realRates),
       cost_today: computeCostToday(),
       cost_hour: round(computeCostToday() / Math.max(1, new Date().getHours() + new Date().getMinutes() / 60), 4),
       routing_decisions: computeRequests(20),
@@ -1244,15 +1452,18 @@ async function main(): Promise<void> {
         const data = TOOLS.get_price_history({ hours });
         return Response.json(data, { headers: corsHeaders });
       }
+      if (url.pathname === "/real-rates") {
+        return Response.json(computeRealRates(), { headers: corsHeaders });
+      }
       if (url.pathname === "/health") {
         return Response.json({ ok: true, ts: Date.now(), participants: ledgerCount() }, { headers: corsHeaders });
       }
-      return new Response("Not found\n\nEndpoints: /snapshot, /price-history, /health\n", {
+      return new Response("Not found\n\nEndpoints: /snapshot, /price-history, /real-rates, /health\n", {
         status: 404, headers: { ...corsHeaders, "Content-Type": "text/plain" },
       });
     },
   });
-  console.log(`[cvm] HTTP server on http://localhost:${httpPort} (endpoints: /snapshot, /price-history, /health)`);
+  console.log(`[cvm] HTTP server on http://localhost:${httpPort} (endpoints: /snapshot, /price-history, /real-rates, /health)`);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PUBLIC SNAPSHOT PUBLISHER — kind 30315 (replaceable parameterized)
