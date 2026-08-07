@@ -1,572 +1,684 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sovereign Routing Engine</title>
-<script src="vendor/plotly-2.35.2.min.js"></script>
-<script src="vendor/nostr-tools.min.js"></script>
-<style>
-:root{
-  --bg:#0d1117; --bg2:#161b22; --bg3:#21262d; --border:#30363d; --border2:#1f2937;
-  --txt:#c9d1d9; --txt-dim:#8b949e; --txt-bright:#e6edf3;
-  --blue:#58a6ff; --green:#3fb950; --cyan:#39d2c0; --purple:#bc8cff;
-  --orange:#f0883e; --red:#f85149; --yellow:#d29922; --pink:#f778ba;
-}
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;min-height:100vh}
-.topbar{padding:12px 20px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)}
-.topbar h1{font-size:15px;color:var(--txt-bright)}
-.badge{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:600;padding:3px 8px;border-radius:20px;border:1px solid var(--border)}
-.badge .dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
-.badge.live{border-color:var(--green);color:var(--green)}
-.badge.connecting{border-color:var(--yellow);color:var(--yellow)}
-.badge.connecting .dot{background:var(--yellow);animation:pulse 1.5s infinite}
-.badge.error{border-color:var(--red);color:var(--red)}
-.badge.error .dot{background:var(--red)}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-
-/* Layout */
-.dashboard{padding:16px;max-width:1400px;margin:0 auto}
-.providers-row{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
-.edges-layer{height:50px;position:relative}
-.consumer-box{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px}
-
-/* Provider box */
-.provider-card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:6px;min-height:260px;position:relative;overflow:hidden}
-.provider-card.exhausted{border-color:var(--red)}
-.provider-card.offline{opacity:.5}
-.provider-card .pc-header{display:flex;justify-content:space-between;align-items:center}
-.provider-card .pc-name{font-size:11px;font-weight:700;color:var(--txt-bright);letter-spacing:.5px}
-.provider-card .pc-status{font-size:9px;padding:2px 6px;border-radius:10px;background:var(--bg3);color:var(--txt-dim)}
-.provider-card .pc-status.healthy{color:var(--green)}
-.provider-card .pc-status.exhausted{color:var(--red)}
-.provider-card .pc-status.offline{color:var(--txt-dim)}
-.provider-card .pc-chart{flex:1;min-height:140px}
-.provider-card .pc-footer{font-size:9px;color:var(--txt-dim);display:flex;justify-content:space-between}
-.provider-card .pc-footer .usage-pct{font-family:monospace;font-weight:700}
-
-/* Consumer chart */
-.consumer-box h2{font-size:13px;color:var(--txt-bright);margin-bottom:8px}
-.consumer-chart{width:100%;height:220px}
-.consumer-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px}
-.legend-item{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--txt-dim)}
-.legend-dot{width:10px;height:10px;border-radius:2px}
-
-/* SVG edges */
-.edge-svg{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:visible}
-.edge-line{stroke:var(--border);stroke-width:2;fill:none;transition:stroke .5s,stroke-width .5s}
-.edge-line.active{stroke-width:3;filter:drop-shadow(0 0 4px currentColor)}
-.flow-dot{fill:var(--border);transition:fill .5s}
-.flow-dot.active{animation:flowDown 1.5s linear infinite}
-@keyframes flowDown{0%{offset-distance:0%;opacity:1}90%{opacity:1}100%{offset-distance:100%;opacity:0}}
-
-/* Responsive */
-@media(max-width:1100px){.providers-row{grid-template-columns:repeat(3,1fr)}}
-@media(max-width:700px){.providers-row{grid-template-columns:repeat(2,1fr)}.consumer-chart{height:160px}}
-@media(max-width:480px){.providers-row{grid-template-columns:1fr}}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Merchant Routing Engine — Live Pricing Demo</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <script src="vendor/plotly-2.35.2.min.js"></script>
+  <script src="vendor/nostr-tools.min.js"></script>
+  <style>
+    :root{
+      --bg:#0d1117;--card:#161b22;--border:#30363d;
+      --txt:#c9d1d9;--txt-bright:#f0f6fc;--txt-dim:#8b949e;
+      --mono:'SF Mono','Cascadia Code','Fira Code',monospace;
+      --blue:#58a6ff;--purple:#bc8cff;--cyan:#39d2c0;
+      --orange:#f0883e;--red:#f85149;--green:#3fb950;--yellow:#d29922;
+    }
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif;min-height:100vh;overflow-x:hidden}
+    
+    /* HEADER */
+    .header{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;border-bottom:1px solid var(--border)}
+    .header-title{font-size:15px;font-weight:700;color:var(--txt-bright);letter-spacing:.5px}
+    .header-right{display:flex;align-items:center;gap:12px}
+    .badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:4px;letter-spacing:.5px}
+    .badge.live{background:rgba(63,185,80,.15);color:var(--green)}
+    .badge.connecting{background:rgba(210,153,34,.15);color:var(--yellow)}
+    .badge.stale{background:rgba(210,153,34,.15);color:var(--yellow)}
+    .badge.error{background:rgba(248,81,73,.15);color:var(--red)}
+    .clock{font-size:12px;color:var(--txt-dim);font-family:var(--mono)}
+    
+    /* MAIN ARCHITECTURE LAYOUT */
+    .arch-container{position:relative;padding:24px;max-width:1600px;margin:0 auto}
+    
+    /* Provider row */
+    .provider-row{display:flex;gap:16px;margin-bottom:0;position:relative;z-index:2}
+    .provider-card{flex:1;background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;min-width:0}
+    .provider-card .card-header{padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+    .provider-name{font-size:12px;font-weight:700;letter-spacing:1px}
+    .provider-rate{font-size:11px;font-family:var(--mono);color:var(--txt-dim)}
+    .provider-chart{height:200px;position:relative}
+    .provider-status{padding:4px 12px;border-top:1px solid var(--border);font-size:10px;color:var(--txt-dim);display:flex;justify-content:space-between}
+    
+    /* Consumer card */
+    .consumer-card{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-top:24px}
+    .consumer-card .card-header{padding:10px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+    .consumer-chart{height:280px}
+    
+    /* SVG edges overlay */
+    .edges-svg{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1}
+    .edge-line{stroke:#30363d;stroke-width:1.5;opacity:.5;transition:all .5s ease}
+    .edge-line.active{stroke-width:3;opacity:.9}
+    .edge-dot{r:3;animation:flowDot 2s linear infinite}
+    @keyframes flowDot{0%{offset-distance:0%}100%{offset-distance:100%}}
+    
+    /* Status dot */
+    .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+    .status-dot.alive{background:var(--green);box-shadow:0 0 6px var(--green)}
+    .status-dot.dead{background:var(--red);opacity:.5}
+    
+    /* Edge spacer */
+    .edge-spacer{height:80px;position:relative;z-index:1}
+  </style>
 </head>
 <body>
-<div class="topbar">
-  <h1>Sovereign Routing Engine</h1>
-  <div class="badge connecting" id="conn-badge"><span class="dot"></span><span id="conn-text">connecting…</span></div>
+
+<div class="header">
+  <div class="header-title">⚡ Merchant Routing Engine — Live Pricing</div>
+  <div class="header-right">
+    <span class="badge connecting" id="conn-badge"><span id="conn-text">connecting…</span></span>
+    <span class="clock" id="time-text">--:--:--</span>
+  </div>
 </div>
 
-<div class="dashboard">
+<div class="arch-container" id="arch-container">
+  <!-- SVG edges layer -->
+  <svg class="edges-svg" id="edges-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+  
   <!-- Provider row -->
-  <div class="providers-row" id="providers-row">
-    <!-- Generated by JS -->
-  </div>
-
-  <!-- SVG edges between providers and consumer -->
-  <div class="edges-layer" id="edges-layer">
-    <svg class="edge-svg" id="edge-svg"></svg>
-  </div>
-
-  <!-- Consumer box -->
-  <div class="consumer-box">
-    <h2>Consumer — Price/M over Time per Model</h2>
+  <div class="provider-row" id="provider-row"></div>
+  
+  <!-- Edge spacer for visual gap -->
+  <div class="edge-spacer"></div>
+  
+  <!-- Consumer -->
+  <div class="consumer-card">
+    <div class="card-header">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:16px">🧑</span>
+        <span class="provider-name" style="font-size:14px">CONSUMER — Price / M over time</span>
+      </div>
+      <span class="provider-rate" id="consumer-rate">—</span>
+    </div>
     <div class="consumer-chart" id="consumer-chart"></div>
-    <div class="consumer-legend" id="consumer-legend"></div>
   </div>
 </div>
 
 <script>
-// ═══ CONSTANTS ═══
-const PLOT_BG='transparent', PLOT_GRID='rgba(48,54,61,.4)';
-const ONSET=0.80, ASYMPTOTE=1.5;
+/* ════════════════════════════════════════════════════════════════════════
+   CONFIG
+   ════════════════════════════════════════════════════════════════════════ */
+function param(name){return new URLSearchParams(location.search).get(name);}
 
-const MODEL_COLORS={
-  'glm-5.2':'#58a6ff',
-  'glm-4.5-flash':'#39d2c0',
-  'glm-4.5-air':'#7ee787',
-  'glm-4.6v':'#d2a8ff',
-  'kimi-k2.7-code':'#f0883e',
-  'kimi-k3:cloud':'#bc8cff',
-  'deepseek/deepseek-v4-flash':'#f85149',
+const CVM_NPUB_HEX = param('npub') || '10814a5dc07e3e876867ffb9e8781af47fa599b677fb27e051f6b5261c1d4f35';
+const CVM_RELAYS = param('relays')
+  ? param('relays').split(',').map(s=>s.trim()).filter(Boolean)
+  : ['wss://relay.primal.net','wss://nos.lol','wss://nostr.mom'];
+const USE_NOSTR = !param('api');
+const API_BASE = (param('api') || `http://${location.hostname}:3000`).replace(/\/$/,'');
+const POLL_MS = 5000, POLL_MIN = 5000, POLL_MAX = 30000;
+const HIST_MAX = 5000;
+
+// Providers — order matches the diagram
+const PROVIDERS = ['friend','ollama','ppq','openrouter'];
+const PROV_LABEL = {friend:'FRIEND',ollama:'OLLAMA',ppq:'PPQ',openrouter:'OPENROUTER'};
+const PROV_COLOR = {friend:'#bc8cff',ollama:'#39d2c0',ppq:'#f0883e',openrouter:'#f85149'};
+const PROV_ALIVE = {friend:true,ollama:true,ppq:false,openrouter:true};
+
+// Models served by each provider with per-model base rates ($/M)
+const PROV_MODELS = {
+  friend: [
+    {model:'glm-5.2', rate:0.009},
+    {model:'glm-4.5-flash', rate:0.023},
+    {model:'glm-4.6v', rate:0.035},
+  ],
+  ollama: [
+    {model:'glm-5.2', rate:0.024},
+    {model:'kimi-k2.7-code', rate:0.054},
+    {model:'kimi-k3:cloud', rate:0.055},
+  ],
+  ppq: [
+    {model:'deepseek/deepseek-v4-flash', rate:0.020},
+  ],
+  openrouter: [
+    {model:'glm-5.2', rate:0.135},
+  ],
 };
-const MODEL_LABELS={
-  'glm-5.2':'GLM-5.2',
-  'glm-4.5-flash':'GLM-4.5-Flash',
-  'glm-4.5-air':'GLM-4.5-Air',
-  'glm-4.6v':'GLM-4.6V',
-  'kimi-k2.7-code':'Kimi-K2.7',
-  'kimi-k3:cloud':'Kimi-K3',
-  'deepseek/deepseek-v4-flash':'DeepSeek-V4',
-};
-const MODEL_RATES={
-  'glm-5.2':0.022,
-  'glm-4.5-flash':0.018,
-  'glm-4.5-air':0.012,
-  'glm-4.6v':0.035,
-  'kimi-k2.7-code':0.024,
-  'kimi-k3:cloud':0.055,
-  'deepseek/deepseek-v4-flash':0.020,
+
+// Distinct color per model
+const MODEL_COLORS = {
+  'glm-5.2': '#58a6ff',
+  'glm-4.5-flash': '#39d2c0',
+  'glm-4.5-air': '#7ee787',
+  'glm-4.6v': '#d2a8ff',
+  'kimi-k2.7-code': '#f0883e',
+  'kimi-k3:cloud': '#bc8cff',
+  'deepseek/deepseek-v4-flash': '#f85149',
 };
 
-const PROVIDERS=[
-  {id:'ours',name:'OURS',models:['glm-5.2','glm-4.5-flash'],quotaKey:'ours'},
-  {id:'friend',name:'FRIEND',models:['glm-5.2','glm-4.5-flash','glm-4.6v'],quotaKey:'friend'},
-  {id:'ollama',name:'OLLAMA',models:['glm-5.2','kimi-k2.7-code','kimi-k3:cloud'],quotaKey:'ollama'},
-  {id:'ppq',name:'PPQ',models:['deepseek/deepseek-v4-flash'],quotaKey:'ppq'},
-  {id:'openrouter',name:'OPENROUTER',models:['glm-5.2'],quotaKey:'openrouter'},
-];
+// Pricing curve constants
+const PRESSURE_K = 0.3;
 
-// ═══ PRICING MATH ═══
-function pressureFactor(u){
-  if(u<=ONSET)return 1.0;
-  if(u>=0.995)return ASYMPTOTE*5;
-  const t=(u-ONSET)/(1-ONSET);
-  const K=ASYMPTOTE-1;
-  return 1+K*t/(1-t);
-}
+/* ════════════════════════════════════════════════════════════════════════
+   STATE
+   ════════════════════════════════════════════════════════════════════════ */
+let state = {
+  snapshot: null,
+  priceHist: {},   // key -> [{t,cost_basis,your_price}]
+  costToday: 0,
+};
+PROVIDERS.forEach(k => state.priceHist[k] = []);
 
-function genCurve(baseRate,npts){
-  const x=[],y=[];
-  for(let i=0;i<=npts;i++){
-    const q=i/npts;
-    x.push(q*100);
-    y.push(baseRate*pressureFactor(q));
-  }
-  return{x,y};
-}
-
-function genFilled(baseRate,currentUsage){
-  const x=[],y=[];
-  const npts=Math.max(2,Math.ceil(currentUsage*50));
-  for(let i=0;i<=npts;i++){
-    const q=i/50;
-    x.push(q*100);
-    y.push(baseRate*pressureFactor(q));
-  }
-  return{x,y};
-}
-
-// ═══ DATA FETCHING ═══
-const RELAYS=['wss://relay.primal.net','wss://nos.lol','wss://nostr.mom'];
-let pool=null, lastSnap=null;
-
+/* ════════════════════════════════════════════════════════════════════════
+   UTILITIES
+   ════════════════════════════════════════════════════════════════════════ */
+function fmt$(n,dp=4){if(n==null||isNaN(n))return'—';if(n>=1)return'$'+n.toFixed(2);return'$'+n.toFixed(dp);}
+function fmtTok(n){if(n==null||isNaN(n))return'—';n=Number(n);if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(Math.round(n));}
 function setConn(mode){
   const b=document.getElementById('conn-badge'),t=document.getElementById('conn-text');
   b.className='badge';
   if(mode==='live'){b.classList.add('live');t.textContent='LIVE · REAL DATA';}
   else if(mode==='connecting'){b.classList.add('connecting');t.textContent='connecting…';}
-  else if(mode==='stale'){b.classList.add('connecting');t.textContent='STALE';}
+  else if(mode==='stale'){b.classList.add('stale');t.textContent='STALE';}
   else{b.classList.add('error');t.textContent='OFFLINE';}
 }
 
-async function tryLocalAPI(){
-  try{
-    const r=await fetch('http://localhost:3000/snapshot',{signal:AbortSignal.timeout(3000)});
-    if(r.ok)return await r.json();
-  }catch{}
-  return null;
+/* ════════════════════════════════════════════════════════════════════════
+   SNAPSHOT NORMALIZATION (reused from original)
+   ════════════════════════════════════════════════════════════════════════ */
+function normalizeSnapshot(raw){
+  if(!raw||typeof raw!=='object')return null;
+  return{
+    ts:raw.ts||Date.now()/1000,
+    pricing:raw.pricing||{},
+    pricing_meta:raw.pricing_meta||null,
+    quota:raw.quota||{},
+    requests:raw.routing_decisions||raw.requests||[],
+    provider_distribution:raw.provider_dist||raw.provider_distribution||{},
+    cost_today:raw.cost_today??0,
+    real_rates_tracker:raw.real_rates_tracker||null,
+    real_rates:raw.real_rates||{},
+  };
 }
 
-function connectNostr(){
-  if(typeof NostrTools==='undefined'||!NostrTools.SimplePool){return;}
-  try{pool?.close?.()}catch{}
-  pool=new NostrTools.SimplePool();
-  const sub=pool.sub(RELAYS,[{kinds:[25910],limit:1}]);
-  sub.on('event',(ev)=>{
-    try{
-      const data=JSON.parse(ev.content);
-      lastSnap=data;
-      setConn('live');
-      renderAll(data);
-    }catch{}
-  });
+/* ════════════════════════════════════════════════════════════════════════
+   ASYMPTOTIC PRICING CURVE
+   price = baseRate × (1 + K × t / (1-t))   where t = quotaUsedFraction
+   As t→1, price→∞ (asymptotic)
+   ════════════════════════════════════════════════════════════════════════ */
+function asymptoticPrice(baseRate, usedPct){
+  const t = Math.max(0, Math.min(0.99, usedPct/100));
+  return baseRate * (1 + PRESSURE_K * t / (1 - t + 0.001));
 }
 
-// ═══ RENDER: PROVIDER CARDS ═══
+// Get base rate for a provider
+function getBaseRate(snap, provider){
+  const meta = snap.pricing_meta || {};
+  if(provider==='friend') return meta.flat_key_cost_per_m || 0.02;
+  if(provider==='ollama'){
+    const tok30d = meta.ollama_tokens_30d || 1;
+    return meta.ollama_monthly_usd / Math.max(1, tok30d/1e6);
+  }
+  if(provider==='ppq') return meta.ppq_cost_per_m_real || 0.14;
+  if(provider==='openrouter') return 0.135;
+  return 0.02;
+}
+
+// Get quota used percentage for a provider
+function getQuotaUsed(snap, provider){
+  const q = snap.quota[provider] || {};
+  if(provider==='ollama') return Math.max(q.session_usage||0, q.weekly_usage||0) * 100;
+  return q.used_pct || 0;
+}
+
+// Is this provider pay-per-use (no quota cap)?
+function isPayPerUse(provider){return provider==='ppq'||provider==='openrouter';}
+
+/* ════════════════════════════════════════════════════════════════════════
+   RENDER: PROVIDER CARDS
+   ════════════════════════════════════════════════════════════════════════ */
+const PLOT_BG='#0d1117', PLOT_GRID='rgba(48,54,61,.3)';
+
 function initProviderCards(){
-  const row=document.getElementById('providers-row');
-  row.innerHTML=PROVIDERS.map(p=>`
-    <div class="provider-card" id="card-${p.id}">
-      <div class="pc-header">
-        <span class="pc-name">${p.name}</span>
-        <span class="pc-status" id="status-${p.id}">—</span>
+  const row = document.getElementById('provider-row');
+  row.innerHTML='';
+  for(const p of PROVIDERS){
+    const card = document.createElement('div');
+    card.className='provider-card';
+    card.id=`prov-${p}`;
+    const alive = PROV_ALIVE[p];
+    const dotClass = alive?'alive':'dead';
+    card.innerHTML=`
+      <div class="card-header">
+        <span style="display:flex;align-items:center">
+          <span class="status-dot ${dotClass}"></span>
+          <span class="provider-name" style="color:${PROV_COLOR[p]}">${PROV_LABEL[p]}</span>
+        </span>
+        <span class="provider-rate" id="prov-rate-${p}">—</span>
       </div>
-      <div class="pc-chart" id="chart-${p.id}"></div>
-      <div class="pc-footer">
-        <span>Quota: <span class="usage-pct" id="usage-${p.id}">—</span></span>
-        <span id="rate-${p.id}">—</span>
-      </div>
-    </div>
-  `).join('');
-}
-
-function getUsageFraction(snap,provId){
-  const q=snap?.quota||{};
-  const prov=PROVIDERS.find(p=>p.id===provId);
-  const qd=q[prov?.quotaKey||provId];
-  if(!qd)return 0;
-  // ppq has no quota cap
-  if(provId==='ppq'){
-    if(qd.note&&qd.note.includes('pay-per-use'))return 0;
-    if(qd.used_pct!==undefined&&qd.used_pct>0)return Math.min(1,qd.used_pct/100);
-    return 0;
+      <div class="provider-chart" id="prov-chart-${p}"></div>
+      <div class="provider-status" id="prov-status-${p}"></div>
+    `;
+    row.appendChild(card);
   }
-  if(qd.used_pct!==undefined)return Math.min(1,qd.used_pct/100);
-  if(qd.weekly_pct!==undefined)return Math.min(1,qd.weekly_pct/100);
-  if(qd.usage_fraction!==undefined)return Math.min(1,qd.usage_fraction);
-  return 0;
 }
 
-function getProviderStatus(snap,provId){
-  const q=snap?.quota||{};
-  const prov=PROVIDERS.find(p=>p.id===provId);
-  const qd=q[prov?.quotaKey||provId];
-  if(!qd)return{text:'NO DATA',cls:''};
-  if(qd.healthy===false)return{text:'OFFLINE',cls:'offline'};
-  if(provId==='ppq'){
-    const u=getUsageFraction(snap,provId);
-    if(u>=0.99)return{text:'EXHAUSTED',cls:'exhausted'};
-    return{text:'PAY/USE',cls:'healthy'};
-  }
-  const u=getUsageFraction(snap,provId);
-  if(u>=0.99)return{text:'LOCKED',cls:'exhausted'};
-  if(u>=0.80)return{text:'HIGH',cls:'exhausted'};
-  return{text:'HEALTHY',cls:'healthy'};
-}
-
-function renderProviderChart(provId,models,usageFrac){
-  const elId='chart-'+provId;
-  const el=document.getElementById(elId);
-  if(!el)return;
-  const traces=[];
-
-  models.forEach(model=>{
-    const baseRate=MODEL_RATES[model]||0.02;
-    const color=MODEL_COLORS[model]||'#d2a8ff';
-    const label=MODEL_LABELS[model]||model;
-
-    // Full curve (light)
-    const full=genCurve(baseRate,50);
-    traces.push({
-      x:full.x,y:full.y,
-      mode:'lines',
-      line:{color:color,width:1.5,opacity:0.4},
-      name:label,showlegend:false,
-      hovertemplate:`${label}<br>%{y:.4f}/M at %{x:.0f}% quota<extra></extra>`,
-    });
-
-    // Filled area up to current usage
-    const filled=genFilled(baseRate,usageFrac);
-    traces.push({
-      x:filled.x,y:filled.y,
-      fill:'tozeroy',fillcolor:color+'25',
-      line:{color:color,width:2},
-      name:label+'_fill',showlegend:false,hoverinfo:'skip',
-    });
-
-    // Current position marker
-    const currentY=baseRate*pressureFactor(usageFrac);
-    traces.push({
-      x:[usageFrac*100],y:[currentY],
-      mode:'markers',
-      marker:{color:color,size:7,line:{color:'#fff',width:1}},
-      name:label+'_pos',showlegend:false,hoverinfo:'skip',
-    });
-  });
-
-  const layout={
-    margin:{l:38,r:8,t:5,b:28},
-    xaxis:{
-      title:{text:'Quota %',font:{size:8,color:'#8b949e'}},
-      range:[0,100],gridcolor:PLOT_GRID,tickfont:{size:8,color:'#8b949e'},
-      tickvals:[0,50,100],tickformat:'d',
-    },
-    yaxis:{
-      title:{text:'$/M',font:{size:8,color:'#8b949e'}},
-      type:'log',gridcolor:PLOT_GRID,tickfont:{size:8,color:'#8b949e'},
-      tickformat:'.3f',
-    },
-    paper_bgcolor:PLOT_BG,plot_bgcolor:PLOT_BG,
-    font:{size:8,color:'#8b949e'},
-    showlegend:false,
-  };
-
-  Plotly.react(elId,traces,layout,{displayModeBar:false,responsive:true});
-}
-
-// ═══ RENDER: CONSUMER CHART ═══
-function renderConsumerChart(snap){
-  const el=document.getElementById('consumer-chart');
-  if(!el)return;
-  const priceHistory=snap?.price_history||[];
-  
-  if(!priceHistory.length){
-    // Seed with synthetic data for display
-    seedSyntheticConsumerChart();
-    return;
-  }
-
-  // Group by key (provider) → map to model
-  const keyToModel={
-    'ours':'glm-5.2',
-    'friend':'glm-5.2',
-    'ollama':'kimi-k2.7-code',
-    'ppq':'deepseek/deepseek-v4-flash',
-    'openrouter':'glm-5.2',
-  };
-
-  const byModel={};
-  priceHistory.forEach(pt=>{
-    const model=keyToModel[pt.key]||pt.key;
-    if(!byModel[model])byModel[model]=[];
-    byModel[model].push({
-      x:new Date(pt.ts*1000),
-      y:pt.your_price||pt.cost_basis||0,
-    });
-  });
-
-  const traces=[];
-  const legendItems=[];
-  Object.keys(byModel).sort().forEach(model=>{
-    const pts=byModel[model].sort((a,b)=>a.x-b.x);
-    const color=MODEL_COLORS[model]||'#d2a8ff';
-    traces.push({
-      x:pts.map(p=>p.x),
-      y:pts.map(p=>p.y),
-      mode:'lines',
-      line:{color:color,width:2},
-      name:MODEL_LABELS[model]||model,
-    });
-    legendItems.push({model,color,label:MODEL_LABELS[model]||model});
-  });
-
-  const layout={
-    margin:{l:50,r:15,t:5,b:35},
-    xaxis:{
-      title:{text:'Time',font:{size:10,color:'#8b949e'}},
-      gridcolor:PLOT_GRID,tickfont:{size:9,color:'#8b949e'},
-    },
-    yaxis:{
-      title:{text:'Price/M ($)',font:{size:10,color:'#8b949e'}},
-      type:'log',gridcolor:PLOT_GRID,tickfont:{size:9,color:'#8b949e'},
-      tickformat:'.3f',
-    },
-    paper_bgcolor:PLOT_BG,plot_bgcolor:PLOT_BG,
-    font:{size:9,color:'#8b949e'},
-    showlegend:true,
-    legend:{orientation:'h',y:-0.2,font:{size:9}},
-  };
-
-  Plotly.react('consumer-chart',traces,layout,{displayModeBar:false,responsive:true});
-
-  // Build legend dots
-  const legendEl=document.getElementById('consumer-legend');
-  legendEl.innerHTML=legendItems.map(li=>
-    `<div class="legend-item"><div class="legend-dot" style="background:${li.color}"></div>${li.label}</div>`
-  ).join('');
-}
-
-function seedSyntheticConsumerChart(){
-  // Generate 24h of synthetic data for display when no live data
-  const now=Date.now();
-  const models=['glm-5.2','glm-4.5-flash','kimi-k2.7-code','kimi-k3:cloud'];
-  const traces=[];
-  models.forEach(model=>{
-    const baseRate=MODEL_RATES[model]||0.02;
-    const color=MODEL_COLORS[model]||'#d2a8ff';
-    const x=[],y=[];
-    for(let h=0;h<48;h++){
-      x.push(new Date(now-(47-h)*1800*1000));
-      const noise=(Math.random()-0.5)*0.3;
-      const drift=1+Math.sin(h/8)*0.1+noise*0.05;
-      y.push(baseRate*drift);
+function renderProviders(snap){
+  for(const p of PROVIDERS){
+    const usedPct = getQuotaUsed(snap, p);
+    const ppu = isPayPerUse(p);
+    const models = PROV_MODELS[p] || [];
+    
+    // Find cheapest model for header display
+    let cheapestRate = Infinity;
+    for(const m of models){ if(m.rate < cheapestRate) cheapestRate = m.rate; }
+    if(cheapestRate === Infinity) cheapestRate = getBaseRate(snap, p);
+    
+    // Update rate display — show cheapest model rate
+    const rateEl = document.getElementById(`prov-rate-${p}`);
+    if(rateEl) rateEl.textContent = `from ${fmt$(cheapestRate)}/M`;
+    
+    // Update status
+    const statusEl = document.getElementById(`prov-status-${p}`);
+    if(statusEl){
+      if(ppu){
+        statusEl.innerHTML = `<span>Pay-per-use</span><span>${usedPct>0?'credits used':'$5 balance'}</span>`;
+      }else{
+        const q = snap.quota[p] || {};
+        statusEl.innerHTML = `<span>${usedPct.toFixed(1)}% used</span><span>${q.remaining?fmtTok(q.remaining)+' tok left':'—'}</span>`;
+      }
     }
-    traces.push({x,y,mode:'lines',line:{color:color,width:2},name:MODEL_LABELS[model]||model});
-  });
-  const layout={
-    margin:{l:50,r:15,t:5,b:35},
-    xaxis:{title:{text:'Time',font:{size:10,color:'#8b949e'}},gridcolor:PLOT_GRID,tickfont:{size:9,color:'#8b949e'}},
-    yaxis:{title:{text:'Price/M ($)',font:{size:10,color:'#8b949e'}},type:'log',gridcolor:PLOT_GRID,tickfont:{size:9,color:'#8b949e'},tickformat:'.3f'},
-    paper_bgcolor:PLOT_BG,plot_bgcolor:PLOT_BG,font:{size:9,color:'#8b949e'},
-    showlegend:true,legend:{orientation:'h',y:-0.2,font:{size:9}},
-  };
-  Plotly.react('consumer-chart',traces,layout,{displayModeBar:false,responsive:true});
-  const models_list=['glm-5.2','glm-4.5-flash','kimi-k2.7-code','kimi-k3:cloud'];
-  document.getElementById('consumer-legend').innerHTML=models_list.map(m=>
-    `<div class="legend-item"><div class="legend-dot" style="background:${MODEL_COLORS[m]}"></div>${MODEL_LABELS[m]||m}</div>`
-  ).join('');
-}
-
-// ═══ RENDER: EDGES ═══
-function renderEdges(snap){
-  const svg=document.getElementById('edge-svg');
-  const container=document.getElementById('edges-layer');
-  const providersRow=document.getElementById('providers-row');
-  if(!svg||!container||!providersRow)return;
-
-  const w=container.offsetWidth;
-  const h=container.offsetHeight;
-  svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
-  svg.innerHTML='';
-
-  // Get provider card positions
-  const rowRect=providersRow.getBoundingClientRect();
-  const consumerRect=document.querySelector('.consumer-box').getBoundingClientRect();
-  const containerRect=container.getBoundingClientRect();
-
-  PROVIDERS.forEach((p,i)=>{
-    const card=document.getElementById('card-'+p.id);
-    if(!card)return;
-    const cardRect=card.getBoundingClientRect();
-    const x1=cardRect.left+cardRect.width/2-containerRect.left;
-    const y1=0; // top of edges layer (cards are above)
-    const x2=w/2; // center of consumer
-    const y2=h;  // bottom of edges layer (consumer is below)
-
-    // Determine if provider is active
-    const reqs=snap?.requests||snap?.routing_decisions||[];
-    const isActive=reqs.some(r=>{
-      const prov=r.provider||r.key_name||r.key||'';
-      return prov===p.id||prov===p.quotaKey;
-    });
     
-    // Check provider health
-    const status=getProviderStatus(snap,p.id);
-    const isExhausted=status.cls==='exhausted';
-    const isOffline=status.cls==='offline';
+    // Build Plotly traces — one curve per model
+    const chartDiv = `prov-chart-${p}`;
+    const traces = [];
     
-    // Determine color
-    let strokeColor='var(--border)';
-    let strokeWidth=2;
-    let opacity=0.4;
-    
-    if(isOffline){opacity=0.15;}
-    else if(isExhausted){strokeColor='var(--red)';opacity=0.5;}
-    else if(isActive){
-      // Find which model this provider is routing
-      const activeReq=reqs.find(r=>{
-        const prov=r.provider||r.key_name||r.key||'';
-        return prov===p.id||prov===p.quotaKey;
+    for(const m of models){
+      const baseRate = m.rate;
+      const color = MODEL_COLORS[m.model] || '#8b949e';
+      const xVals=[], yFull=[], yFill=[];
+      const fillX=[];
+      
+      if(ppu){
+        // Flat line — no quota cap
+        for(let pct=0; pct<=100; pct+=2){
+          xVals.push(pct);
+          yFull.push(baseRate);
+        }
+        // Fill 0% to "usage" (nominal 10% to show some fill)
+        for(let pct=0; pct<=10; pct+=2){
+          fillX.push(pct);
+          yFill.push(baseRate);
+        }
+      }else{
+        // Asymptotic curve from 0% to 95%
+        for(let pct=0; pct<=95; pct+=1){
+          xVals.push(pct);
+          yFull.push(asymptoticPrice(baseRate, pct));
+        }
+        // Fill area from 0 to current usage
+        for(let pct=0; pct<=Math.min(usedPct,95); pct+=1){
+          fillX.push(pct);
+          yFill.push(asymptoticPrice(baseRate, pct));
+        }
+      }
+      
+      // Full curve (faded line)
+      traces.push({
+        x:xVals, y:yFull, mode:'lines',
+        line:{color:color+'55',width:1.5},
+        name:m.model, hoverinfo:'skip', showlegend:true,
+        legendgroup:m.model,
       });
-      const model=activeReq?.model||p.models[0];
-      strokeColor=MODEL_COLORS[model]||'var(--green)';
-      strokeWidth=3;
-      opacity=1;
-    }else{
-      strokeColor='var(--green)';
-      opacity=0.3;
+      
+      // Filled area under curve (0 to current usage) — solid color, 25% opacity
+      if(fillX.length>1){
+        traces.push({
+          x:fillX, y:yFill, mode:'none', fill:'tozeroy',
+          fillcolor:color+'40', line:{width:0}, name:'', hoverinfo:'skip',
+          showlegend:false, legendgroup:m.model,
+        });
+      }
+      
+      // Current position marker
+      if(!ppu && usedPct>0){
+        traces.push({
+          x:[usedPct], y:[asymptoticPrice(baseRate, usedPct)], mode:'markers',
+          marker:{size:8,color:color,line:{color:'#fff',width:1.5}},
+          name:'', showlegend:false, legendgroup:m.model,
+          hovertemplate:`<b>${m.model}</b><br>${usedPct.toFixed(1)}% used<br>${fmt$(asymptoticPrice(baseRate, usedPct))}/M<extra></extra>`,
+        });
+      }
     }
-
-    // Draw curved edge
-    const midY=h*0.5;
-    const path=`M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`;
     
-    const pathEl=document.createElementNS('http://www.w3.org/2000/svg','path');
-    pathEl.setAttribute('d',path);
-    pathEl.setAttribute('class','edge-line'+(isActive?' active':''));
-    pathEl.setAttribute('stroke',strokeColor);
-    pathEl.setAttribute('stroke-width',strokeWidth);
-    pathEl.setAttribute('opacity',opacity);
-    pathEl.setAttribute('fill','none');
-    svg.appendChild(pathEl);
-
-    // Flow dot for active edges
-    if(isActive&&!isOffline){
-      const dot=document.createElementNS('http://www.w3.org/2000/svg','circle');
-      dot.setAttribute('r',4);
-      dot.setAttribute('fill',strokeColor);
-      dot.setAttribute('class','flow-dot active');
-      dot.style.offsetPath=`path('${path}')`;
-      svg.appendChild(dot);
-    }
-  });
+    const layout = {
+      paper_bgcolor:PLOT_BG, plot_bgcolor:PLOT_BG,
+      margin:{l:40,r:8,t:4,b:28},
+      showlegend:true,
+      legend:{orientation:'h',y:-0.25,font:{size:7,color:'#8b949e'},
+        traceorder:'normal',x:0.5,xanchor:'center'},
+      xaxis:{title:'Quota Used %',gridcolor:PLOT_GRID,zeroline:false,
+        tickfont:{size:9,color:'#8b949e'},range:[0,100],tickvals:[0,25,50,75,100]},
+      yaxis:{title:'Price/M',gridcolor:PLOT_GRID,zeroline:false,
+        tickfont:{size:9,color:'#8b949e'},type:'log',
+        tickformat:'$.3f',automargin:true},
+      font:{family:'SF Mono,monospace',size:9,color:'#8b949e'},
+    };
+    
+    Plotly.react(chartDiv, traces, layout, {displayModeBar:false,responsive:true});
+  }
 }
 
-// ═══ MAIN RENDER ═══
-function renderAll(snap){
-  if(!snap)return;
-
-  // Render provider cards
-  PROVIDERS.forEach(p=>{
-    const usageFrac=getUsageFraction(snap,p.id);
-    const status=getProviderStatus(snap,p.id);
-    
-    const statusEl=document.getElementById('status-'+p.id);
-    if(statusEl){statusEl.textContent=status.text;statusEl.className='pc-status '+status.cls;}
-    
-    const usageEl=document.getElementById('usage-'+p.id);
-    if(usageEl)usageEl.textContent=(usageFrac*100).toFixed(1)+'%';
-    
-    // Show cheapest model rate
-    const cheapestRate=Math.min(...p.models.map(m=>MODEL_RATES[m]||0.02));
-    const rateEl=document.getElementById('rate-'+p.id);
-    if(rateEl)rateEl.textContent='$'+cheapestRate.toFixed(3)+'/M';
-    
-    const card=document.getElementById('card-'+p.id);
-    if(card){
-      card.classList.toggle('exhausted',status.cls==='exhausted');
-      card.classList.toggle('offline',status.cls==='offline');
+/* ════════════════════════════════════════════════════════════════════════
+   RENDER: CONSUMER CHART (Price/M over time per provider)
+   ════════════════════════════════════════════════════════════════════════ */
+function renderConsumer(snap){
+  const traces=[];
+  
+  // Collect all unique models across all providers
+  const seenModels = new Set();
+  for(const p of PROVIDERS){
+    for(const m of (PROV_MODELS[p]||[])){
+      seenModels.add(m.model);
     }
-
-    renderProviderChart(p.id,p.models,usageFrac);
-  });
-
-  // Render consumer chart
-  renderConsumerChart(snap);
-
-  // Render edges (after DOM settles)
-  setTimeout(()=>renderEdges(snap),100);
+  }
+  
+  // Determine which model is currently active from routing decisions
+  const reqs = snap.requests || [];
+  let activeModel = null;
+  if(reqs.length){
+    const last = reqs[0];
+    activeModel = last.model || last.model_name || null;
+  }
+  
+  // Build per-model price history from provider histories
+  // Each provider's price history applies to all models that provider serves
+  for(const modelName of seenModels){
+    const color = MODEL_COLORS[modelName] || '#8b949e';
+    const histPoints = [];
+    
+    for(const p of PROVIDERS){
+      const models = PROV_MODELS[p] || [];
+      if(!models.find(m=>m.model===modelName)) continue;
+      const hist = state.priceHist[p] || [];
+      for(const pt of hist){
+        histPoints.push({t:pt.t, price:pt.your_price||pt.cost_basis});
+      }
+    }
+    
+    if(!histPoints.length) continue;
+    histPoints.sort((a,b)=>a.t-b.t);
+    
+    // Historical line
+    traces.push({
+      x: histPoints.map(pt=>pt.t*1000), y: histPoints.map(pt=>pt.price),
+      mode:'lines', line:{color:color,width:1.5}, name:modelName,
+      hovertemplate:`<b>${modelName}</b><br>%{y:$.4f}/M<br>%{x}<extra></extra>`,
+    });
+    
+    // Current price point — use the cheapest provider's current price for this model
+    let cheapestCurrent = Infinity;
+    for(const p of PROVIDERS){
+      const models = PROV_MODELS[p] || [];
+      const m = models.find(mm=>mm.model===modelName);
+      if(!m) continue;
+      const usedPct = getQuotaUsed(snap, p);
+      const currentPrice = isPayPerUse(p) ? m.rate : asymptoticPrice(m.rate, usedPct);
+      if(currentPrice < cheapestCurrent) cheapestCurrent = currentPrice;
+    }
+    if(cheapestCurrent < Infinity){
+      traces.push({
+        x:[Date.now()], y:[cheapestCurrent], mode:'markers',
+        marker:{size:8,color:color,symbol:'circle',line:{color:'#fff',width:1}},
+        name:modelName+' now', showlegend:false,
+        hovertemplate:`<b>${modelName} NOW</b><br>${fmt$(cheapestCurrent)}/M<extra></extra>`,
+      });
+    }
+  }
+  
+  const layout={
+    paper_bgcolor:PLOT_BG, plot_bgcolor:PLOT_BG,
+    margin:{l:50,r:20,t:10,b:35},
+    showlegend:true,
+    legend:{orientation:'h',y:-0.15,font:{size:10,color:'#8b949e'},
+      traceorder:'normal',x:0.5,xanchor:'center'},
+    xaxis:{title:'',gridcolor:PLOT_GRID,zeroline:false,
+      tickfont:{size:9,color:'#8b949e'},type:'date',tickformat:'%m/%d'},
+    yaxis:{title:'Price / M ($)',gridcolor:PLOT_GRID,zeroline:false,
+      tickfont:{size:9,color:'#8b949e'},type:'log',
+      tickformat:'$.4f',automargin:true},
+    font:{family:'SF Mono,monospace',size:10,color:'#8b949e'},
+  };
+  
+  Plotly.react('consumer-chart', traces, layout, {displayModeBar:false,responsive:true});
+  
+  // Update consumer rate display
+  const meta = snap.pricing_meta||{};
+  const avgRate = getBaseRate(snap,'friend') * (1+(meta.margin||0.266));
+  document.getElementById('consumer-rate').textContent = `Avg: ${fmt$(avgRate)}/M · Spend today: ${fmt$(snap.cost_today||0,2)}`;
 }
 
-// ═══ INIT ═══
+/* ════════════════════════════════════════════════════════════════════════
+   RENDER: EDGES (SVG lines from providers to consumer)
+   ════════════════════════════════════════════════════════════════════════ */
+function renderEdges(snap){
+  const svg = document.getElementById('edges-svg');
+  const container = document.getElementById('arch-container');
+  const consumerEl = document.querySelector('.consumer-card');
+  const containerRect = container.getBoundingClientRect();
+  
+  svg.setAttribute('viewBox',`0 0 ${containerRect.width} ${containerRect.height}`);
+  svg.setAttribute('width',containerRect.width);
+  svg.setAttribute('height',containerRect.height);
+  
+  // Get consumer card top-center position
+  const consumerRect = consumerEl.getBoundingClientRect();
+  const consumerTop = consumerRect.top - containerRect.top + 5; // top of consumer card
+  const consumerCenterX = consumerRect.left - containerRect.left + consumerRect.width/2;
+  
+  // Determine active provider and model from recent routing decisions
+  const reqs = snap.requests || [];
+  let activeProvider = null, activeModel = null;
+  if(reqs.length){
+    const last = reqs[0];
+    const key = last.key || last.provider || '';
+    const keyMap = {'friend':'friend','ollama_cloud':'ollama','ollama':'ollama','ppq':'ppq','openrouter':'openrouter'};
+    activeProvider = keyMap[key] || keyMap[last.provider] || null;
+    activeModel = last.model || last.model_name || null;
+  }
+  
+  // Also check provider distribution
+  const dist = snap.provider_distribution || {};
+  let maxDist = 0, distProvider = null;
+  for(const p of PROVIDERS){
+    const d = dist[p] || 0;
+    if(d > maxDist){maxDist=d; distProvider=p;}
+  }
+  
+  // Draw edges
+  let svgContent='';
+  for(const p of PROVIDERS){
+    const card = document.getElementById(`prov-${p}`);
+    if(!card) continue;
+    const cardRect = card.getBoundingClientRect();
+    const cardBottom = cardRect.bottom - containerRect.top;
+    const cardCenterX = cardRect.left - containerRect.left + cardRect.width/2;
+    
+    const isActive = (p===activeProvider) || (!activeProvider && p===distProvider);
+    
+    // Determine edge color: use active model's color if this is the active provider,
+    // otherwise use the cheapest model's color for that provider
+    let edgeColor = PROV_COLOR[p]; // fallback to provider color
+    if(isActive && activeModel && MODEL_COLORS[activeModel]){
+      edgeColor = MODEL_COLORS[activeModel];
+    } else {
+      // Use cheapest model's color for this provider
+      const models = PROV_MODELS[p] || [];
+      if(models.length){
+        let cheapest = models[0];
+        for(const m of models){ if(m.rate < cheapest.rate) cheapest = m; }
+        edgeColor = MODEL_COLORS[cheapest.model] || PROV_COLOR[p];
+      }
+    }
+    
+    const width = isActive?3:1.5;
+    const opacity = isActive?0.9:0.4;
+    
+    // Curved bezier from provider bottom to consumer top
+    const midY = (cardBottom + consumerTop)/2;
+    const path = `M ${cardCenterX} ${cardBottom} C ${cardCenterX} ${midY}, ${consumerCenterX} ${midY}, ${consumerCenterX} ${consumerTop}`;
+    
+    svgContent += `<path class="edge-line ${isActive?'active':''}" d="${path}" stroke="${color}" stroke-width="${width}" opacity="${opacity}" fill="none"/>`;
+    
+    // Flow dot on active edges
+    if(isActive){
+      const dotId = `dot-${p}`;
+      svgContent += `<circle r="4" fill="${color}" opacity="0.9">
+        <animateMotion dur="2s" repeatCount="indefinite">
+          <mpath href="#${dotId}-path"/>
+        </animateMotion>
+      </circle>
+      <path id="${dotId}-path" d="${path}" fill="none" stroke="none"/>`;
+    }
+  }
+  
+  svg.innerHTML = svgContent;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   RENDER ALL
+   ════════════════════════════════════════════════════════════════════════ */
+function renderAll(){
+  const snap = state.snapshot;
+  if(!snap) return;
+  renderProviders(snap);
+  renderConsumer(snap);
+  renderEdges(snap);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   SNAPSHOT FETCH — Nostr + HTTP fallback (reused)
+   ════════════════════════════════════════════════════════════════════════ */
+let nostrPool=null, nostrSub=null;
+let pollInterval=POLL_MS, lastNostrEventAt=0;
+let nostrWatchdog=null, nostrReconnectTimer=null;
+let priceHistSeeded=false;
+
+const STALE_THRESHOLD_MS = parseInt(param('stale_ms'))||15000;
+const NOSTR_RECONNECT_MS = parseInt(param('reconnect_ms'))||60000;
+
+function seedPriceHistory(points){
+  if(!Array.isArray(points)||!points.length||priceHistSeeded) return;
+  const byKey={};
+  for(const pt of points){
+    const k=pt.key;
+    // Map 'ollama_cloud' -> 'ollama'
+    const mk = k==='ollama_cloud'?'ollama':k;
+    if(!PROVIDERS.includes(mk)) continue;
+    if(!byKey[mk]) byKey[mk]=[];
+    byKey[mk].push({t:pt.t??pt.ts, cost_basis:pt.cost_basis, your_price:pt.your_price, margin_pct:pt.margin_pct});
+  }
+  for(const k of PROVIDERS){
+    const seeded=byKey[k];
+    if(seeded&&seeded.length){
+      seeded.sort((a,b)=>a.t-b.t);
+      state.priceHist[k]=seeded.slice(-HIST_MAX);
+    }
+  }
+  priceHistSeeded=true;
+}
+
+async function initNostr(){
+  if(nostrSub){try{nostrSub.close();}catch(e){}nostrSub=null;}
+  const N=window.NostrTools;
+  const PoolCtor=window.__testNostrPool||(N&&N.SimplePool);
+  if(!PoolCtor) throw new Error('nostr-tools not loaded');
+  if(!nostrPool) nostrPool=new PoolCtor();
+  nostrSub=nostrPool.subscribeMany(CVM_RELAYS,{
+    kinds:[30315], authors:[CVM_NPUB_HEX], "#d":["cvm-snapshot"], limit:1,
+  },{
+    onevent:(event)=>{
+      lastNostrEventAt=Date.now();
+      try{
+        const raw=JSON.parse(event.content);
+        const snap=normalizeSnapshot(raw);
+        if(!snap) throw new Error('invalid snapshot');
+        if(raw.price_history) seedPriceHistory(raw.price_history);
+        state.snapshot=snap;
+        if(raw.cost_today!=null) state.costToday=raw.cost_today;
+        setConn('live');
+        renderAll();
+      }catch(e){console.warn('Parse error:',e.message);}
+    },
+    oneose:()=>{console.log('Nostr EOSE');},
+  });
+  startNostrWatchdog();
+}
+
+function startNostrWatchdog(){
+  if(nostrWatchdog) return;
+  nostrWatchdog=setInterval(()=>{
+    if(!state.snapshot||!lastNostrEventAt) return;
+    if(Date.now()-lastNostrEventAt>STALE_THRESHOLD_MS) setConn('stale');
+  },Math.min(5000,STALE_THRESHOLD_MS));
+  nostrReconnectTimer=setInterval(()=>{
+    const since=lastNostrEventAt?Date.now()-lastNostrEventAt:Infinity;
+    if(since>NOSTR_RECONNECT_MS){
+      console.warn('[nostr] reconnecting…');
+      lastNostrEventAt=0;
+      initNostr().catch(e=>console.warn('[nostr] reconnect failed:',e.message));
+    }
+  },Math.min(10000,NOSTR_RECONNECT_MS));
+}
+
+async function pollHttp(){
+  let ok=false;
+  try{
+    setConn('connecting');
+    const resp=await fetch(`${API_BASE}/snapshot`,{signal:AbortSignal.timeout(8000)});
+    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const raw=await resp.json();
+    const snap=normalizeSnapshot(raw);
+    if(!snap) throw new Error('invalid snapshot');
+    if(raw.price_history) seedPriceHistory(raw.price_history);
+    state.snapshot=snap;
+    if(snap.cost_today!=null) state.costToday=snap.cost_today;
+    setConn('live');
+    ok=true;
+  }catch(e){
+    console.warn('HTTP fetch failed:',e.message);
+    if(state.snapshot) setConn('stale'); else setConn('offline');
+  }
+  renderAll();
+  let nextDelay=ok?POLL_MIN:pollInterval;
+  if(!ok) pollInterval=Math.min(pollInterval*2,POLL_MAX);
+  setTimeout(pollHttp,nextDelay);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   CLOCK + INIT
+   ════════════════════════════════════════════════════════════════════════ */
+function tickClock(){document.getElementById('time-text').textContent=new Date().toLocaleTimeString('en-GB',{hour12:false});}
+
 async function init(){
   initProviderCards();
+  tickClock(); setInterval(tickClock,1000);
   setConn('connecting');
-
-  // Try local API first
-  const local=await tryLocalAPI();
-  if(local){
-    lastSnap=local;
-    setConn('live');
-    renderAll(local);
+  
+  // HTTP path: also fetch price history
+  if(!USE_NOSTR){
+    try{
+      const phResp=await fetch(`${API_BASE}/price-history?hours=168`);
+      if(phResp.ok){
+        const ph=await phResp.json();
+        if(ph&&ph.points) seedPriceHistory(ph.points);
+      }
+    }catch(e){console.warn('Price history fetch failed:',e.message);}
   }
-
-  // Connect Nostr for live updates
-  connectNostr();
-
-  // Re-render edges on resize
+  
+  if(USE_NOSTR){
+    setConn('connecting');
+    try{await initNostr();}catch(e){console.warn('Nostr init failed:',e.message);setConn('offline');}
+  }else{
+    await pollHttp();
+  }
+  
+  // Redraw edges on window resize
   window.addEventListener('resize',()=>{
-    if(lastSnap)setTimeout(()=>renderEdges(lastSnap),100);
+    if(state.snapshot) renderEdges(state.snapshot);
   });
-
-  // Poll local API every 5s as backup
-  setInterval(async()=>{
-    const snap=await tryLocalAPI();
-    if(snap){
-      lastSnap=snap;
-      setConn('live');
-      renderAll(snap);
-    }
-  },5000);
 }
-
 init();
 </script>
 </body>
