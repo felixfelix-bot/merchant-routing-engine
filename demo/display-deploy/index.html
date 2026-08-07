@@ -60,6 +60,58 @@
     
     /* Edge spacer */
     .edge-spacer{height:80px;position:relative;z-index:1}
+    
+    /* ═══ DASHBOARD PANELS ═══ */
+    .dash-section{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-top:16px}
+    .dash-section .dash-header{padding:10px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+    .dash-header-title{font-size:13px;font-weight:700;color:var(--txt-bright);letter-spacing:.5px}
+    .dash-body{padding:16px}
+    
+    /* Cost Meter */
+    .cost-meter{display:flex;align-items:center;gap:32px;flex-wrap:wrap}
+    .cost-big{font-size:36px;font-weight:800;color:var(--green);font-family:var(--mono)}
+    .cost-stat{display:flex;flex-direction:column;gap:2px}
+    .cost-stat-label{font-size:10px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:1px}
+    .cost-stat-value{font-size:18px;font-weight:700;color:var(--txt-bright);font-family:var(--mono)}
+    
+    /* Quota Bars */
+    .quota-bar-row{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+    .quota-bar-label{font-size:11px;font-weight:700;min-width:80px;color:var(--txt-bright)}
+    .quota-bar-track{flex:1;height:20px;background:rgba(48,54,61,.4);border-radius:4px;overflow:hidden;position:relative}
+    .quota-bar-fill{height:100%;border-radius:4px;transition:width .5s ease;position:relative}
+    .quota-bar-info{font-size:10px;color:var(--txt-dim);min-width:180px;text-align:right;font-family:var(--mono)}
+    
+    /* Request Flow */
+    .req-flow-list{max-height:400px;overflow-y:auto;border:1px solid var(--border);border-radius:6px}
+    .req-flow-list::-webkit-scrollbar{width:6px}
+    .req-flow-list::-webkit-scrollbar-track{background:var(--bg)}
+    .req-flow-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+    .req-row{display:grid;grid-template-columns:80px 80px 120px 1fr 70px 60px;gap:8px;padding:6px 12px;border-bottom:1px solid rgba(48,54,61,.3);font-size:11px;font-family:var(--mono);align-items:center}
+    .req-row:hover{background:rgba(88,166,255,.05)}
+    .req-row .req-ts{color:var(--txt-dim)}
+    .req-row .req-key{font-weight:700}
+    .req-row .req-model{color:var(--txt)}
+    .req-row .req-reason{color:var(--txt-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .req-row .req-cost{color:var(--green);text-align:right}
+    .req-row .req-tokens{color:var(--txt-dim);text-align:right}
+    
+    /* Dispatch Gate */
+    .gate-grid{display:flex;align-items:center;gap:24px;flex-wrap:wrap}
+    .gate-badge{font-size:14px;font-weight:800;padding:6px 16px;border-radius:6px;letter-spacing:1px}
+    .gate-badge.clear{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)}
+    .gate-badge.blocked{background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)}
+    .gate-stat{display:flex;flex-direction:column;gap:2px}
+    .gate-stat-label{font-size:10px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:1px}
+    .gate-stat-value{font-size:14px;font-weight:700;color:var(--txt-bright);font-family:var(--mono)}
+    
+    /* Measured Rates Table */
+    .rates-table{width:100%;border-collapse:collapse;font-size:12px}
+    .rates-table th{text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);color:var(--txt-dim);font-size:10px;text-transform:uppercase;letter-spacing:1px;font-weight:600}
+    .rates-table td{padding:8px 12px;border-bottom:1px solid rgba(48,54,61,.3);font-family:var(--mono)}
+    .rates-table tr:hover{background:rgba(88,166,255,.05)}
+    .source-badge{font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;letter-spacing:.5px}
+    .source-badge.measured{background:rgba(63,185,80,.15);color:var(--green)}
+    .source-badge.fallback{background:rgba(210,153,34,.15);color:var(--yellow)}
   </style>
 </head>
 <body>
@@ -93,6 +145,76 @@
     </div>
     <div class="consumer-chart" id="consumer-chart"></div>
   </div>
+  
+  <!-- ═══ DASHBOARD PANELS ═══ -->
+  
+  <!-- a) Cost Meter -->
+  <div class="dash-section" id="cost-meter-section">
+    <div class="dash-header">
+      <span class="dash-header-title">💰 Cost Meter</span>
+      <span class="provider-rate" id="cost-meter-subtitle">—</span>
+    </div>
+    <div class="dash-body">
+      <div class="cost-meter" id="cost-meter-body">
+        <div class="cost-big" id="cost-today">$0.00</div>
+        <div class="cost-stat">
+          <span class="cost-stat-label">$/hour burn</span>
+          <span class="cost-stat-value" id="burn-rate">—</span>
+        </div>
+        <div class="cost-stat">
+          <span class="cost-stat-label">Requests today</span>
+          <span class="cost-stat-value" id="req-count">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <!-- b) Quota Bars -->
+  <div class="dash-section" id="quota-bars-section">
+    <div class="dash-header">
+      <span class="dash-header-title">📊 Quota Bars</span>
+      <span class="provider-rate">Per-key usage</span>
+    </div>
+    <div class="dash-body" id="quota-bars-body"></div>
+  </div>
+  
+  <!-- c) Request Flow -->
+  <div class="dash-section" id="req-flow-section">
+    <div class="dash-header">
+      <span class="dash-header-title">🔄 Request Flow</span>
+      <span class="provider-rate">Last 20 routing decisions</span>
+    </div>
+    <div class="dash-body" style="padding:8px">
+      <div class="req-flow-list" id="req-flow-list"></div>
+    </div>
+  </div>
+  
+  <!-- d) Dispatch Gate -->
+  <div class="dash-section" id="dispatch-gate-section">
+    <div class="dash-header">
+      <span class="dash-header-title">🚦 Dispatch Gate</span>
+      <span class="provider-rate" id="gate-subtitle">—</span>
+    </div>
+    <div class="dash-body">
+      <div class="gate-grid" id="gate-grid"></div>
+    </div>
+  </div>
+  
+  <!-- e) Measured Rates -->
+  <div class="dash-section" id="measured-rates-section">
+    <div class="dash-header">
+      <span class="dash-header-title">📏 Measured Rates</span>
+      <span class="provider-rate">Per-provider $/M</span>
+    </div>
+    <div class="dash-body" style="padding:0">
+      <table class="rates-table" id="rates-table">
+        <thead>
+          <tr><th>Provider</th><th>Rate $/M</th><th>Source</th><th>Window (h)</th></tr>
+        </thead>
+        <tbody id="rates-tbody"></tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -116,49 +238,82 @@ const PROV_LABEL = {friend:'FRIEND',ollama:'OLLAMA',ppq:'PPQ',openrouter:'OPENRO
 const PROV_COLOR = {friend:'#bc8cff',ollama:'#39d2c0',ppq:'#f0883e',openrouter:'#f85149'};
 const PROV_ALIVE = {friend:true,ollama:true,ppq:false,openrouter:true};
 
-// Models served by each provider with per-model base rates ($/M)
-const PROV_MODELS = {
+// Models per provider with base rates ($/M tokens)
+const PROVIDER_MODELS = {
   friend: [
-    {model:'glm-5.2', rate:0.009},
-    {model:'glm-4.5-flash', rate:0.023},
-    {model:'glm-4.6v', rate:0.035},
+    {model: 'glm-5.2', baseRate: 0.029},
+    {model: 'glm-4.5-flash', baseRate: 0.029},
+    {model: 'glm-4.5-air', baseRate: 0.029},
   ],
   ollama: [
-    {model:'glm-5.2', rate:0.024},
-    {model:'kimi-k2.7-code', rate:0.054},
-    {model:'kimi-k3:cloud', rate:0.055},
+    {model: 'glm-5.2', baseRate: 0.024},
+    {model: 'kimi-k2.7-code', baseRate: 0.024},
+    {model: 'kimi-k3:cloud', baseRate: 0.024},
   ],
   ppq: [
-    {model:'deepseek/deepseek-v4-flash', rate:0.020},
+    {model: 'deepseek-v4-flash', baseRate: 0.14},
+    {model: 'claude-haiku-4.5', baseRate: 0.14},
+    {model: 'gpt-5.4', baseRate: 0.14},
+    {model: 'gemini-2.5-pro', baseRate: 0.14},
   ],
   openrouter: [
-    {model:'glm-5.2', rate:0.135},
+    {model: 'deepseek-v4-flash', baseRate: 0.135},
+    {model: 'deepseek-v4-pro', baseRate: 0.135},
   ],
 };
 
-// Distinct color per model
+// Distinct color per model name (for consumer chart + edges)
 const MODEL_COLORS = {
   'glm-5.2': '#58a6ff',
-  'glm-4.5-flash': '#39d2c0',
-  'glm-4.5-air': '#7ee787',
-  'glm-4.6v': '#d2a8ff',
-  'kimi-k2.7-code': '#f0883e',
-  'kimi-k3:cloud': '#bc8cff',
-  'deepseek/deepseek-v4-flash': '#f85149',
+  'glm-4.5-flash': '#bc8cff',
+  'glm-4.5-air': '#d2a8ff',
+  'kimi-k2.7-code': '#39d2c0',
+  'kimi-k3:cloud': '#7ee8d8',
+  'deepseek-v4-flash': '#f0883e',
+  'deepseek-v4-pro': '#ff7043',
+  'claude-haiku-4.5': '#f85149',
+  'gpt-5.4': '#d29922',
+  'gemini-2.5-pro': '#3fb950',
 };
+
+// Build reverse map: model -> provider
+const MODEL_TO_PROVIDER = {};
+for(const [prov, models] of Object.entries(PROVIDER_MODELS)){
+  for(const m of models) MODEL_TO_PROVIDER[m.model] = prov;
+}
 
 // Pricing curve constants
 const PRESSURE_K = 0.3;
+
+// Shade a hex color by index/total — returns lighter or darker variant
+function shadeColor(hex, idx, total){
+  const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+  // Spread from -0.3 (darker) to +0.3 (lighter) across models
+  const factor = total>1 ? (idx/(total-1) - 0.5) * 0.6 : 0;
+  const adj = (c) => {
+    const v = Math.round(c + (factor>0 ? (255-c)*factor : c*factor));
+    return Math.max(0, Math.min(255, v));
+  };
+  return '#' + [adj(r),adj(g),adj(b)].map(c=>c.toString(16).padStart(2,'0')).join('');
+}
 
 /* ════════════════════════════════════════════════════════════════════════
    STATE
    ════════════════════════════════════════════════════════════════════════ */
 let state = {
   snapshot: null,
-  priceHist: {},   // key -> [{t,cost_basis,your_price}]
+  priceHist: {},     // provider -> [{t,cost_basis,your_price}]
+  modelPriceHist: {}, // model -> [{t,price}]
   costToday: 0,
+  lastRoutedModel: null, // most recently routed model name
 };
 PROVIDERS.forEach(k => state.priceHist[k] = []);
+// Initialize model price history for all known models
+for(const models of Object.values(PROVIDER_MODELS)){
+  for(const m of models){
+    if(!state.modelPriceHist[m.model]) state.modelPriceHist[m.model] = [];
+  }
+}
 
 /* ════════════════════════════════════════════════════════════════════════
    UTILITIES
@@ -189,6 +344,7 @@ function normalizeSnapshot(raw){
     cost_today:raw.cost_today??0,
     real_rates_tracker:raw.real_rates_tracker||null,
     real_rates:raw.real_rates||{},
+    dispatch_gate:raw.dispatch_gate||null,
   };
 }
 
@@ -200,6 +356,32 @@ function normalizeSnapshot(raw){
 function asymptoticPrice(baseRate, usedPct){
   const t = Math.max(0, Math.min(0.99, usedPct/100));
   return baseRate * (1 + PRESSURE_K * t / (1 - t + 0.001));
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   SUPERPOSITION PRICING — 5h + Weekly + Monthly quota windows
+   totalPrice = baseRate × (1 + K × Σ tᵢ/(1-tᵢ))
+   Each window contributes its own asymptotic pressure; the sum is the total.
+   ════════════════════════════════════════════════════════════════════════ */
+function superpositionPrice(baseRate, t5h, tWeekly, tMonthly) {
+  const clamp = t => Math.max(0, Math.min(0.99, t));
+  return baseRate * (1 + PRESSURE_K * (clamp(t5h)/(1-clamp(t5h)+0.001) + clamp(tWeekly)/(1-clamp(tWeekly)+0.001) + clamp(tMonthly)/(1-clamp(tMonthly)+0.001)));
+}
+
+// Single-window price (for faint curves): only one window has pressure
+function singleWindowPrice(baseRate, t) {
+  const c = Math.max(0, Math.min(0.99, t));
+  return baseRate * (1 + PRESSURE_K * c / (1 - c + 0.001));
+}
+
+// Get the three window usage fractions for a quota provider
+function getQuotaWindows(snap, provider) {
+  const q = snap.quota[provider] || {};
+  return {
+    t5h: (q.session_usage || 0) / 100,
+    tWeekly: (q.weekly_usage || 0) / 100,
+    tMonthly: (q.used_pct || 0) / 100,
+  };
 }
 
 // Get base rate for a provider
@@ -258,18 +440,24 @@ function renderProviders(snap){
   for(const p of PROVIDERS){
     const usedPct = getQuotaUsed(snap, p);
     const ppu = isPayPerUse(p);
-    const models = PROV_MODELS[p] || [];
+    const provColor = PROV_COLOR[p];
+    const models = PROVIDER_MODELS[p] || [];
+    const w = ppu ? null : getQuotaWindows(snap, p);
     
-    // Find cheapest model for header display
-    let cheapestRate = Infinity;
-    for(const m of models){ if(m.rate < cheapestRate) cheapestRate = m.rate; }
-    if(cheapestRate === Infinity) cheapestRate = getBaseRate(snap, p);
-    
-    // Update rate display — show cheapest model rate
+    // Rate display: show range (cheapest to most expensive model)
     const rateEl = document.getElementById(`prov-rate-${p}`);
-    if(rateEl) rateEl.textContent = `from ${fmt$(cheapestRate)}/M`;
+    if(rateEl && models.length){
+      let rates;
+      if(ppu){
+        rates = models.map(m => m.baseRate);
+      } else {
+        rates = models.map(m => superpositionPrice(m.baseRate, w.t5h, w.tWeekly, w.tMonthly));
+      }
+      const minR = Math.min(...rates), maxR = Math.max(...rates);
+      rateEl.textContent = minR === maxR ? `${fmt$(minR)}/M` : `${fmt$(minR)}–${fmt$(maxR)}/M`;
+    }
     
-    // Update status
+    // Status
     const statusEl = document.getElementById(`prov-status-${p}`);
     if(statusEl){
       if(ppu){
@@ -280,83 +468,113 @@ function renderProviders(snap){
       }
     }
     
-    // Build Plotly traces — one curve per model
     const chartDiv = `prov-chart-${p}`;
     const traces = [];
     
-    for(const m of models){
-      const baseRate = m.rate;
-      const color = MODEL_COLORS[m.model] || '#8b949e';
-      const xVals=[], yFull=[], yFill=[];
-      const fillX=[];
+    // For pay-per-use: flat lines per model (same as before)
+    // For quota providers: 3 faint window curves + bold total curve per model
+    for(let mi = 0; mi < models.length; mi++){
+      const m = models[mi];
+      const mColor = MODEL_COLORS[m.model] || provColor;
       
       if(ppu){
-        // Flat line — no quota cap
+        // Flat line for pay-per-use
+        const xVals = [], yVals = [];
         for(let pct=0; pct<=100; pct+=2){
           xVals.push(pct);
-          yFull.push(baseRate);
+          yVals.push(m.baseRate);
         }
-        // Fill 0% to "usage" (nominal 10% to show some fill)
-        for(let pct=0; pct<=10; pct+=2){
-          fillX.push(pct);
-          yFill.push(baseRate);
+        traces.push({
+          x:xVals, y:yVals, mode:'lines',
+          line:{color:mColor, width:1.5, dash: mi>0 ? 'dot' : 'solid'},
+          name:m.model, hovertemplate:`<b>${m.model}</b><br>flat rate<br>${fmt$(m.baseRate)}/M<extra></extra>`,
+          showlegend:true,
+        });
+      } else {
+        // ── 3 faint curves (one per window) ──
+        const winColors = ['#58a6ff44', '#bc8cff44', '#f0883e44']; // blue=5h, purple=weekly, orange=monthly
+        const winNames = ['5h window', 'weekly window', 'monthly window'];
+        const winTs = [w.t5h, w.tWeekly, w.tMonthly];
+        
+        for(let wi=0; wi<3; wi++){
+          const fxVals = [], fyVals = [];
+          for(let pct=0; pct<=99; pct+=1){
+            fxVals.push(pct);
+            fyVals.push(singleWindowPrice(m.baseRate, pct/100));
+          }
+          traces.push({
+            x:fxVals, y:fyVals, mode:'lines',
+            line:{color:winColors[wi], width:0.8, dash:'dot'},
+            name:winNames[wi], hoverinfo:'skip', showlegend: mi===0 && wi===0,
+            legendgroup: 'windows',
+          });
         }
-      }else{
-        // Asymptotic curve from 0% to 95%
-        for(let pct=0; pct<=95; pct+=1){
+        
+        // ── Bold total curve (superposition) ──
+        const xVals = [], yVals = [];
+        for(let pct=0; pct<=99; pct+=1){
           xVals.push(pct);
-          yFull.push(asymptoticPrice(baseRate, pct));
+          // For the curve, we sweep all three windows proportionally
+          // Each window scales from 0 to its current value as pct goes 0→100
+          const scaleT = pct / 100;
+          yVals.push(superpositionPrice(m.baseRate, w.t5h * scaleT * 100 / 100, w.tWeekly * scaleT * 100 / 100, w.tMonthly * scaleT * 100 / 100));
         }
-        // Fill area from 0 to current usage
-        for(let pct=0; pct<=Math.min(usedPct,95); pct+=1){
-          fillX.push(pct);
-          yFill.push(asymptoticPrice(baseRate, pct));
+        traces.push({
+          x:xVals, y:yVals, mode:'lines',
+          line:{color:mColor, width:2.5, dash: mi>0 ? 'dash' : 'solid'},
+          name:m.model, hovertemplate:`<b>${m.model}</b><br>%{x:.0f}% quota<br>${fmt$(0)}/M<extra></extra>`.replace('${fmt$(0)}',fmt$(superpositionPrice(m.baseRate, w.t5h, w.tWeekly, w.tMonthly))),
+          showlegend:true,
+        });
+        
+        // ── Fill area under total curve 0→max(usedPct, 5) ──
+        if(mi === 0){
+          const fillEnd = Math.max(usedPct, 5);
+          const fillX = [], fillY = [];
+          for(let pct=0; pct<=Math.min(fillEnd,99); pct+=1){
+            fillX.push(pct);
+            const scaleT = pct / 100;
+            fillY.push(superpositionPrice(m.baseRate, w.t5h * scaleT, w.tWeekly * scaleT, w.tMonthly * scaleT));
+          }
+          traces.push({
+            x:fillX, y:fillY, mode:'none', fill:'tozeroy',
+            fillcolor:provColor+'22', line:{width:0}, name:'Used quota', hoverinfo:'skip', showlegend:false,
+          });
         }
+        
+        // ── Current position marker ──
+        const currentPrice = superpositionPrice(m.baseRate, w.t5h, w.tWeekly, w.tMonthly);
+        traces.push({
+          x:[usedPct], y:[currentPrice], mode:'markers',
+          marker:{size:7, color:mColor, line:{color:'#fff', width:1}},
+          name:m.model+' now', showlegend:false,
+          hovertemplate:`<b>${m.model}</b><br>${usedPct.toFixed(1)}% used<br>${fmt$(currentPrice)}/M<extra></extra>`,
+        });
       }
-      
-      // Full curve (faded line)
+    }
+    
+    // Vertical line at current usage (for quota providers)
+    if(!ppu){
+      const maxRate = Math.max(...models.map(m => superpositionPrice(m.baseRate, w.t5h, w.tWeekly, w.tMonthly)));
       traces.push({
-        x:xVals, y:yFull, mode:'lines',
-        line:{color:color+'55',width:1.5},
-        name:m.model, hoverinfo:'skip', showlegend:true,
-        legendgroup:m.model,
+        x:[usedPct, usedPct], y:[0.001, maxRate],
+        mode:'lines', line:{color:provColor+'66', width:1, dash:'dot'}, hoverinfo:'skip', showlegend:false,
       });
-      
-      // Filled area under curve (0 to current usage) — solid color, 25% opacity
-      if(fillX.length>1){
-        traces.push({
-          x:fillX, y:yFill, mode:'none', fill:'tozeroy',
-          fillcolor:color+'40', line:{width:0}, name:'', hoverinfo:'skip',
-          showlegend:false, legendgroup:m.model,
-        });
-      }
-      
-      // Current position marker
-      if(!ppu && usedPct>0){
-        traces.push({
-          x:[usedPct], y:[asymptoticPrice(baseRate, usedPct)], mode:'markers',
-          marker:{size:8,color:color,line:{color:'#fff',width:1.5}},
-          name:'', showlegend:false, legendgroup:m.model,
-          hovertemplate:`<b>${m.model}</b><br>${usedPct.toFixed(1)}% used<br>${fmt$(asymptoticPrice(baseRate, usedPct))}/M<extra></extra>`,
-        });
-      }
     }
     
     const layout = {
       paper_bgcolor:PLOT_BG, plot_bgcolor:PLOT_BG,
       margin:{l:40,r:8,t:4,b:28},
       showlegend:true,
-      legend:{orientation:'h',y:-0.25,font:{size:7,color:'#8b949e'},
-        traceorder:'normal',x:0.5,xanchor:'center'},
-      xaxis:{title:'Quota Used %',gridcolor:PLOT_GRID,zeroline:false,
-        tickfont:{size:9,color:'#8b949e'},range:[0,100],tickvals:[0,25,50,75,100]},
-      yaxis:{title:'Price/M',gridcolor:PLOT_GRID,zeroline:false,
-        tickfont:{size:9,color:'#8b949e'},type:'log',
-        tickformat:'$.3f',automargin:true},
-      font:{family:'SF Mono,monospace',size:9,color:'#8b949e'},
+      legend:{orientation:'h', y:-0.2, font:{size:8, color:'#8b949e'}, x:0.5, xanchor:'center'},
+      xaxis:{title:'Quota Used %', gridcolor:PLOT_GRID, zeroline:false,
+        tickfont:{size:9,color:'#8b949e'}, range:[0,100], tickvals:[0,25,50,75,100]},
+      yaxis:{title:'Price/M', gridcolor:PLOT_GRID, zeroline:false,
+        tickfont:{size:9,color:'#8b949e'}, type:'log',
+        tickformat:'$.3f', automargin:true},
+      font:{family:'SF Mono,monospace', size:9, color:'#8b949e'},
     };
     
-    Plotly.react(chartDiv, traces, layout, {displayModeBar:false,responsive:true});
+    Plotly.react(chartDiv, traces, layout, {displayModeBar:false, responsive:true});
   }
 }
 
@@ -366,65 +584,31 @@ function renderProviders(snap){
 function renderConsumer(snap){
   const traces=[];
   
-  // Collect all unique models across all providers
-  const seenModels = new Set();
   for(const p of PROVIDERS){
-    for(const m of (PROV_MODELS[p]||[])){
-      seenModels.add(m.model);
-    }
-  }
-  
-  // Determine which model is currently active from routing decisions
-  const reqs = snap.requests || [];
-  let activeModel = null;
-  if(reqs.length){
-    const last = reqs[0];
-    activeModel = last.model || last.model_name || null;
-  }
-  
-  // Build per-model price history from provider histories
-  // Each provider's price history applies to all models that provider serves
-  for(const modelName of seenModels){
-    const color = MODEL_COLORS[modelName] || '#8b949e';
-    const histPoints = [];
+    const hist = state.priceHist[p] || [];
+    if(!hist.length) continue;
     
-    for(const p of PROVIDERS){
-      const models = PROV_MODELS[p] || [];
-      if(!models.find(m=>m.model===modelName)) continue;
-      const hist = state.priceHist[p] || [];
-      for(const pt of hist){
-        histPoints.push({t:pt.t, price:pt.your_price||pt.cost_basis});
-      }
-    }
-    
-    if(!histPoints.length) continue;
-    histPoints.sort((a,b)=>a.t-b.t);
+    const baseRate = getBaseRate(snap, p);
+    const usedPct = getQuotaUsed(snap, p);
+    const currentPrice = isPayPerUse(p) ? baseRate : (() => {
+      const w = getQuotaWindows(snap, p);
+      return superpositionPrice(baseRate, w.t5h, w.tWeekly, w.tMonthly);
+    })();
     
     // Historical line
     traces.push({
-      x: histPoints.map(pt=>pt.t*1000), y: histPoints.map(pt=>pt.price),
-      mode:'lines', line:{color:color,width:1.5}, name:modelName,
-      hovertemplate:`<b>${modelName}</b><br>%{y:$.4f}/M<br>%{x}<extra></extra>`,
+      x: hist.map(pt=>pt.t*1000), y: hist.map(pt=>pt.your_price||pt.cost_basis),
+      mode:'lines', line:{color:PROV_COLOR[p],width:1.5}, name:PROV_LABEL[p],
+      hovertemplate:`<b>${PROV_LABEL[p]}</b><br>%{y:$.4f}/M<br>%{x}<extra></extra>`,
     });
     
-    // Current price point — use the cheapest provider's current price for this model
-    let cheapestCurrent = Infinity;
-    for(const p of PROVIDERS){
-      const models = PROV_MODELS[p] || [];
-      const m = models.find(mm=>mm.model===modelName);
-      if(!m) continue;
-      const usedPct = getQuotaUsed(snap, p);
-      const currentPrice = isPayPerUse(p) ? m.rate : asymptoticPrice(m.rate, usedPct);
-      if(currentPrice < cheapestCurrent) cheapestCurrent = currentPrice;
-    }
-    if(cheapestCurrent < Infinity){
-      traces.push({
-        x:[Date.now()], y:[cheapestCurrent], mode:'markers',
-        marker:{size:8,color:color,symbol:'circle',line:{color:'#fff',width:1}},
-        name:modelName+' now', showlegend:false,
-        hovertemplate:`<b>${modelName} NOW</b><br>${fmt$(cheapestCurrent)}/M<extra></extra>`,
-      });
-    }
+    // Current price point
+    traces.push({
+      x:[Date.now()], y:[currentPrice], mode:'markers',
+      marker:{size:8,color:PROV_COLOR[p],symbol:'circle',line:{color:'#fff',width:1}},
+      name:PROV_LABEL[p]+' now', showlegend:false,
+      hovertemplate:`<b>${PROV_LABEL[p]} NOW</b><br>${fmt$(currentPrice)}/M<extra></extra>`,
+    });
   }
   
   const layout={
@@ -467,15 +651,14 @@ function renderEdges(snap){
   const consumerTop = consumerRect.top - containerRect.top + 5; // top of consumer card
   const consumerCenterX = consumerRect.left - containerRect.left + consumerRect.width/2;
   
-  // Determine active provider and model from recent routing decisions
+  // Determine active provider from recent routing decisions
   const reqs = snap.requests || [];
-  let activeProvider = null, activeModel = null;
+  let activeProvider = null;
   if(reqs.length){
     const last = reqs[0];
     const key = last.key || last.provider || '';
     const keyMap = {'friend':'friend','ollama_cloud':'ollama','ollama':'ollama','ppq':'ppq','openrouter':'openrouter'};
     activeProvider = keyMap[key] || keyMap[last.provider] || null;
-    activeModel = last.model || last.model_name || null;
   }
   
   // Also check provider distribution
@@ -496,22 +679,7 @@ function renderEdges(snap){
     const cardCenterX = cardRect.left - containerRect.left + cardRect.width/2;
     
     const isActive = (p===activeProvider) || (!activeProvider && p===distProvider);
-    
-    // Determine edge color: use active model's color if this is the active provider,
-    // otherwise use the cheapest model's color for that provider
-    let edgeColor = PROV_COLOR[p]; // fallback to provider color
-    if(isActive && activeModel && MODEL_COLORS[activeModel]){
-      edgeColor = MODEL_COLORS[activeModel];
-    } else {
-      // Use cheapest model's color for this provider
-      const models = PROV_MODELS[p] || [];
-      if(models.length){
-        let cheapest = models[0];
-        for(const m of models){ if(m.rate < cheapest.rate) cheapest = m; }
-        edgeColor = MODEL_COLORS[cheapest.model] || PROV_COLOR[p];
-      }
-    }
-    
+    const color = PROV_COLOR[p];
     const width = isActive?3:1.5;
     const opacity = isActive?0.9:0.4;
     
@@ -537,6 +705,158 @@ function renderEdges(snap){
 }
 
 /* ════════════════════════════════════════════════════════════════════════
+   RENDER: DASHBOARD PANELS (Cost Meter, Quota Bars, Request Flow,
+   Dispatch Gate, Measured Rates)
+   ════════════════════════════════════════════════════════════════════════ */
+
+// Providers shown in quota bars and request flow (excludes 'ours' which is disabled)
+const QUOTA_BAR_PROVIDERS = ['friend','ollama'];
+
+// Map routing decision keys to provider labels/colors
+function keyToProvider(key){
+  const m = {'friend':'friend','ollama_cloud':'ollama','ollama':'ollama','ppq':'ppq','openrouter':'openrouter'};
+  return m[key] || key;
+}
+
+function renderCostMeter(snap){
+  const costToday = snap.cost_today || 0;
+  document.getElementById('cost-today').textContent = '$' + costToday.toFixed(2);
+  
+  // Calculate burn rate from routing decisions in last hour
+  const reqs = snap.requests || [];
+  const now = Date.now()/1000;
+  const oneHourAgo = now - 3600;
+  const recentReqs = reqs.filter(r => (r.ts||0) > oneHourAgo);
+  const hourlyCost = recentReqs.reduce((s,r) => s + (r.cost||0), 0);
+  document.getElementById('burn-rate').textContent = '$' + hourlyCost.toFixed(2) + '/h';
+  
+  // Request count: from provider_distribution sum or requests length
+  const dist = snap.provider_distribution || {};
+  const totalReqs = Object.values(dist).reduce((s,v) => s + (v||0), 0) || reqs.length;
+  document.getElementById('req-count').textContent = String(totalReqs);
+  
+  const meta = snap.pricing_meta || {};
+  document.getElementById('cost-meter-subtitle').textContent = `margin: ${((meta.margin||0.266)*100).toFixed(1)}%`;
+}
+
+function renderQuotaBars(snap){
+  const body = document.getElementById('quota-bars-body');
+  let html = '';
+  for(const p of QUOTA_BAR_PROVIDERS){
+    const q = snap.quota[p] || {};
+    const usedPct = q.used_pct || 0;
+    const remaining = q.remaining || 0;
+    const resetsIn = q.resets_in_min || 0;
+    const color = PROV_COLOR[p];
+    const resetStr = resetsIn > 0 ? `${Math.floor(resetsIn/60)}h ${resetsIn%60}m` : '—';
+    
+    html += `<div class="quota-bar-row">
+      <span class="quota-bar-label" style="color:${color}">${PROV_LABEL[p]}</span>
+      <div class="quota-bar-track">
+        <div class="quota-bar-fill" style="width:${Math.min(usedPct,100)}%;background:${color}"></div>
+      </div>
+      <span class="quota-bar-info">${usedPct.toFixed(1)}% · ${fmtTok(remaining)} left · resets ${resetStr}</span>
+    </div>`;
+  }
+  body.innerHTML = html;
+}
+
+function renderRequestFlow(snap){
+  const list = document.getElementById('req-flow-list');
+  const reqs = snap.requests || [];
+  
+  if(!reqs.length){
+    list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--txt-dim)">No routing decisions yet</div>';
+    return;
+  }
+  
+  let html = '';
+  for(const r of reqs.slice(0, 20)){
+    const ts = r.ts ? new Date(r.ts * 1000).toLocaleTimeString('en-GB', {hour12:false}) : '—';
+    const key = r.key || r.provider || '—';
+    const provKey = keyToProvider(key);
+    const color = PROV_COLOR[provKey] || '#8b949e';
+    const model = r.model || '—';
+    const reason = (r.reason || '').slice(0, 60);
+    const cost = r.cost != null ? '$' + Number(r.cost).toFixed(4) : '—';
+    const tokens = r.tokens != null ? fmtTok(r.tokens) : '—';
+    
+    html += `<div class="req-row">
+      <span class="req-ts">${ts}</span>
+      <span class="req-key" style="color:${color}">${key}</span>
+      <span class="req-model">${model}</span>
+      <span class="req-reason" title="${(r.reason||'').replace(/"/g,'&quot;')}">${reason}</span>
+      <span class="req-cost">${cost}</span>
+      <span class="req-tokens">${tokens}</span>
+    </div>`;
+  }
+  list.innerHTML = html;
+}
+
+function renderDispatchGate(snap){
+  const gate = snap.dispatch_gate || snap.dispatch_gate || {};
+  const status = (gate.status || 'clear').toUpperCase();
+  const model = gate.model || '—';
+  const reason = gate.reason || '—';
+  const effRate = gate.effective_rate || gate.effective_rate_per_m || 0;
+  const margin = gate.margin || 0;
+  
+  const grid = document.getElementById('gate-grid');
+  const badgeClass = status === 'CLEAR' ? 'clear' : 'blocked';
+  
+  grid.innerHTML = `
+    <span class="gate-badge ${badgeClass}">${status}</span>
+    <div class="gate-stat">
+      <span class="gate-stat-label">Model</span>
+      <span class="gate-stat-value">${model}</span>
+    </div>
+    <div class="gate-stat">
+      <span class="gate-stat-label">Reason</span>
+      <span class="gate-stat-value" style="font-size:12px">${reason}</span>
+    </div>
+    <div class="gate-stat">
+      <span class="gate-stat-label">Effective $/M</span>
+      <span class="gate-stat-value">${fmt$(effRate)}</span>
+    </div>
+    <div class="gate-stat">
+      <span class="gate-stat-label">Margin Multiplier</span>
+      <span class="gate-stat-value">${margin.toFixed(3)}x</span>
+    </div>
+  `;
+  
+  document.getElementById('gate-subtitle').textContent = status === 'CLEAR' ? 'routing active' : 'blocked';
+}
+
+function renderMeasuredRates(snap){
+  const tbody = document.getElementById('rates-tbody');
+  const tracker = snap.real_rates_tracker || {};
+  const providers = tracker.providers || [];
+  
+  if(!providers.length){
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--txt-dim);padding:16px">No measured rates yet</td></tr>';
+    return;
+  }
+  
+  let html = '';
+  for(const p of providers){
+    const provKey = keyToProvider(p.provider || p.key || '');
+    const color = PROV_COLOR[provKey] || '#8b949e';
+    const rate = p.rate_per_m || 0;
+    const source = (p.source || p.measured || '').toLowerCase().includes('measur') ? 'measured' : 'fallback';
+    const sourceLabel = source === 'measured' ? 'MEASURED' : 'FALLBACK';
+    const windowH = p.window_hours || '—';
+    
+    html += `<tr>
+      <td style="color:${color};font-weight:700">${p.provider || p.key || '—'}</td>
+      <td>${fmt$(rate)}</td>
+      <td><span class="source-badge ${source}">${sourceLabel}</span></td>
+      <td>${windowH}</td>
+    </tr>`;
+  }
+  tbody.innerHTML = html;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
    RENDER ALL
    ════════════════════════════════════════════════════════════════════════ */
 function renderAll(){
@@ -545,6 +865,11 @@ function renderAll(){
   renderProviders(snap);
   renderConsumer(snap);
   renderEdges(snap);
+  renderCostMeter(snap);
+  renderQuotaBars(snap);
+  renderRequestFlow(snap);
+  renderDispatchGate(snap);
+  renderMeasuredRates(snap);
 }
 
 /* ════════════════════════════════════════════════════════════════════════
