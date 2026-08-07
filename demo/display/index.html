@@ -708,38 +708,32 @@ function renderConsumer(snap){
     for(const m of models) allModels.add(m.model);
   }
 
-  // For each model, find the cheapest provider at each point in time
-  // We use state.priceHist (per-provider) and compute the min price across providers for each model
-  const modelTraces = {};
-
+  // For each model, compute the cheapest provider's current price and
+  // build a time series from price history using per-model rates
   for(const model of allModels){
     // Find which providers serve this model
     const providers = PROVIDERS.filter(p =>
       (PROVIDER_MODELS[p] || []).some(m => m.model === model)
     );
-
     if(!providers.length) continue;
 
-    // Collect all timestamps across all providers for this model
-    // We need to build a time series of the cheapest price for this model
-    const timePoints = new Map(); // t -> cheapest price
-
+    // Get per-model rate from real_rates for each provider
+    const rr = (snap && snap.real_rates) || {};
+    const provRateMap = {}; // p -> rate
     for(const p of providers){
-      const hist = state.priceHist[p] || [];
-      for(const pt of hist){
-        const t = pt.t * 1000; // ms
-        const price = pt.your_price || pt.cost_basis;
-        if(price == null || isNaN(price)) continue;
-        if(!timePoints.has(t) || price < timePoints.get(t)){
-          timePoints.set(t, price);
-        }
-      }
+      const provKey = p === 'ollama' ? 'ollama_cloud' : p;
+      const modelRate = rr[provKey]?.[model]?.rate;
+      const defaultRate = rr[provKey]?._default?.rate;
+      const hardcoded = (PROVIDER_MODELS[p] || []).find(m => m.model === model)?.baseRate;
+      provRateMap[p] = modelRate ?? defaultRate ?? hardcoded ?? 0;
     }
 
-    // Also add current price
-    let currentPrice = null;
+    // Cheapest current price for this model
+    let currentPrice = Infinity;
+    let cheapestProv = null;
     for(const p of providers){
-      const baseRate = getBaseRate(snap, p);
+      const baseRate = provRateMap[p];
+      if(baseRate <= 0) continue;
       const usedPct = getQuotaUsed(snap, p);
       let price;
       if(isPayPerUse(p)){
@@ -748,38 +742,49 @@ function renderConsumer(snap){
         const w = getQuotaWindows(snap, p);
         price = superpositionPrice(baseRate, w.t5h, w.tWeekly, w.tMonthly);
       }
-      if(currentPrice == null || price < currentPrice) currentPrice = price;
+      if(price < currentPrice){ currentPrice = price; cheapestProv = p; }
+    }
+    if(currentPrice === Infinity) continue;
+
+    // Build time series from price history
+    // Use per-provider history but scale by the ratio of per-model rate to provider default rate
+    const timePoints = new Map(); // t -> cheapest price for this model
+    for(const p of providers){
+      const hist = state.priceHist[p] || [];
+      const modelRate = provRateMap[p];
+      const provDefault = rr[p === 'ollama' ? 'ollama_cloud' : p]?._default?.rate || modelRate;
+      const scale = provDefault > 0 ? modelRate / provDefault : 1;
+      for(const pt of hist){
+        const t = pt.t * 1000;
+        const basePrice = pt.your_price || pt.cost_basis;
+        if(basePrice == null || isNaN(basePrice)) continue;
+        const modelPrice = basePrice * scale;
+        if(!timePoints.has(t) || modelPrice < timePoints.get(t)){
+          timePoints.set(t, modelPrice);
+        }
+      }
     }
 
-    // Convert to sorted array
-    const sorted = [...timePoints.entries()].sort((a, b) => a[0] - b[0]);
-    if(!sorted.length && currentPrice == null) continue;
-
+    const sorted = [...timePoints.entries()].sort((a,b) => a[0] - b[0]);
     const xVals = sorted.map(e => e[0]);
     const yVals = sorted.map(e => e[1]);
-
-    // Append current price point if we have it
-    if(currentPrice != null){
-      xVals.push(Date.now());
-      yVals.push(currentPrice);
-    }
+    // Append current price
+    xVals.push(Date.now());
+    yVals.push(currentPrice);
 
     if(!xVals.length) continue;
 
     const mColor = MODEL_COLORS[model] || '#8b949e';
-
-    // Check if any provider for this model is Ollama (subscription)
-    const isOllamaModel = providers.includes('ollama');
+    const isOllamaModel = cheapestProv === 'ollama';
     const dashStyle = isOllamaModel ? 'dash' : 'solid';
     const lineWidth = isOllamaModel ? 2 : 1.5;
 
-    // Historical line for this model (cheapest across providers)
     traces.push({
       x: xVals, y: yVals,
       mode: 'lines',
       line: {color: mColor, width: lineWidth, dash: dashStyle},
-      name: isOllamaModel ? `${model} (subscription)` : model,
-      hovertemplate: `<b>${model}</b><br>%{y:$.4f}/M<br>%{x}<extra></extra>`,
+      name: isOllamaModel ? `${model} (sub)` : model,
+      hovertemplate: `<b>${model}</b><br>${fmtRate(currentPrice)}<br>%{x}<extra></extra>`,
     });
 
     // Fill area under Ollama models (subscription band)
@@ -800,7 +805,7 @@ function renderConsumer(snap){
         mode: 'markers',
         marker: {size: 7, color: mColor, symbol: 'circle', line: {color: '#fff', width: 1}},
         name: model + ' now', showlegend: false,
-        hovertemplate: `<b>${model} NOW</b><br>${fmt$(currentPrice)}/M<extra></extra>`,
+        hovertemplate: `<b>${model} NOW</b><br>${fmtRate(currentPrice)}<extra></extra>`,
       });
     }
   }
