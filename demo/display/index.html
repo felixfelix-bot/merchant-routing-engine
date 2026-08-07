@@ -987,7 +987,7 @@ function renderRequestFlow(snap){
     const color = PROV_COLOR[provKey] || '#8b949e';
     const model = r.model || '—';
     const reason = (r.reason || '').slice(0, 60);
-    const cost = r.cost != null ? '$' + Number(r.cost).toFixed(4) : '—';
+    const cost = r.cost != null ? fmtCostShort(Number(r.cost)) : '—';
     const tokens = r.tokens != null ? fmtTok(r.tokens) : '—';
     
     html += `<div class="req-row">
@@ -1024,8 +1024,8 @@ function renderDispatchGate(snap){
       <span class="gate-stat-value" style="font-size:12px">${reason}</span>
     </div>
     <div class="gate-stat">
-      <span class="gate-stat-label">Effective $/M</span>
-      <span class="gate-stat-value">${fmt$(effRate)}</span>
+      <span class="gate-stat-label">Effective Rate</span>
+      <span class="gate-stat-value">${fmtRate(effRate)}</span>
     </div>
     <div class="gate-stat">
       <span class="gate-stat-label">Margin Multiplier</span>
@@ -1077,7 +1077,7 @@ function renderMeasuredRates(snap){
       html += `<tr>
         <td style="color:${color};font-weight:700">${p.provider || p.key || '—'}</td>
         <td>—</td>
-        <td>${fmt$(rate)}</td>
+        <td>${fmtRate(rate)}</td>
         <td><span class="source-badge ${source}">${sourceLabel}</span></td>
         <td>${windowH}</td>
       </tr>`;
@@ -1093,7 +1093,12 @@ function renderMeasuredRates(snap){
       <td style="color:${r.color};font-weight:700">${r.provider}</td>
       <td>${r.model === '_default' ? '<i style="color:#8b949e">default</i>' : r.model}</td>
       <td>${fmtRate(r.rate)}</td>
-
+      <td><span class="source-badge ${r.source}">${sourceLabel}</span></td>
+      <td>${r.window}</td>
+    </tr>`;
+  }
+  tbody.innerHTML = html;
+}
 /* ════════════════════════════════════════════════════════════════════════
    RENDER ALL
    ════════════════════════════════════════════════════════════════════════ */
