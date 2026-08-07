@@ -140,7 +140,7 @@
     <div class="card-header">
       <div style="display:flex;align-items:center;gap:8px">
         <span style="font-size:16px">🧑</span>
-        <span class="provider-name" style="font-size:14px">CONSUMER — Price / M over time</span>
+        <span class="provider-name" style="font-size:14px">CONSUMER — Cheapest Price / M per model over time</span>
       </div>
       <span class="provider-rate" id="consumer-rate">—</span>
     </div>
@@ -537,7 +537,7 @@ function renderProviders(snap){
         rates = modelRates.map(r => superpositionPrice(r, w.t5h, w.tWeekly, w.tMonthly));
       }
       const minR = Math.min(...rates), maxR = Math.max(...rates);
-      rateEl.textContent = minR === maxR ? `${fmt$(minR)}/M` : `${fmt$(minR)}–${fmt$(maxR)}/M`;
+      rateEl.textContent = minR === maxR ? fmtRate(minR) : fmtRateShort(minR) + '–' + fmtRateShort(maxR) + (displayUnit==='sats' ? ' sats/M' : '/M');
     }
 
     // Status
@@ -565,7 +565,9 @@ function renderProviders(snap){
       const mRate = modelRates[mi]; // real per-model rate from snap.real_rates
 
       if(ppu){
-        // Flat line for pay-per-use
+        // Flat line for pay-per-use — distinct dash pattern per model
+        const ppuDashPatterns = ['solid', 'dash', 'dot', 'dashdot'];
+        const ppuDash = ppuDashPatterns[mi % ppuDashPatterns.length];
         const xVals = [], yVals = [];
         for(let pct=0; pct<=100; pct+=2){
           xVals.push(pct);
@@ -573,7 +575,7 @@ function renderProviders(snap){
         }
         traces.push({
           x:xVals, y:yVals, mode:'lines',
-          line:{color:mColor, width:1.5, dash: mi>0 ? 'dot' : 'solid'},
+          line:{color:mColor, width:1.5, dash: ppuDash},
           name:m.model, hovertemplate:`<b>${m.model}</b><br>flat rate<br>${fmt$(mRate)}/M<extra></extra>`,
           showlegend:true,
         });
@@ -600,6 +602,8 @@ function renderProviders(snap){
         }
 
         // ── Bold total curve (superposition of all 3 windows) ──
+        const dashPatterns = ['solid', 'dash', 'dot', 'dashdot'];
+        const dashStyle = dashPatterns[mi % dashPatterns.length];
         const xVals = [], yVals = [];
         for(let pct=0; pct<=99; pct+=1){
           xVals.push(pct);
@@ -610,12 +614,13 @@ function renderProviders(snap){
         const currentPrice = superpositionPrice(mRate, w.t5h, w.tWeekly, w.tMonthly);
         traces.push({
           x:xVals, y:yVals, mode:'lines',
-          line:{color:mColor, width:2.5, dash: mi>0 ? 'dash' : 'solid'},
+          line:{color:mColor, width:2.5, dash: dashStyle},
           name:m.model, hovertemplate:`<b>${m.model}</b><br>%{x:.0f}% quota sweep<br>now: ${fmt$(currentPrice)}/M<extra></extra>`,
           showlegend:true,
         });
 
         // ── Fill area under total curve 0→max(usedPct, 5) — always visible ──
+        // Always show at least 5% fill so the colored area is visible even at 0% usage
         if(mi === 0){
           const fillEnd = Math.max(usedPct, 5);
           const fillX = [], fillY = [];
@@ -631,7 +636,7 @@ function renderProviders(snap){
           }
           traces.push({
             x:fillX, y:fillY, mode:'none', fill:'tozeroy',
-            fillcolor:provColor+'22', line:{width:0}, name:'Used quota', hoverinfo:'skip', showlegend:false,
+            fillcolor:provColor+'44', line:{width:0}, name:'Used quota', hoverinfo:'skip', showlegend:false,
           });
         }
 
@@ -645,26 +650,29 @@ function renderProviders(snap){
       }
     }
 
-    // ── 3 vertical window markers with labels (for quota providers) ──
+    // ── 3 vertical window markers with labels at staggered heights (for quota providers) ──
     if(!ppu){
       const maxRate = Math.max(...modelRates.map(r => superpositionPrice(r, w.t5h, w.tWeekly, w.tMonthly)));
       const winPcts = [w.t5h * 100, w.tWeekly * 100, w.tMonthly * 100];
       const winLabels = ['5h', '7d', '30d'];
       const winColors = ['rgba(88,166,255,0.5)', 'rgba(188,140,255,0.5)', 'rgba(240,136,62,0.5)'];
+      const winColorsSolid = ['rgba(88,166,255,1)', 'rgba(188,140,255,1)', 'rgba(240,136,62,1)'];
+      // Stagger label heights to avoid overlap
+      const labelHeights = [maxRate * 1.35, maxRate * 1.2, maxRate * 1.05];
 
       for(let wi=0; wi<3; wi++){
         const pct = winPcts[wi];
         // Vertical line
         traces.push({
-          x:[pct, pct], y:[0.001, maxRate * 1.1],
+          x:[pct, pct], y:[0.001, maxRate * 1.0],
           mode:'lines', line:{color:winColors[wi], width:1.5, dash:'dashdot'},
           hoverinfo:'skip', showlegend:false,
         });
-        // Label annotation via a text trace
+        // Label annotation via a text trace at staggered height
         traces.push({
-          x:[pct], y:[maxRate * 1.15],
+          x:[pct], y:[labelHeights[wi]],
           mode:'text', text:[`${winLabels[wi]}: ${pct.toFixed(1)}%`],
-          textfont:{size:8, color:winColors[wi].replace('0.5','1')},
+          textfont:{size:8, color:winColorsSolid[wi]},
           hoverinfo:'skip', showlegend:false,
         });
       }
@@ -689,58 +697,136 @@ function renderProviders(snap){
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   RENDER: CONSUMER CHART (Price/M over time per provider)
+   RENDER: CONSUMER CHART (Cheapest Price/M per MODEL over time)
    ════════════════════════════════════════════════════════════════════════ */
 function renderConsumer(snap){
   const traces=[];
-  
-  for(const p of PROVIDERS){
-    const hist = state.priceHist[p] || [];
-    if(!hist.length) continue;
-    
-    const baseRate = getBaseRate(snap, p);
-    const usedPct = getQuotaUsed(snap, p);
-    const currentPrice = isPayPerUse(p) ? baseRate : (() => {
-      const w = getQuotaWindows(snap, p);
-      return superpositionPrice(baseRate, w.t5h, w.tWeekly, w.tMonthly);
-    })();
-    
-    // Historical line
-    traces.push({
-      x: hist.map(pt=>pt.t*1000), y: hist.map(pt=>pt.your_price||pt.cost_basis),
-      mode:'lines', line:{color:PROV_COLOR[p],width:1.5}, name:PROV_LABEL[p],
-      hovertemplate:`<b>${PROV_LABEL[p]}</b><br>%{y:$.4f}/M<br>%{x}<extra></extra>`,
-    });
-    
-    // Current price point
-    traces.push({
-      x:[Date.now()], y:[currentPrice], mode:'markers',
-      marker:{size:8,color:PROV_COLOR[p],symbol:'circle',line:{color:'#fff',width:1}},
-      name:PROV_LABEL[p]+' now', showlegend:false,
-      hovertemplate:`<b>${PROV_LABEL[p]} NOW</b><br>${fmt$(currentPrice)}/M<extra></extra>`,
-    });
+
+  // Collect all unique model names across all providers
+  const allModels = new Set();
+  for(const models of Object.values(PROVIDER_MODELS)){
+    for(const m of models) allModels.add(m.model);
   }
-  
-  const layout={
-    paper_bgcolor:PLOT_BG, plot_bgcolor:PLOT_BG,
-    margin:{l:50,r:20,t:10,b:35},
-    showlegend:true,
-    legend:{orientation:'h',y:-0.15,font:{size:10,color:'#8b949e'},
-      traceorder:'normal',x:0.5,xanchor:'center'},
-    xaxis:{title:'',gridcolor:PLOT_GRID,zeroline:false,
-      tickfont:{size:9,color:'#8b949e'},type:'date',tickformat:'%m/%d'},
-    yaxis:{title:'Price / M ($)',gridcolor:PLOT_GRID,zeroline:false,
-      tickfont:{size:9,color:'#8b949e'},type:'log',
-      tickformat:'$.4f',automargin:true},
-    font:{family:'SF Mono,monospace',size:10,color:'#8b949e'},
+
+  // For each model, find the cheapest provider at each point in time
+  // We use state.priceHist (per-provider) and compute the min price across providers for each model
+  const modelTraces = {};
+
+  for(const model of allModels){
+    // Find which providers serve this model
+    const providers = PROVIDERS.filter(p =>
+      (PROVIDER_MODELS[p] || []).some(m => m.model === model)
+    );
+
+    if(!providers.length) continue;
+
+    // Collect all timestamps across all providers for this model
+    // We need to build a time series of the cheapest price for this model
+    const timePoints = new Map(); // t -> cheapest price
+
+    for(const p of providers){
+      const hist = state.priceHist[p] || [];
+      for(const pt of hist){
+        const t = pt.t * 1000; // ms
+        const price = pt.your_price || pt.cost_basis;
+        if(price == null || isNaN(price)) continue;
+        if(!timePoints.has(t) || price < timePoints.get(t)){
+          timePoints.set(t, price);
+        }
+      }
+    }
+
+    // Also add current price
+    let currentPrice = null;
+    for(const p of providers){
+      const baseRate = getBaseRate(snap, p);
+      const usedPct = getQuotaUsed(snap, p);
+      let price;
+      if(isPayPerUse(p)){
+        price = baseRate;
+      } else {
+        const w = getQuotaWindows(snap, p);
+        price = superpositionPrice(baseRate, w.t5h, w.tWeekly, w.tMonthly);
+      }
+      if(currentPrice == null || price < currentPrice) currentPrice = price;
+    }
+
+    // Convert to sorted array
+    const sorted = [...timePoints.entries()].sort((a, b) => a[0] - b[0]);
+    if(!sorted.length && currentPrice == null) continue;
+
+    const xVals = sorted.map(e => e[0]);
+    const yVals = sorted.map(e => e[1]);
+
+    // Append current price point if we have it
+    if(currentPrice != null){
+      xVals.push(Date.now());
+      yVals.push(currentPrice);
+    }
+
+    if(!xVals.length) continue;
+
+    const mColor = MODEL_COLORS[model] || '#8b949e';
+
+    // Check if any provider for this model is Ollama (subscription)
+    const isOllamaModel = providers.includes('ollama');
+    const dashStyle = isOllamaModel ? 'dash' : 'solid';
+    const lineWidth = isOllamaModel ? 2 : 1.5;
+
+    // Historical line for this model (cheapest across providers)
+    traces.push({
+      x: xVals, y: yVals,
+      mode: 'lines',
+      line: {color: mColor, width: lineWidth, dash: dashStyle},
+      name: isOllamaModel ? `${model} (subscription)` : model,
+      hovertemplate: `<b>${model}</b><br>%{y:$.4f}/M<br>%{x}<extra></extra>`,
+    });
+
+    // Fill area under Ollama models (subscription band)
+    if(isOllamaModel){
+      traces.push({
+        x: xVals, y: yVals,
+        mode: 'none', fill: 'tonexty',
+        fillcolor: mColor + '15',
+        line: {width: 0},
+        hoverinfo: 'skip', showlegend: false,
+      });
+    }
+
+    // Current price marker
+    if(currentPrice != null){
+      traces.push({
+        x: [Date.now()], y: [currentPrice],
+        mode: 'markers',
+        marker: {size: 7, color: mColor, symbol: 'circle', line: {color: '#fff', width: 1}},
+        name: model + ' now', showlegend: false,
+        hovertemplate: `<b>${model} NOW</b><br>${fmt$(currentPrice)}/M<extra></extra>`,
+      });
+    }
+  }
+
+  const yTitle = displayUnit === 'sats' ? 'Price / M (sats)' : 'Price / M ($)';
+  const yTickFormat = displayUnit === 'sats' ? '' : '$.4f';
+  const layout = {
+    paper_bgcolor: PLOT_BG, plot_bgcolor: PLOT_BG,
+    margin: {l: 50, r: 20, t: 10, b: 35},
+    showlegend: true,
+    legend: {orientation: 'h', y: -0.15, font: {size: 10, color: '#8b949e'},
+      traceorder: 'normal', x: 0.5, xanchor: 'center'},
+    xaxis: {title: '', gridcolor: PLOT_GRID, zeroline: false,
+      tickfont: {size: 9, color: '#8b949e'}, type: 'date', tickformat: '%m/%d'},
+    yaxis: {title: yTitle, gridcolor: PLOT_GRID, zeroline: false,
+      tickfont: {size: 9, color: '#8b949e'}, type: 'log',
+      tickformat: yTickFormat, automargin: true},
+    font: {family: 'SF Mono,monospace', size: 10, color: '#8b949e'},
   };
-  
-  Plotly.react('consumer-chart', traces, layout, {displayModeBar:false,responsive:true});
-  
+
+  Plotly.react('consumer-chart', traces, layout, {displayModeBar: false, responsive: true});
+
   // Update consumer rate display
-  const meta = snap.pricing_meta||{};
-  const avgRate = getBaseRate(snap,'friend') * (1+(meta.margin||0.266));
-  document.getElementById('consumer-rate').textContent = `Avg: ${fmt$(avgRate)}/M · Spend today: ${fmt$(snap.cost_today||0,2)}`;
+  const meta = snap.pricing_meta || {};
+  const avgRate = getBaseRate(snap, 'friend') * (1 + (meta.margin || 0.266));
+  document.getElementById('consumer-rate').textContent = `Avg: ${fmtRate(avgRate)} · Spend today: ${fmtCost(snap.cost_today || 0, 2)}`;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -830,15 +916,11 @@ function keyToProvider(key){
 
 function renderCostMeter(snap){
   const costToday = snap.cost_today || 0;
-  document.getElementById('cost-today').textContent = '$' + costToday.toFixed(2);
+  document.getElementById('cost-today').textContent = fmtCost(costToday, 2);
   
-  // Calculate burn rate from routing decisions in last hour
-  const reqs = snap.requests || [];
-  const now = Date.now()/1000;
-  const oneHourAgo = now - 3600;
-  const recentReqs = reqs.filter(r => (r.ts||0) > oneHourAgo);
-  const hourlyCost = recentReqs.reduce((s,r) => s + (r.cost||0), 0);
-  document.getElementById('burn-rate').textContent = '$' + hourlyCost.toFixed(2) + '/h';
+  // Use cost_hour from server (computeCostToday / hours elapsed) — not per-request sum
+  const costHour = snap.cost_hour || 0;
+  document.getElementById('burn-rate').textContent = fmtCostShort(costHour, 4) + (displayUnit==='sats' ? ' sats/h' : '/h');
   
   // Request count: from provider_distribution sum or requests length
   const dist = snap.provider_distribution || {};
@@ -1010,13 +1092,7 @@ function renderMeasuredRates(snap){
     html += `<tr>
       <td style="color:${r.color};font-weight:700">${r.provider}</td>
       <td>${r.model === '_default' ? '<i style="color:#8b949e">default</i>' : r.model}</td>
-      <td>${fmt$(r.rate)}</td>
-      <td><span class="source-badge ${r.source}">${sourceLabel}</span></td>
-      <td>${r.window}</td>
-    </tr>`;
-  }
-  tbody.innerHTML = html;
-}
+      <td>${fmtRate(r.rate)}</td>
 
 /* ════════════════════════════════════════════════════════════════════════
    RENDER ALL
@@ -1164,6 +1240,17 @@ async function init(){
   // Redraw edges on window resize
   window.addEventListener('resize',()=>{
     if(state.snapshot) renderEdges(state.snapshot);
+  });
+
+  // SATS/USD toggle
+  const toggleBtn = document.getElementById('unit-toggle');
+  toggleBtn.addEventListener('click', ()=>{
+    displayUnit = displayUnit === 'sats' ? 'usd' : 'sats';
+    toggleBtn.textContent = displayUnit === 'sats' ? 'SATS' : 'USD';
+    // Update rates table header
+    const hdr = document.getElementById('rates-header-unit');
+    if(hdr) hdr.textContent = displayUnit === 'sats' ? 'Rate (sats/M)' : 'Rate ($/M)';
+    if(state.snapshot) renderAll();
   });
 }
 init();

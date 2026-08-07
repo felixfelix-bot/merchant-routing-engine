@@ -119,6 +119,7 @@
 <div class="header">
   <div class="header-title">⚡ Merchant Routing Engine — Live Pricing</div>
   <div class="header-right">
+    <button id="unit-toggle" class="badge live" style="cursor:pointer;border:none;outline:none;font-size:11px;font-weight:700;padding:4px 10px;border-radius:4px;letter-spacing:.5px">SATS</button>
     <span class="badge connecting" id="conn-badge"><span id="conn-text">connecting…</span></span>
     <span class="clock" id="time-text">--:--:--</span>
   </div>
@@ -156,9 +157,9 @@
     </div>
     <div class="dash-body">
       <div class="cost-meter" id="cost-meter-body">
-        <div class="cost-big" id="cost-today">$0.00</div>
+        <div class="cost-big" id="cost-today">—</div>
         <div class="cost-stat">
-          <span class="cost-stat-label">$/hour burn</span>
+          <span class="cost-stat-label" id="burn-label">burn/hour</span>
           <span class="cost-stat-value" id="burn-rate">—</span>
         </div>
         <div class="cost-stat">
@@ -209,7 +210,7 @@
     <div class="dash-body" style="padding:0">
       <table class="rates-table" id="rates-table">
         <thead>
-          <tr><th>Provider</th><th>Model</th><th>Rate $/M</th><th>Source</th><th>Window</th></tr>
+          <tr><th>Provider</th><th>Model</th><th id="rates-header-unit">Rate (sats/M)</th><th>Source</th><th>Window</th></tr>
         </thead>
         <tbody id="rates-tbody"></tbody>
       </table>
@@ -320,6 +321,54 @@ for(const models of Object.values(PROVIDER_MODELS)){
    ════════════════════════════════════════════════════════════════════════ */
 function fmt$(n,dp=4){if(n==null||isNaN(n))return'—';if(n>=1)return'$'+n.toFixed(2);return'$'+n.toFixed(dp);}
 function fmtTok(n){if(n==null||isNaN(n))return'—';n=Number(n);if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(Math.round(n));}
+
+// ── SATS / USD toggle ──────────────────────────────────────────────────
+const BTC_PRICE_USD = 100000; // CFG.btcPriceUsd from server
+let displayUnit = 'sats'; // default to SATS
+function usdToSats(usd){ return Math.round(usd * 1e8 / BTC_PRICE_USD); } // = usd * 1000 at $100K
+function fmtSats(n){
+  if(n==null||isNaN(n))return'—';
+  n = Math.round(n);
+  if(n >= 1e6) return (n/1e6).toFixed(2)+'M';
+  if(n >= 1e4) return n.toLocaleString();
+  if(n >= 100) return n.toLocaleString();
+  return n.toFixed(0);
+}
+// fmtCost: converts USD amount to display unit (SATS or USD)
+function fmtCost(usd, dp=4){
+  if(usd==null||isNaN(usd))return'—';
+  if(displayUnit==='sats'){
+    const s = usdToSats(usd);
+    return fmtSats(s) + ' sats';
+  }
+  return fmt$(usd, dp);
+}
+// fmtCostShort: like fmtCost but no unit suffix (for compact displays)
+function fmtCostShort(usd, dp=4){
+  if(usd==null||isNaN(usd))return'—';
+  if(displayUnit==='sats'){
+    return fmtSats(usdToSats(usd));
+  }
+  return fmt$(usd, dp);
+}
+// fmtRate: converts $/M to display unit rate
+function fmtRate(usdPerM, dp=4){
+  if(usdPerM==null||isNaN(usdPerM))return'—';
+  if(displayUnit==='sats'){
+    return fmtSats(usdToSats(usdPerM)) + ' sats/M';
+  }
+  return fmt$(usdPerM, dp) + '/M';
+}
+// fmtRateShort: rate without unit suffix
+function fmtRateShort(usdPerM, dp=4){
+  if(usdPerM==null||isNaN(usdPerM))return'—';
+  if(displayUnit==='sats'){
+    return fmtSats(usdToSats(usdPerM));
+  }
+  return fmt$(usdPerM, dp);
+}
+function unitLabel(){ return displayUnit==='sats' ? 'sats' : '$'; }
+function rateSuffix(){ return displayUnit==='sats' ? 'sats/M' : '/M'; }
 function setConn(mode){
   const b=document.getElementById('conn-badge'),t=document.getElementById('conn-text');
   b.className='badge';
@@ -342,6 +391,8 @@ function normalizeSnapshot(raw){
     requests:raw.routing_decisions||raw.requests||[],
     provider_distribution:raw.provider_dist||raw.provider_distribution||{},
     cost_today:raw.cost_today??0,
+    cost_hour:raw.cost_hour??0,
+    btc_price_usd:raw.btc_price_usd||100000,
     real_rates_tracker:raw.real_rates_tracker||null,
     real_rates:raw.real_rates||{},
     dispatch_gate:raw.dispatch_gate||null,
@@ -486,7 +537,7 @@ function renderProviders(snap){
         rates = modelRates.map(r => superpositionPrice(r, w.t5h, w.tWeekly, w.tMonthly));
       }
       const minR = Math.min(...rates), maxR = Math.max(...rates);
-      rateEl.textContent = minR === maxR ? `${fmt$(minR)}/M` : `${fmt$(minR)}–${fmt$(maxR)}/M`;
+      rateEl.textContent = minR === maxR ? fmtRate(minR) : fmtRateShort(minR) + '–' + fmtRateShort(maxR) + (displayUnit==='sats' ? ' sats/M' : '/M');
     }
 
     // Status
@@ -538,7 +589,7 @@ function renderProviders(snap){
           for(let pct=0; pct<=99; pct+=1){
             fxVals.push(pct);
             // Sweep this window from 0 to its current value
-            fyVals.push(singleWindowPrice(mRate, (pct/100) * winTs[wi] * 100 / 100));
+            fyVals.push(singleWindowPrice(mRate, (pct/100) * winTs[wi] * 100 / 100) * SATS_PER_USD);
           }
           traces.push({
             x:fxVals, y:fyVals, mode:'lines',
@@ -554,7 +605,7 @@ function renderProviders(snap){
           xVals.push(pct);
           // Sweep all three windows proportionally from 0 to current values
           const scaleT = pct / 100;
-          yVals.push(superpositionPrice(mRate, w.t5h * scaleT, w.tWeekly * scaleT, w.tMonthly * scaleT));
+          yVals.push(superpositionPrice(mRate, w.t5h * scaleT, w.tWeekly * scaleT, w.tMonthly * scaleT) * SATS_PER_USD);
         }
         const currentPrice = superpositionPrice(mRate, w.t5h, w.tWeekly, w.tMonthly);
         traces.push({
@@ -571,12 +622,12 @@ function renderProviders(snap){
           for(let pct=0; pct<=Math.min(fillEnd,99); pct+=1){
             fillX.push(pct);
             const scaleT = pct / 100;
-            fillY.push(superpositionPrice(mRate, w.t5h * scaleT, w.tWeekly * scaleT, w.tMonthly * scaleT));
+            fillY.push(superpositionPrice(mRate, w.t5h * scaleT, w.tWeekly * scaleT, w.tMonthly * scaleT) * SATS_PER_USD);
           }
           // Ensure we always have at least a small visible area
           if(fillX.length < 2){
             fillX.push(0, 5);
-            fillY.push(mRate, superpositionPrice(mRate, w.t5h*0.05, w.tWeekly*0.05, w.tMonthly*0.05));
+            fillY.push(mRate * SATS_PER_USD, superpositionPrice(mRate, w.t5h*0.05, w.tWeekly*0.05, w.tMonthly*0.05) * SATS_PER_USD);
           }
           traces.push({
             x:fillX, y:fillY, mode:'none', fill:'tozeroy',
@@ -586,7 +637,7 @@ function renderProviders(snap){
 
         // ── Current position marker (at max window usage) ──
         traces.push({
-          x:[usedPct], y:[currentPrice], mode:'markers',
+          x:[usedPct], y:[currentPrice * SATS_PER_USD], mode:'markers',
           marker:{size:7, color:mColor, line:{color:'#fff', width:1}},
           name:m.model+' now', showlegend:false,
           hovertemplate:`<b>${m.model}</b><br>max ${usedPct.toFixed(1)}% used<br>${fmt$(currentPrice)}/M<extra></extra>`,
@@ -596,7 +647,7 @@ function renderProviders(snap){
 
     // ── 3 vertical window markers with labels (for quota providers) ──
     if(!ppu){
-      const maxRate = Math.max(...modelRates.map(r => superpositionPrice(r, w.t5h, w.tWeekly, w.tMonthly)));
+      const maxRate = Math.max(...modelRates.map(r => superpositionPrice(r, w.t5h, w.tWeekly, w.tMonthly))) * SATS_PER_USD;
       const winPcts = [w.t5h * 100, w.tWeekly * 100, w.tMonthly * 100];
       const winLabels = ['5h', '7d', '30d'];
       const winColors = ['rgba(88,166,255,0.5)', 'rgba(188,140,255,0.5)', 'rgba(240,136,62,0.5)'];
@@ -642,90 +693,31 @@ function renderProviders(snap){
    ════════════════════════════════════════════════════════════════════════ */
 function renderConsumer(snap){
   const traces=[];
-  const meta = snap.pricing_meta||{};
-  const ollamaRates = meta.ollama_model_rates || {};
   
-  // Build per-model price history from provider price history
-  // Each model's cheapest rate = min across all providers that serve it
-  const modelData = {}; // model → [{x, y, isOllama}]
-  
-  // Map provider → models
-  const provModels = {};
   for(const p of PROVIDERS){
-    const models = PROVIDER_MODELS[p] || [];
-    for(const m of models){
-      if(!provModels[m.model]) provModels[m.model] = [];
-      provModels[m.model].push(p);
-    }
-  }
-  
-  // For each model, compute cheapest rate at each timestamp
-  const allModels = Object.keys(provModels).sort();
-  
-  for(const model of allModels){
-    const color = MODEL_COLORS[model] || '#8b949e';
-    const providers = provModels[model];
+    const hist = state.priceHist[p] || [];
+    if(!hist.length) continue;
     
-    // Get rate for this model from each provider
-    // Use ollama_model_rates for ollama models, PROVIDER_MODELS rates otherwise
-    function getModelRate(prov, mdl){
-      if(prov === 'ollama') return ollamaRates[mdl] || 0.024;
-      // For other providers, use the baseRate from PROVIDER_MODELS
-      const models = PROVIDER_MODELS[prov] || [];
-      const entry = models.find(m => m.model === mdl);
-      return entry ? entry.baseRate : 0.02;
-    }
+    const baseRate = getBaseRate(snap, p);
+    const usedPct = getQuotaUsed(snap, p);
+    const currentPrice = isPayPerUse(p) ? baseRate : (() => {
+      const w = getQuotaWindows(snap, p);
+      return superpositionPrice(baseRate, w.t5h, w.tWeekly, w.tMonthly);
+    })();
     
-    // Find cheapest provider for this model
-    let cheapestProv = null;
-    let cheapestRate = Infinity;
-    for(const p of providers){
-      const r = getModelRate(p, model);
-      if(r < cheapestRate){ cheapestRate = r; cheapestProv = p; }
-    }
-    
-    if(!cheapestProv || cheapestRate === Infinity) continue;
-    
-    const isOllama = cheapestProv === 'ollama';
-    const hist = state.priceHist[cheapestProv] || [];
-    
-    // Build time series: use provider's price history, mapped to this model's rate
-    const x = [], y = [];
-    if(hist.length){
-      for(const pt of hist){
-        x.push(pt.t * 1000);
-        // Apply quota pressure if not pay-per-use
-        if(isPayPerUse(cheapestProv)){
-          y.push(cheapestRate);
-        } else {
-          const w = getQuotaWindows(snap, cheapestProv);
-          y.push(superpositionPrice(cheapestRate, w.t5h, w.tWeekly, w.tMonthly));
-        }
-      }
-    } else {
-      // Seed with current rate
-      x.push(Date.now() - 3600000);
-      x.push(Date.now());
-      const w = getQuotaWindows(snap, cheapestProv);
-      const price = isPayPerUse(cheapestProv) ? cheapestRate : superpositionPrice(cheapestRate, w.t5h, w.tWeekly, w.tMonthly);
-      y.push(price);
-      y.push(price);
-    }
-    
+    // Historical line
     traces.push({
-      x, y, mode:'lines',
-      line:{color:color, width:2, dash: isOllama ? 'dash' : 'solid'},
-      name: model,
-      hovertemplate:`<b>${model}</b><br>%{y:$.4f}/M<br>%{x}<extra></extra>`,
+      x: hist.map(pt=>pt.t*1000), y: hist.map(pt=>(pt.your_price||pt.cost_basis)*SATS_PER_USD),
+      mode:'lines', line:{color:PROV_COLOR[p],width:1.5}, name:PROV_LABEL[p],
+      hovertemplate:`<b>${PROV_LABEL[p]}</b><br>%{y:d} SAT/M<br>%{x}<extra></extra>`,
     });
     
-    // Current price marker
-    const w = getQuotaWindows(snap, cheapestProv);
-    const currentPrice = isPayPerUse(cheapestProv) ? cheapestRate : superpositionPrice(cheapestRate, w.t5h, w.tWeekly, w.tMonthly);
+    // Current price point
     traces.push({
-      x:[Date.now()], y:[currentPrice], mode:'markers',
-      marker:{size:7, color:color, line:{color:'#fff', width:1}},
-      name: model+' now', showlegend:false,
+      x:[Date.now()], y:[currentPrice * SATS_PER_USD], mode:'markers',
+      marker:{size:8,color:PROV_COLOR[p],symbol:'circle',line:{color:'#fff',width:1}},
+      name:PROV_LABEL[p]+' now', showlegend:false,
+      hovertemplate:`<b>${PROV_LABEL[p]} NOW</b><br>${fmtSatsShort(currentPrice)} SAT/M<extra></extra>`,
     });
   }
   
@@ -741,17 +733,12 @@ function renderConsumer(snap){
       tickfont:{size:9,color:'#8b949e'},type:'log',
       tickformat:'$.4f',automargin:true},
     font:{family:'SF Mono,monospace',size:10,color:'#8b949e'},
-    annotations:[{
-      text:'dashed = subscription (Ollama)',
-      xref:'paper',yref:'paper',x:0.98,y:0.98,
-      showarrow:false,font:{size:8,color:'#8b949e'},
-      xanchor:'right',yanchor:'top',
-    }],
   };
   
   Plotly.react('consumer-chart', traces, layout, {displayModeBar:false,responsive:true});
   
   // Update consumer rate display
+  const meta = snap.pricing_meta||{};
   const avgRate = getBaseRate(snap,'friend') * (1+(meta.margin||0.266));
   document.getElementById('consumer-rate').textContent = `Avg: ${fmt$(avgRate)}/M · Spend today: ${fmt$(snap.cost_today||0,2)}`;
 }
@@ -843,15 +830,11 @@ function keyToProvider(key){
 
 function renderCostMeter(snap){
   const costToday = snap.cost_today || 0;
-  document.getElementById('cost-today').textContent = '$' + costToday.toFixed(2);
+  document.getElementById('cost-today').textContent = fmtCost(costToday, 2);
   
-  // Calculate burn rate from routing decisions in last hour
-  const reqs = snap.requests || [];
-  const now = Date.now()/1000;
-  const oneHourAgo = now - 3600;
-  const recentReqs = reqs.filter(r => (r.ts||0) > oneHourAgo);
-  const hourlyCost = recentReqs.reduce((s,r) => s + (r.cost||0), 0);
-  document.getElementById('burn-rate').textContent = '$' + hourlyCost.toFixed(2) + '/h';
+  // Use cost_hour from server (computeCostToday / hours elapsed) — not per-request sum
+  const costHour = snap.cost_hour || 0;
+  document.getElementById('burn-rate').textContent = fmtCostShort(costHour, 4) + (displayUnit==='sats' ? ' sats/h' : '/h');
   
   // Request count: from provider_distribution sum or requests length
   const dist = snap.provider_distribution || {};
