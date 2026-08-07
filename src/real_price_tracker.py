@@ -458,6 +458,127 @@ def _ollama_api_rate(model: str | None) -> float | None:
     return rate
 
 
+# ── Balance-delta measured rate (ppq/openrouter) ──────────────────────────────
+
+
+def get_balance_delta_rate(
+    provider: str,
+    model: str | None = None,
+    *,
+    usage_db_path: str | None = None,
+    burn_db_path: str | None = None,
+    _now: float | None = None,
+) -> float | None:
+    """Measure $/M from credit-balance depletion.
+
+    For providers (PPQ, OpenRouter) whose APIs do not return per-call cost,
+    we compute the effective rate from how much credit was consumed vs tokens
+    routed through them::
+
+        rate = credits_consumed / total_tokens * 1e6   ($/M)
+
+    Reads the ``provider_balances`` table in api_burn.db (first & last rows)
+    for credit consumption, and ``api_calls.total_tokens`` for volume.
+
+    Returns ``None`` on any error, insufficient data, or when ``provider``
+    is not in :data:`BALANCE_DELTA_PROVIDERS`. Cached for 5 min.
+    """
+    if provider not in BALANCE_DELTA_PROVIDERS:
+        return None
+
+    now = _now if _now is not None else time.time()
+    usage_db = _resolve_db(usage_db_path)
+    burn_db = burn_db_path or DEFAULT_BURN_DB_PATH
+
+    cache_key = (provider, usage_db, burn_db)
+    with _cache_lock:
+        cached = _balance_delta_cache.get(cache_key)
+    if cached is not None:
+        value, computed_at = cached
+        if (now - computed_at) < CACHE_TTL_SECONDS:
+            return value
+
+    try:
+        bconn = sqlite3.connect(burn_db, timeout=2)
+        try:
+            first = bconn.execute(
+                "SELECT collected_at, limit_remaining, usage, limit_credits "
+                "FROM provider_balances WHERE provider=? "
+                "ORDER BY collected_at ASC LIMIT 1",
+                (provider,),
+            ).fetchone()
+            last = bconn.execute(
+                "SELECT collected_at, limit_remaining, usage, limit_credits "
+                "FROM provider_balances WHERE provider=? "
+                "ORDER BY collected_at DESC LIMIT 1",
+                (provider,),
+            ).fetchone()
+        finally:
+            bconn.close()
+
+        if not first or not last or first[0] == last[0]:
+            _balance_delta_cache[cache_key] = (None, now)
+            return None
+
+        # Total credits consumed. Use MAX(usage) across all snapshots —
+        # handles both monotonic depletion (PPQ: credits only go down) and
+        # periodic resets (OpenRouter: daily limit resets, usage column
+        # returns to 0). MAX captures the peak all-time spend.
+        max_row = bconn.execute(
+            "SELECT MAX(usage) FROM provider_balances WHERE provider=?",
+            (provider,),
+        ).fetchone()
+        credits_used = float(max_row[0] or 0) if max_row else 0.0
+        if credits_used <= 0:
+            # Fall back to limit_remaining delta
+            credits_used = abs(float(first[1] or 0) - float(last[1] or 0))
+        if credits_used <= 0:
+            _balance_delta_cache[cache_key] = (None, now)
+            return None
+
+        # Total tokens for this provider (all-time — balance delta covers
+        # entire account lifetime, not just since collector started)
+        uconn = sqlite3.connect(usage_db, timeout=2)
+        try:
+            if provider == "ppq":
+                row = uconn.execute(
+                    "SELECT COALESCE(SUM(total_tokens), 0) FROM api_calls "
+                    "WHERE ppq_hit=1",
+                ).fetchone()
+            else:
+                row = uconn.execute(
+                    "SELECT COALESCE(SUM(total_tokens), 0) FROM api_calls "
+                    "WHERE key_name=?",
+                    (provider,),
+                ).fetchone()
+        finally:
+            uconn.close()
+
+        total_tokens = float(row[0] or 0)
+        if total_tokens <= 0:
+            _balance_delta_cache[cache_key] = (None, now)
+            return None
+
+        rate_per_m = (credits_used / total_tokens) * 1e6
+        if rate_per_m != rate_per_m or rate_per_m < 0:
+            _balance_delta_cache[cache_key] = (None, now)
+            return None
+
+        with _cache_lock:
+            _balance_delta_cache[cache_key] = (rate_per_m, now)
+
+        _log.info(
+            "real_price_tracker: %s balance-delta rate $%.6g/M "
+            "(credits_used=$%.4f, tokens=%.1fM)",
+            provider, rate_per_m, credits_used, total_tokens / 1e6,
+        )
+        return rate_per_m
+    except Exception:
+        _log.debug("real_price_tracker: balance-delta query failed", exc_info=True)
+        _balance_delta_cache[cache_key] = (None, now)
+        return None
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 
@@ -1313,9 +1434,21 @@ def get_rate_with_fallback(
     Every non-measured result is logged so operators can see where real data is
     missing. Never raises.
     """
-    # 1. Real, measured data.
-    rate = get_real_rate(provider, model, db_path=db_path, _now=_now)
-    if rate is not None:
+    # 1a. For balance-delta providers (PPQ, OpenRouter), try credit-depletion
+    #     rate FIRST — their APIs don't return per-call cost_usd, so the
+    #     trailing rate always falls through to the seed estimate.
+    if provider in BALANCE_DELTA_PROVIDERS:
+        delta_rate = get_balance_delta_rate(
+            provider, model, usage_db_path=db_path, _now=_now
+        )
+        if delta_rate is not None:
+            return delta_rate
+
+    # 1b. Real, measured data — use provider-specific trailing window (T6)
+    #    so PPQ/DeepInfra/OpenRouter use their 30-day window instead of the
+    #    7-day default, which would miss older but still-valid measurements.
+    rate = get_trailing_rate(provider, model, db_path=db_path, _now=_now)
+    if rate is not None and rate > 0:
         return rate
 
     # 2. Ollama billing API (ollama_cloud only — it has a real per-model cost

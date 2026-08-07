@@ -1,771 +1,1021 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sovereign Routing Engine — Display</title>
-<!-- Offline-bundled vendor libs (no CDN) -->
-<script src="vendor/plotly-2.35.2.min.js"></script>
-<script src="vendor/qrcode.min.js"></script>
-<script src="vendor/nostr-tools.min.js"></script>
-<style>
-/* ════════════════════════════════════════════════════════════════════════
-   DARK THEME + RESPONSIVE GRID
-   ════════════════════════════════════════════════════════════════════════ */
-:root{
-  --bg:#0a0e14; --bg2:#0d1117; --card:#131820; --card2:#161b22;
-  --border:#21262d; --border2:#30363d;
-  --txt:#c9d1d9; --txt-dim:#8b949e; --txt-bright:#f0f6fc;
-  --blue:#58a6ff; --green:#3fb950; --red:#f85149; --yellow:#d29922;
-  --purple:#bc8cff; --cyan:#39d2c0; --orange:#f0883e;
-  --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
-  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%}
-body{
-  background:var(--bg);color:var(--txt);font-family:var(--sans);
-  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;
-}
-
-/* ── top bar ── */
-.topbar{
-  display:flex;align-items:center;gap:16px;flex-wrap:wrap;
-  padding:12px 20px;background:var(--bg2);border-bottom:1px solid var(--border);
-  position:sticky;top:0;z-index:50;backdrop-filter:blur(8px);
-}
-.topbar h1{font-size:16px;font-weight:600;color:var(--txt-bright);letter-spacing:-.2px}
-.topbar h1 .accent{color:var(--cyan)}
-.topbar .spacer{flex:1}
-.badge{
-  font-family:var(--mono);font-size:11px;font-weight:600;padding:3px 8px;
-  border-radius:4px;border:1px solid var(--border2);color:var(--txt-dim);
-  display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
-}
-.badge .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
-.badge.live .dot{background:var(--green);animation:pulse 2s infinite}
-.badge.error{border-color:var(--red);color:var(--red)}
-.badge.error .dot{background:var(--red)}
-.badge.connecting{border-color:var(--blue);color:var(--blue)}
-.badge.connecting .dot{background:var(--blue);animation:pulse 1s infinite}
-.badge.stale{border-color:var(--orange);color:var(--orange)}
-.badge.stale .dot{background:var(--orange);animation:pulse 1.5s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-
-/* ── responsive grid ── */
-.grid{
-  display:grid;gap:14px;padding:14px 20px 40px;
-  grid-template-columns:repeat(12,1fr);
-  grid-auto-rows:min-content;
-  max-width:1800px;margin:0 auto;
-}
-.card{
-  background:var(--card);border:1px solid var(--border);border-radius:10px;
-  padding:16px;display:flex;flex-direction:column;min-width:0;overflow:hidden;
-}
-.card h2{
-  font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;
-  color:var(--txt-dim);margin-bottom:12px;display:flex;align-items:center;gap:8px;
-}
-.card h2 .num{
-  width:18px;height:18px;border-radius:5px;background:var(--border2);
-  display:inline-flex;align-items:center;justify-content:center;font-size:10px;
-  color:var(--cyan);
-}
-/* spans */
-.col-qr    {grid-column:span 3}
-.col-diag  {grid-column:span 5}
-.col-cost  {grid-column:span 4}
-.col-charts{grid-column:span 7}
-.col-econ  {grid-column:span 5}
-.col-quota {grid-column:span 4}
-.col-flow  {grid-column:span 5}
-.col-gate  {grid-column:span 3}
-.col-rates {grid-column:span 5}
-.full      {grid-column:span 12}
-
-/* ── RP-5a: measured-rates table ── */
-.rate-rows{display:flex;flex-direction:column;gap:2px;flex:1;align-content:start}
-.rate-row{
-  display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;
-  padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px;
-}
-.rate-row:last-child{border-bottom:none}
-.rate-prov{color:var(--txt);font-weight:500;text-transform:capitalize}
-.rate-val{font-family:var(--mono);color:var(--cyan);font-weight:600;white-space:nowrap}
-.rate-val.zero{color:var(--txt-dim)}
-.src-badge{
-  font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.5px;
-  padding:2px 6px;border-radius:3px;text-transform:uppercase;white-space:nowrap;
-}
-.src-badge.measured{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.4)}
-.src-badge.fallback{background:rgba(210,153,34,.15);color:var(--yellow);border:1px solid rgba(210,153,34,.4)}
-.rate-foot{font-size:10px;color:var(--txt-dim);margin-top:8px;line-height:1.4}
-.rate-foot .ok{color:var(--green)}
-
-/* ── phone / tablet ── */
-@media(max-width:1100px){
-  .col-qr,.col-diag,.col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate,.col-rates{grid-column:span 6}
-}
-@media(max-width:700px){
-  .grid{grid-template-columns:1fr;padding:10px}
-  .col-qr,.col-diag,.col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate,.col-rates,.full{grid-column:span 1}
-  .topbar{padding:10px 12px}
-  .topbar h1{font-size:14px}
-}
-
-/* ═══ PANEL 1: QR CODE ═══ */
-.qr-wrap{display:flex;flex-direction:column;align-items:center;gap:10px;flex:1;justify-content:center}
-.qr-box{
-  background:#fff;padding:12px;border-radius:10px;
-  display:flex;align-items:center;justify-content:center;
-}
-.qr-box svg{display:block}
-.qr-label{font-size:11px;color:var(--txt-dim);text-align:center;word-break:break-all;line-height:1.4}
-.qr-label .url{font-family:var(--mono);color:var(--cyan);font-size:10px}
-
-/* ═══ PANEL 2: SYSTEM DIAGRAM ═══ */
-.diagram{display:flex;flex-direction:column;gap:0;flex:1;justify-content:center;position:relative;padding:4px 0}
-.diag-row{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;position:relative;z-index:2}
-.diag-node{
-  background:var(--bg2);border:1px solid var(--border2);border-radius:9px;
-  padding:10px 14px;text-align:center;min-width:80px;position:relative;
-  transition:border-color .3s,box-shadow .3s;
-}
-.diag-node .dn-icon{font-size:20px;line-height:1}
-.diag-node .dn-label{font-size:10px;font-weight:600;color:var(--txt-bright);margin-top:4px;letter-spacing:.3px}
-.diag-node .dn-sub{font-size:9px;color:var(--txt-dim);font-family:var(--mono)}
-.diag-node.active{border-color:var(--green);box-shadow:0 0 16px rgba(63,185,80,.25)}
-.diag-node.relay{border-color:var(--blue)}
-.diag-node.relay.active{border-color:var(--blue);box-shadow:0 0 16px rgba(88,166,255,.25)}
-.diag-node.phone{border-color:var(--purple)}
-.diag-node.phone.active{border-color:var(--purple);box-shadow:0 0 12px rgba(188,140,255,.25)}
-.diag-node.dq05{border-color:var(--cyan)}
-.diag-node.dq05.active{border-color:var(--cyan);box-shadow:0 0 18px rgba(57,210,192,.3)}
-.diag-spacer{height:28px;position:relative;z-index:1}
-.diag-line{
-  position:absolute;left:50%;top:0;bottom:0;width:2px;transform:translateX(-50%);
-  background:linear-gradient(180deg,var(--border2),var(--border2));
-}
-.diag-line .flow-dot{
-  position:absolute;left:50%;width:6px;height:6px;border-radius:50%;
-  background:var(--green);box-shadow:0 0 8px var(--green);
-  transform:translateX(-50%);animation:flowdown 1.5s linear infinite;
-}
-@keyframes flowdown{0%{top:0;opacity:1}90%{opacity:1}100%{top:100%;opacity:0}}
-.diag-h-line{
-  height:2px;background:var(--border2);position:relative;flex:1;min-width:20px;align-self:center;
-}
-.diag-h-line .flow-dot-r{
-  position:absolute;top:50%;width:6px;height:6px;border-radius:50%;
-  background:var(--blue);box-shadow:0 0 8px var(--blue);
-  transform:translateY(-50%);animation:flowright 1.8s linear infinite;
-}
-@keyframes flowright{0%{left:0;opacity:1}90%{opacity:1}100%{left:100%;opacity:0}}
-
-/* ═══ PANEL 3: PER-KEY PRICE CHARTS ═══ */
-.charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-@media(max-width:560px){.charts-grid{grid-template-columns:1fr}}
-.mini-chart-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:8px 8px 4px}
-.mini-chart-wrap .mc-head{
-  display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;padding:0 4px;
-}
-.mini-chart-wrap .mc-name{font-size:12px;font-weight:600;color:var(--txt-bright)}
-.mini-chart-wrap .mc-price{font-family:var(--mono);font-size:12px;color:var(--cyan)}
-.mini-chart{width:100%;height:130px}
-.legend-row{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;padding:0 4px}
-.legend-row .lg{font-size:10px;color:var(--txt-dim);display:flex;align-items:center;gap:5px}
-.legend-row .lg .swatch{width:14px;height:3px;border-radius:2px}
-.sw-cost{background:var(--blue)} .sw-price{background:var(--cyan);background-image:repeating-linear-gradient(90deg,var(--cyan) 0 4px,transparent 4px 7px)}
-.sw-margin{background:var(--purple);opacity:.4;border-radius:2px;width:10px;height:10px}
-
-/* ═══ PANEL 4: QUOTA BARS ═══ */
-.quota-bar-wrap{display:flex;flex-direction:column;gap:18px;flex:1;justify-content:center}
-.qb{display:flex;flex-direction:column;gap:6px}
-.qb .qb-top{display:flex;justify-content:space-between;align-items:baseline}
-.qb .qb-name{font-weight:600;font-size:13px;color:var(--txt-bright)}
-.qb .qb-pct{font-family:var(--mono);font-size:18px;font-weight:600}
-.qb-track{height:22px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;overflow:hidden;position:relative}
-.qb-fill{height:100%;border-radius:5px 0 0 5px;transition:width .8s cubic-bezier(.4,0,.2,1),background .4s;position:relative}
-.qb-fill::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.12),transparent);animation:shimmer 2.5s infinite}
-@keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
-.qb-fill.green{background:linear-gradient(90deg,#1a7f37,#3fb950)}
-.qb-fill.yellow{background:linear-gradient(90deg,#9e6a03,#d29922)}
-.qb-fill.red{background:linear-gradient(90deg,#da3633,#f85149)}
-.qb-meta{display:flex;justify-content:space-between;font-size:11px;color:var(--txt-dim);font-family:var(--mono)}
-
-/* ═══ PANEL 5: COST METER ═══ */
-.cost-big{font-family:var(--mono);font-size:48px;font-weight:700;color:var(--green);line-height:1;text-align:center;margin:8px 0}
-.cost-big .cents{font-size:26px;color:var(--txt-dim)}
-.cost-sub{text-align:center;font-size:12px;color:var(--txt-dim);font-family:var(--mono)}
-.cost-sub .burn{color:var(--orange)}
-.cost-bar{height:6px;background:var(--bg2);border-radius:3px;margin-top:14px;overflow:hidden}
-.cost-bar .cb-fill{height:100%;background:linear-gradient(90deg,var(--green),var(--yellow));border-radius:3px;transition:width .8s}
-
-/* ═══ PANEL 6: REQUEST FLOW ═══ */
-.flow-list{display:flex;flex-direction:column;gap:7px;max-height:340px;overflow-y:auto;flex:1}
-.flow-list::-webkit-scrollbar{width:6px} .flow-list::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
-.flow-card{
-  background:var(--bg2);border:1px solid var(--border);border-radius:7px;padding:9px 12px;
-  display:grid;grid-template-columns:auto 1fr auto;gap:8px 12px;align-items:center;
-  animation:slidein .4s ease;font-size:12px;
-}
-@keyframes slidein{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
-.flow-card .fc-time{font-family:var(--mono);font-size:10px;color:var(--txt-dim);white-space:nowrap}
-.flow-card .fc-mid{min-width:0}
-.flow-card .fc-prov{font-weight:600;font-size:12px}
-.flow-card .fc-model{font-family:var(--mono);font-size:10px;color:var(--txt-dim)}
-.flow-card .fc-right{text-align:right;font-family:var(--mono);font-size:11px;white-space:nowrap}
-.flow-card .fc-cost{color:var(--orange)}
-.flow-card .fc-tok{color:var(--txt-dim);font-size:10px}
-.flow-card .fc-who{font-family:var(--mono);font-size:10px;color:var(--purple)}
-.flow-empty{padding:30px;text-align:center;color:var(--txt-dim);font-size:12px}
-.pill{display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:600}
-.pill.ours{background:rgba(88,166,255,.15);color:var(--blue)}
-.pill.friend{background:rgba(188,140,255,.15);color:var(--purple)}
-.pill.ollama{background:rgba(57,210,192,.15);color:var(--cyan)}
-.pill.ppq{background:rgba(240,136,62,.15);color:var(--orange)}
-
-/* ═══ PANEL 7: DISPATCH GATE ═══ */
-.gate-wrap{display:flex;align-items:center;gap:14px;flex:1;flex-wrap:wrap;justify-content:center}
-.gate-light{
-  width:72px;height:72px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;
-  font-size:28px;transition:all .5s;position:relative;
-}
-.gate-light.go{background:radial-gradient(circle,#3fb950,#1a7f37);box-shadow:0 0 30px rgba(63,185,80,.5)}
-.gate-light.hold{background:radial-gradient(circle,#f85149,#da3633);box-shadow:0 0 30px rgba(248,81,73,.5)}
-.gate-light::after{content:'';position:absolute;inset:-6px;border-radius:50%;border:2px solid currentColor;opacity:.3;animation:ring 2s infinite}
-.gate-light.go::after{color:var(--green)} .gate-light.hold::after{color:var(--red)}
-@keyframes ring{0%{transform:scale(1);opacity:.4}100%{transform:scale(1.25);opacity:0}}
-.gate-info{flex:1;min-width:100px;text-align:center}
-.gate-info .gi-status{font-size:18px;font-weight:700}
-.gate-info .gi-status.go{color:var(--green)} .gate-info .gi-status.hold{color:var(--red)}
-.gate-info .gi-model{font-family:var(--mono);font-size:12px;color:var(--cyan);margin:3px 0}
-.gate-info .gi-reason{font-size:10px;color:var(--txt-dim);line-height:1.4}
-.gate-stats{display:flex;gap:10px;margin-top:8px;flex-wrap:wrap;justify-content:center}
-.gate-stats .gs{font-size:11px}
-.gate-stats .gs .gs-l{color:var(--txt-dim);text-transform:uppercase;letter-spacing:.3px;font-size:8px}
-.gate-stats .gs .gs-v{font-family:var(--mono);color:var(--txt-bright);font-size:12px}
-
-/* ═══ PANEL 8: TOKEN ECONOMY SUMMARY ═══ */
-.econ-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;flex:1;align-content:start}
-.econ-stat{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
-.econ-stat .es-l{font-size:9px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:.4px}
-.econ-stat .es-v{font-family:var(--mono);font-size:20px;font-weight:600;color:var(--txt-bright);margin-top:2px}
-.econ-stat .es-v.cyan{color:var(--cyan)} .es-stat .es-v.green{color:var(--green)} .es-stat .es-v.orange{color:var(--orange)}
-.econ-stat .es-sub{font-size:10px;color:var(--txt-dim);font-family:var(--mono);margin-top:1px}
-.scarcity-bar{margin-top:10px}
-.scarcity-bar .sb-top{display:flex;justify-content:space-between;font-size:10px;color:var(--txt-dim);margin-bottom:4px}
-.scarcity-track{height:10px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;overflow:hidden;display:flex}
-.scarcity-seg{height:100%;transition:opacity .5s}
-.scarcity-seg.s1{background:#1a7f37} .scarcity-seg.s2{background:#9e6a03}
-.scarcity-seg.s3{background:#d29922} .scarcity-seg.s4{background:#f0883e} .scarcity-seg.s5{background:#da3633}
-.leaderboard-mini{margin-top:10px;max-height:100px;overflow-y:auto;border:1px solid var(--border);border-radius:6px}
-.lb-row{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);font-size:11px}
-.lb-row:last-child{border-bottom:none}
-.lb-row .who{font-family:var(--mono);color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.lb-row .spent{font-family:var(--mono);color:var(--orange);font-size:10px}
-.lb-row .prompts{font-family:var(--mono);color:var(--txt-dim);font-size:10px}
-.lb-empty{padding:14px;text-align:center;color:var(--txt-dim);font-size:11px}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Merchant Routing Engine — Live Pricing Demo</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <script src="vendor/plotly-2.35.2.min.js"></script>
+  <script src="vendor/nostr-tools.min.js"></script>
+  <style>
+    :root{
+      --bg:#0d1117;--card:#161b22;--border:#30363d;
+      --txt:#c9d1d9;--txt-bright:#f0f6fc;--txt-dim:#8b949e;
+      --mono:'SF Mono','Cascadia Code','Fira Code',monospace;
+      --blue:#58a6ff;--purple:#bc8cff;--cyan:#39d2c0;
+      --orange:#f0883e;--red:#f85149;--green:#3fb950;--yellow:#d29922;
+    }
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{background:var(--bg);color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,sans-serif;min-height:100vh;overflow-x:hidden}
+    
+    /* HEADER */
+    .header{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;border-bottom:1px solid var(--border)}
+    .header-title{font-size:15px;font-weight:700;color:var(--txt-bright);letter-spacing:.5px}
+    .header-right{display:flex;align-items:center;gap:12px}
+    .badge{font-size:10px;font-weight:700;padding:3px 8px;border-radius:4px;letter-spacing:.5px}
+    .badge.live{background:rgba(63,185,80,.15);color:var(--green)}
+    .badge.connecting{background:rgba(210,153,34,.15);color:var(--yellow)}
+    .badge.stale{background:rgba(210,153,34,.15);color:var(--yellow)}
+    .badge.error{background:rgba(248,81,73,.15);color:var(--red)}
+    .clock{font-size:12px;color:var(--txt-dim);font-family:var(--mono)}
+    
+    /* MAIN ARCHITECTURE LAYOUT */
+    .arch-container{position:relative;padding:24px;max-width:1600px;margin:0 auto}
+    
+    /* Provider row */
+    .provider-row{display:flex;gap:16px;margin-bottom:0;position:relative;z-index:2}
+    .provider-card{flex:1;background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;min-width:0}
+    .provider-card .card-header{padding:8px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+    .provider-name{font-size:12px;font-weight:700;letter-spacing:1px}
+    .provider-rate{font-size:11px;font-family:var(--mono);color:var(--txt-dim)}
+    .provider-chart{height:200px;position:relative}
+    .provider-status{padding:4px 12px;border-top:1px solid var(--border);font-size:10px;color:var(--txt-dim);display:flex;justify-content:space-between}
+    
+    /* Consumer card */
+    .consumer-card{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-top:24px}
+    .consumer-card .card-header{padding:10px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+    .consumer-chart{height:280px}
+    
+    /* SVG edges overlay */
+    .edges-svg{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:1}
+    .edge-line{stroke:#30363d;stroke-width:1.5;opacity:.5;transition:all .5s ease}
+    .edge-line.active{stroke-width:3;opacity:.9}
+    .edge-dot{r:3;animation:flowDot 2s linear infinite}
+    @keyframes flowDot{0%{offset-distance:0%}100%{offset-distance:100%}}
+    
+    /* Status dot */
+    .status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+    .status-dot.alive{background:var(--green);box-shadow:0 0 6px var(--green)}
+    .status-dot.dead{background:var(--red);opacity:.5}
+    
+    /* Edge spacer */
+    .edge-spacer{height:80px;position:relative;z-index:1}
+    
+    /* ═══ DASHBOARD PANELS ═══ */
+    .dash-section{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-top:16px}
+    .dash-section .dash-header{padding:10px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+    .dash-header-title{font-size:13px;font-weight:700;color:var(--txt-bright);letter-spacing:.5px}
+    .dash-body{padding:16px}
+    
+    /* Cost Meter */
+    .cost-meter{display:flex;align-items:center;gap:32px;flex-wrap:wrap}
+    .cost-big{font-size:36px;font-weight:800;color:var(--green);font-family:var(--mono)}
+    .cost-stat{display:flex;flex-direction:column;gap:2px}
+    .cost-stat-label{font-size:10px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:1px}
+    .cost-stat-value{font-size:18px;font-weight:700;color:var(--txt-bright);font-family:var(--mono)}
+    
+    /* Quota Bars */
+    .quota-bar-row{display:flex;align-items:center;gap:12px;margin-bottom:10px}
+    .quota-bar-label{font-size:11px;font-weight:700;min-width:80px;color:var(--txt-bright)}
+    .quota-bar-track{flex:1;height:20px;background:rgba(48,54,61,.4);border-radius:4px;overflow:hidden;position:relative}
+    .quota-bar-fill{height:100%;border-radius:4px;transition:width .5s ease;position:relative}
+    .quota-bar-info{font-size:10px;color:var(--txt-dim);min-width:180px;text-align:right;font-family:var(--mono)}
+    
+    /* Request Flow */
+    .req-flow-list{max-height:400px;overflow-y:auto;border:1px solid var(--border);border-radius:6px}
+    .req-flow-list::-webkit-scrollbar{width:6px}
+    .req-flow-list::-webkit-scrollbar-track{background:var(--bg)}
+    .req-flow-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+    .req-row{display:grid;grid-template-columns:80px 80px 120px 1fr 70px 60px;gap:8px;padding:6px 12px;border-bottom:1px solid rgba(48,54,61,.3);font-size:11px;font-family:var(--mono);align-items:center}
+    .req-row:hover{background:rgba(88,166,255,.05)}
+    .req-row .req-ts{color:var(--txt-dim)}
+    .req-row .req-key{font-weight:700}
+    .req-row .req-model{color:var(--txt)}
+    .req-row .req-reason{color:var(--txt-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .req-row .req-cost{color:var(--green);text-align:right}
+    .req-row .req-tokens{color:var(--txt-dim);text-align:right}
+    
+    /* Dispatch Gate */
+    .gate-grid{display:flex;align-items:center;gap:24px;flex-wrap:wrap}
+    .gate-badge{font-size:14px;font-weight:800;padding:6px 16px;border-radius:6px;letter-spacing:1px}
+    .gate-badge.clear{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)}
+    .gate-badge.blocked{background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)}
+    .gate-stat{display:flex;flex-direction:column;gap:2px}
+    .gate-stat-label{font-size:10px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:1px}
+    .gate-stat-value{font-size:14px;font-weight:700;color:var(--txt-bright);font-family:var(--mono)}
+    
+    /* Measured Rates Table */
+    .rates-table{width:100%;border-collapse:collapse;font-size:12px}
+    .rates-table th{text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);color:var(--txt-dim);font-size:10px;text-transform:uppercase;letter-spacing:1px;font-weight:600}
+    .rates-table td{padding:8px 12px;border-bottom:1px solid rgba(48,54,61,.3);font-family:var(--mono)}
+    .rates-table tr:hover{background:rgba(88,166,255,.05)}
+    .source-badge{font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;letter-spacing:.5px}
+    .source-badge.measured{background:rgba(63,185,80,.15);color:var(--green)}
+    .source-badge.fallback{background:rgba(210,153,34,.15);color:var(--yellow)}
+  </style>
 </head>
 <body>
 
-<!-- ═══ TOP BAR ═══ -->
-<div class="topbar">
-  <h1>⚡ Sovereign Routing <span class="accent">Engine</span></h1>
-  <span class="spacer"></span>
-  <span class="badge connecting" id="conn-badge"><span class="dot"></span><span id="conn-text">connecting…</span></span>
-  <span class="badge" id="time-badge"><span class="dot" style="background:var(--txt-dim)"></span><span id="time-text">--:--:--</span></span>
+<div class="header">
+  <div class="header-title">⚡ Merchant Routing Engine — Live Pricing</div>
+  <div class="header-right">
+    <button id="unit-toggle" class="badge live" style="cursor:pointer;border:none;outline:none;font-size:11px;font-weight:700;padding:4px 10px;border-radius:4px;letter-spacing:.5px">SATS</button>
+    <span class="badge connecting" id="conn-badge"><span id="conn-text">connecting…</span></span>
+    <span class="clock" id="time-text">--:--:--</span>
+  </div>
 </div>
 
-<div class="grid">
-
-  <!-- ═══ PANEL 1: QR CODE ═══ -->
-  <div class="card col-qr">
-    <h2><span class="num">1</span> Join the Demo — scan to participate</h2>
-    <div class="qr-wrap">
-      <div class="qr-box" id="qr-box"></div>
-      <div class="qr-label">Scan with your phone<br><span class="url" id="qr-url">—</span></div>
+<div class="arch-container" id="arch-container">
+  <!-- SVG edges layer -->
+  <svg class="edges-svg" id="edges-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+  
+  <!-- Provider row -->
+  <div class="provider-row" id="provider-row"></div>
+  
+  <!-- Edge spacer for visual gap -->
+  <div class="edge-spacer"></div>
+  
+  <!-- Consumer -->
+  <div class="consumer-card">
+    <div class="card-header">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:16px">🧑</span>
+        <span class="provider-name" style="font-size:14px">CONSUMER — Price / M over time</span>
+      </div>
+      <span class="provider-rate" id="consumer-rate">—</span>
     </div>
+    <div class="consumer-chart" id="consumer-chart"></div>
   </div>
-
-  <!-- ═══ PANEL 2: SYSTEM DIAGRAM ═══ -->
-  <div class="card col-diag">
-    <h2><span class="num">2</span> System Diagram — live infrastructure</h2>
-    <div class="diagram" id="diagram">
-      <div class="diag-row">
-        <div class="diag-node dq05 active" id="node-dq05">
-          <div class="dn-icon">🖥️</div>
-          <div class="dn-label">DQ05</div>
-          <div class="dn-sub">Kalman · CVM</div>
+  
+  <!-- ═══ DASHBOARD PANELS ═══ -->
+  
+  <!-- a) Cost Meter -->
+  <div class="dash-section" id="cost-meter-section">
+    <div class="dash-header">
+      <span class="dash-header-title">💰 Cost Meter</span>
+      <span class="provider-rate" id="cost-meter-subtitle">—</span>
+    </div>
+    <div class="dash-body">
+      <div class="cost-meter" id="cost-meter-body">
+        <div class="cost-big" id="cost-today">—</div>
+        <div class="cost-stat">
+          <span class="cost-stat-label" id="burn-label">burn/hour</span>
+          <span class="cost-stat-value" id="burn-rate">—</span>
         </div>
-        <div class="diag-h-line"><div class="flow-dot-r"></div></div>
-        <div class="diag-node relay active" id="node-relays">
-          <div class="dn-icon">📡</div>
-          <div class="dn-label">RELAYS</div>
-          <div class="dn-sub" id="relay-sub">3 connected</div>
+        <div class="cost-stat">
+          <span class="cost-stat-label">Requests today</span>
+          <span class="cost-stat-value" id="req-count">—</span>
         </div>
       </div>
-      <div class="diag-spacer"><div class="diag-line"><div class="flow-dot"></div></div></div>
-      <div class="diag-row" id="phone-row">
-        <div class="diag-node phone" id="node-phone-0"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>
-        <div class="diag-node phone" id="node-phone-1"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>
-        <div class="diag-node phone" id="node-phone-2"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>
-      </div>
     </div>
   </div>
-
-  <!-- ═══ PANEL 5: COST METER ═══ -->
-  <div class="card col-cost">
-    <h2><span class="num">5</span> Cost Meter — today</h2>
-    <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
-      <div class="cost-big" id="cost-big">$0<span class="cents">.00</span></div>
-      <div class="cost-sub"><span class="burn" id="burn-rate">$0.00</span> / hour burn</div>
-      <div class="cost-bar"><div class="cb-fill" id="cost-bar-fill" style="width:0%"></div></div>
-      <div class="cost-sub" style="margin-top:6px;font-size:10px" id="cost-ticks">0 requests today</div>
+  
+  <!-- b) Quota Bars -->
+  <div class="dash-section" id="quota-bars-section">
+    <div class="dash-header">
+      <span class="dash-header-title">📊 Quota Bars</span>
+      <span class="provider-rate">Per-key usage</span>
+    </div>
+    <div class="dash-body" id="quota-bars-body"></div>
+  </div>
+  
+  <!-- c) Request Flow -->
+  <div class="dash-section" id="req-flow-section">
+    <div class="dash-header">
+      <span class="dash-header-title">🔄 Request Flow</span>
+      <span class="provider-rate">Last 20 routing decisions</span>
+    </div>
+    <div class="dash-body" style="padding:8px">
+      <div class="req-flow-list" id="req-flow-list"></div>
     </div>
   </div>
-
-  <!-- ═══ PANEL 3: PER-KEY PRICE CHARTS ═══ -->
-  <div class="card col-charts">
-    <h2><span class="num">3</span> Per-Key Price Economics — cost basis · your price · MARGIN</h2>
-    <div class="charts-grid" id="charts-grid"></div>
-    <div class="legend-row">
-      <span class="lg"><span class="swatch sw-cost"></span> Cost basis ($/M)</span>
-      <span class="lg"><span class="swatch sw-price"></span> Your price + margin ($/M)</span>
-      <span class="lg"><span class="swatch sw-margin"></span> MARGIN % (right axis)</span>
+  
+  <!-- d) Dispatch Gate -->
+  <div class="dash-section" id="dispatch-gate-section">
+    <div class="dash-header">
+      <span class="dash-header-title">🚦 Dispatch Gate</span>
+      <span class="provider-rate" id="gate-subtitle">—</span>
+    </div>
+    <div class="dash-body">
+      <div class="gate-grid" id="gate-grid"></div>
     </div>
   </div>
-
-  <!-- ═══ PANEL 8: TOKEN ECONOMY SUMMARY ═══ -->
-  <div class="card col-econ">
-    <h2><span class="num">8</span> Token Economy — participants · price · scarcity</h2>
-    <div class="econ-stats">
-      <div class="econ-stat"><div class="es-l">Participants</div><div class="es-v cyan" id="econ-participants">—</div></div>
-      <div class="econ-stat"><div class="es-l">Total Prompts</div><div class="es-v" id="econ-prompts">—</div></div>
-      <div class="econ-stat"><div class="es-l">Avg Price $/M</div><div class="es-v cyan" id="econ-avgprice">—</div></div>
-      <div class="econ-stat"><div class="es-l">Tokens Used</div><div class="es-v" id="econ-tokens">—</div></div>
+  
+  <!-- e) Measured Rates -->
+  <div class="dash-section" id="measured-rates-section">
+    <div class="dash-header">
+      <span class="dash-header-title">📏 Measured Rates</span>
+      <span class="provider-rate">Per-provider $/M</span>
     </div>
-    <div class="scarcity-bar">
-      <div class="sb-top"><span>Scarcity <span id="econ-scarcity" style="color:var(--yellow);font-family:var(--mono)">1.0×</span></span><span id="econ-budget-pct">0% budget used</span></div>
-      <div class="scarcity-track">
-        <div class="scarcity-seg s1" style="flex:20"></div>
-        <div class="scarcity-seg s2" style="flex:20"></div>
-        <div class="scarcity-seg s3" style="flex:20"></div>
-        <div class="scarcity-seg s4" style="flex:20"></div>
-        <div class="scarcity-seg s5" style="flex:20"></div>
-      </div>
-    </div>
-    <div class="leaderboard-mini" id="econ-leaderboard"><div class="lb-empty">No participants yet</div></div>
-  </div>
-
-  <!-- ═══ PANEL 4: QUOTA BARS ═══ -->
-  <div class="card col-quota">
-    <h2><span class="num">4</span> Quota — per key, live</h2>
-    <div class="quota-bar-wrap" id="quota-wrap"></div>
-  </div>
-
-  <!-- ═══ PANEL 6: REQUEST FLOW ═══ -->
-  <div class="card col-flow">
-    <h2><span class="num">6</span> Request Flow — last 20, live</h2>
-    <div class="flow-list" id="flow-list"><div class="flow-empty">Waiting for requests…</div></div>
-  </div>
-
-  <!-- ═══ PANEL 7: DISPATCH GATE ═══ -->
-  <div class="card col-gate">
-    <h2><span class="num">7</span> Dispatch Gate</h2>
-    <div class="gate-wrap">
-      <div class="gate-light go" id="gate-light">✓</div>
-      <div class="gate-info">
-        <div class="gi-status go" id="gate-status">CLEAR</div>
-        <div class="gi-model" id="gate-model">—</div>
-        <div class="gi-reason" id="gate-reason">connecting…</div>
-      </div>
-    </div>
-    <div class="gate-stats">
-      <div class="gs"><div class="gs-l">Effective $/M</div><div class="gs-v" id="gate-price">—</div></div>
-      <div class="gs"><div class="gs-l">Margin</div><div class="gs-v" id="gate-margin">—</div></div>
+    <div class="dash-body" style="padding:0">
+      <table class="rates-table" id="rates-table">
+        <thead>
+          <tr><th>Provider</th><th>Model</th><th id="rates-header-unit">Rate (sats/M)</th><th>Source</th><th>Window</th></tr>
+        </thead>
+        <tbody id="rates-tbody"></tbody>
+      </table>
     </div>
   </div>
-
-  <!-- ═══ PANEL 9: MEASURED RATES (RP-5a) ═══ -->
-  <div class="card col-rates">
-    <h2><span class="num">9</span> Measured Rates — real_price_tracker · live $/M</h2>
-    <div class="rate-rows" id="rate-rows">
-      <div class="rate-row"><span class="rate-prov" style="color:var(--txt-dim)">loading…</span></div>
-    </div>
-    <div class="rate-foot" id="rate-foot">Source: real_price_tracker.get_rate_with_fallback()</div>
-  </div>
-
 </div>
 
 <script>
 /* ════════════════════════════════════════════════════════════════════════
-   CONFIG — all data fetched from CVM server HTTP endpoint (real proxy data)
+   CONFIG
    ════════════════════════════════════════════════════════════════════════ */
-// CVM server HTTP API — only used when ?api=<url> is given (local testing).
-// In production (nsite) the display reads snapshots over Nostr instead.
-const API_BASE = (param('api') || `http://${location.hostname}:3000`).replace(/\/$/,'');
-// Nostr-native transport: the CVM broadcasts its current snapshot as a
-// replaceable kind-30315 event. With no ?api= override the display reads it
-// straight from the relays — works from any nsite gateway, no localhost.
+function param(name){return new URLSearchParams(location.search).get(name);}
+
 const CVM_NPUB_HEX = param('npub') || '10814a5dc07e3e876867ffb9e8781af47fa599b677fb27e051f6b5261c1d4f35';
 const CVM_RELAYS = param('relays')
-  ? param('relays').split(',').map(s => s.trim()).filter(Boolean)
+  ? param('relays').split(',').map(s=>s.trim()).filter(Boolean)
   : ['wss://relay.primal.net','wss://nos.lol','wss://nostr.mom'];
-const USE_NOSTR = !param('api');   // ?api=<url> forces the local HTTP-testing path
-// Participant nsite URL for the QR code
-const DEFAULT_PARTICIPANT_URL = 'https://npub13h0eushvdzdrygm545zr5zxr3qvk7zaqhrzyyepprflcjdu3u0yskxz53m.nsite.lol';
+const USE_NOSTR = !param('api');
+const API_BASE = (param('api') || `http://${location.hostname}:3000`).replace(/\/$/,'');
+const POLL_MS = 5000, POLL_MIN = 5000, POLL_MAX = 30000;
+const HIST_MAX = 5000;
 
-const KEYS = ['ours','friend','ollama','ppq'];
-const KEY_LABEL = {ours:'OURS',friend:'FRIEND',ollama:'OLLAMA',ppq:'PPQ'};
-const KEY_COLOR = {ours:'#58a6ff',friend:'#bc8cff',ollama:'#39d2c0',ppq:'#f0883e'};
-const POLL_MS = 5000;
-const POLL_MIN = 5000;                  // base poll interval; reset to this on recovery
-const POLL_MAX = 30000;                 // hard cap during extended outages
-const HIST_MAX = 480;                  // ~40min at 5s polling
+// Providers — order matches the diagram
+const PROVIDERS = ['friend','ollama','ppq','openrouter'];
+const PROV_LABEL = {friend:'FRIEND',ollama:'OLLAMA',ppq:'PPQ',openrouter:'OPENROUTER'};
+const PROV_COLOR = {friend:'#bc8cff',ollama:'#39d2c0',ppq:'#f0883e',openrouter:'#f85149'};
+const PROV_ALIVE = {friend:true,ollama:true,ppq:false,openrouter:true};
+
+// Models per provider with base rates ($/M tokens)
+const PROVIDER_MODELS = {
+  friend: [
+    {model: 'glm-5.2', baseRate: 0.029},
+    {model: 'glm-4.5-flash', baseRate: 0.029},
+    {model: 'glm-4.5-air', baseRate: 0.029},
+  ],
+  ollama: [
+    {model: 'glm-5.2', baseRate: 0.024},
+    {model: 'kimi-k2.7-code', baseRate: 0.024},
+    {model: 'kimi-k3:cloud', baseRate: 0.024},
+  ],
+  ppq: [
+    {model: 'deepseek-v4-flash', baseRate: 0.14},
+    {model: 'claude-haiku-4.5', baseRate: 0.14},
+    {model: 'gpt-5.4', baseRate: 0.14},
+    {model: 'gemini-2.5-pro', baseRate: 0.14},
+  ],
+  openrouter: [
+    {model: 'deepseek-v4-flash', baseRate: 0.135},
+    {model: 'deepseek-v4-pro', baseRate: 0.135},
+  ],
+};
+
+// Distinct color per model name (for consumer chart + edges)
+const MODEL_COLORS = {
+  'glm-5.2': '#58a6ff',
+  'glm-4.5-flash': '#bc8cff',
+  'glm-4.5-air': '#d2a8ff',
+  'kimi-k2.7-code': '#39d2c0',
+  'kimi-k3:cloud': '#7ee8d8',
+  'deepseek-v4-flash': '#f0883e',
+  'deepseek-v4-pro': '#ff7043',
+  'claude-haiku-4.5': '#f85149',
+  'gpt-5.4': '#d29922',
+  'gemini-2.5-pro': '#3fb950',
+};
+
+// Build reverse map: model -> provider
+const MODEL_TO_PROVIDER = {};
+for(const [prov, models] of Object.entries(PROVIDER_MODELS)){
+  for(const m of models) MODEL_TO_PROVIDER[m.model] = prov;
+}
+
+// Pricing curve constants
+const PRESSURE_K = 0.3;
+
+// Shade a hex color by index/total — returns lighter or darker variant
+function shadeColor(hex, idx, total){
+  const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+  // Spread from -0.3 (darker) to +0.3 (lighter) across models
+  const factor = total>1 ? (idx/(total-1) - 0.5) * 0.6 : 0;
+  const adj = (c) => {
+    const v = Math.round(c + (factor>0 ? (255-c)*factor : c*factor));
+    return Math.max(0, Math.min(255, v));
+  };
+  return '#' + [adj(r),adj(g),adj(b)].map(c=>c.toString(16).padStart(2,'0')).join('');
+}
 
 /* ════════════════════════════════════════════════════════════════════════
    STATE
    ════════════════════════════════════════════════════════════════════════ */
 let state = {
   snapshot: null,
-  priceHist: {},                       // key -> [{t,cost_basis,your_price,margin_pct}]
+  priceHist: {},     // provider -> [{t,cost_basis,your_price}]
+  modelPriceHist: {}, // model -> [{t,price}]
   costToday: 0,
+  lastRoutedModel: null, // most recently routed model name
 };
-KEYS.forEach(k => state.priceHist[k] = []);
-
-/* ════════════════════════════════════════════════════════════════════════
-   URL / CONFIG PARSING
-   ════════════════════════════════════════════════════════════════════════ */
-function param(name) {
-  return new URLSearchParams(location.search).get(name);
-}
-function resolveParticipantUrl() {
-  return param('participant') || localStorage.getItem('participant_url') || DEFAULT_PARTICIPANT_URL;
+PROVIDERS.forEach(k => state.priceHist[k] = []);
+// Initialize model price history for all known models
+for(const models of Object.values(PROVIDER_MODELS)){
+  for(const m of models){
+    if(!state.modelPriceHist[m.model]) state.modelPriceHist[m.model] = [];
+  }
 }
 
 /* ════════════════════════════════════════════════════════════════════════
    UTILITIES
    ════════════════════════════════════════════════════════════════════════ */
-function fmt$(n, dp=3){
-  if(n==null||isNaN(n)) return '—';
-  if(n>=1) return '$'+n.toFixed(2);
-  return '$'+n.toFixed(dp);
-}
-function fmtTok(n){
-  if(n==null||isNaN(n)) return '—';
-  n = Number(n);
-  if(n>=1e6) return (n/1e6).toFixed(2)+'M';
-  if(n>=1e3) return (n/1e3).toFixed(1)+'K';
-  return String(Math.round(n));
-}
-function fmtTime(ts){
-  const d=new Date(ts*1000); return d.toLocaleTimeString('en-GB',{hour12:false});
-}
-function shortNpub(n){ return n ? n.slice(0,10)+'…'+n.slice(-4) : 'anon'; }
-function clampPct(p){ return Math.max(0,Math.min(100,p)); }
+function fmt$(n,dp=4){if(n==null||isNaN(n))return'—';if(n>=1)return'$'+n.toFixed(2);return'$'+n.toFixed(dp);}
+function fmtTok(n){if(n==null||isNaN(n))return'—';n=Number(n);if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(Math.round(n));}
 
+// ── SATS / USD toggle ──────────────────────────────────────────────────
+const BTC_PRICE_USD = 100000; // CFG.btcPriceUsd from server
+let displayUnit = 'sats'; // default to SATS
+function usdToSats(usd){ return Math.round(usd * 1e8 / BTC_PRICE_USD); } // = usd * 1000 at $100K
+function fmtSats(n){
+  if(n==null||isNaN(n))return'—';
+  n = Math.round(n);
+  if(n >= 1e6) return (n/1e6).toFixed(2)+'M';
+  if(n >= 1e4) return n.toLocaleString();
+  if(n >= 100) return n.toLocaleString();
+  return n.toFixed(0);
+}
+// fmtCost: converts USD amount to display unit (SATS or USD)
+function fmtCost(usd, dp=4){
+  if(usd==null||isNaN(usd))return'—';
+  if(displayUnit==='sats'){
+    const s = usdToSats(usd);
+    return fmtSats(s) + ' sats';
+  }
+  return fmt$(usd, dp);
+}
+// fmtCostShort: like fmtCost but no unit suffix (for compact displays)
+function fmtCostShort(usd, dp=4){
+  if(usd==null||isNaN(usd))return'—';
+  if(displayUnit==='sats'){
+    return fmtSats(usdToSats(usd));
+  }
+  return fmt$(usd, dp);
+}
+// fmtRate: converts $/M to display unit rate
+function fmtRate(usdPerM, dp=4){
+  if(usdPerM==null||isNaN(usdPerM))return'—';
+  if(displayUnit==='sats'){
+    return fmtSats(usdToSats(usdPerM)) + ' sats/M';
+  }
+  return fmt$(usdPerM, dp) + '/M';
+}
+// fmtRateShort: rate without unit suffix
+function fmtRateShort(usdPerM, dp=4){
+  if(usdPerM==null||isNaN(usdPerM))return'—';
+  if(displayUnit==='sats'){
+    return fmtSats(usdToSats(usdPerM));
+  }
+  return fmt$(usdPerM, dp);
+}
+function unitLabel(){ return displayUnit==='sats' ? 'sats' : '$'; }
+function rateSuffix(){ return displayUnit==='sats' ? 'sats/M' : '/M'; }
 function setConn(mode){
-  const b=document.getElementById('conn-badge'), t=document.getElementById('conn-text');
+  const b=document.getElementById('conn-badge'),t=document.getElementById('conn-text');
   b.className='badge';
   if(mode==='live'){b.classList.add('live');t.textContent='LIVE · REAL DATA';}
   else if(mode==='connecting'){b.classList.add('connecting');t.textContent='connecting…';}
-  else if(mode==='stale'){b.classList.add('stale');t.textContent='STALE · RECONNECTING';}
+  else if(mode==='stale'){b.classList.add('stale');t.textContent='STALE';}
   else{b.classList.add('error');t.textContent='OFFLINE';}
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   SNAPSHOT NORMALIZATION
-   Normalizes the CVM server's get_snapshot response into a consistent shape.
+   SNAPSHOT NORMALIZATION (reused from original)
    ════════════════════════════════════════════════════════════════════════ */
-function normalizeSnapshot(raw) {
-  if (!raw || typeof raw !== 'object') return null;
-  return {
-    ts: raw.ts || Date.now()/1000,
-    pricing: raw.pricing || {},
-    pricing_meta: raw.pricing_meta || null,
-    quota: raw.quota || {},
-    requests: raw.routing_decisions || raw.requests || [],
-    provider_distribution: raw.provider_dist || raw.provider_distribution || {},
-    dispatch_gate: raw.dispatch_gate || {can_dispatch: true},
-    cost_today: raw.cost_today ?? 0,
-    burn_rate_per_hour: raw.cost_hour ?? raw.burn_rate_per_hour ?? 0,
-    system: raw.system || {},
-    scarcity: raw.scarcity || {},
-    participants: raw.participants || {},
-    ledger: raw.ledger || [],
-    // RP-5a: Python source-of-truth measured rates (preferred) + TS fallback
-    real_rates_tracker: raw.real_rates_tracker || null,
-    real_rates: raw.real_rates || {},
+function normalizeSnapshot(raw){
+  if(!raw||typeof raw!=='object')return null;
+  return{
+    ts:raw.ts||Date.now()/1000,
+    pricing:raw.pricing||{},
+    pricing_meta:raw.pricing_meta||null,
+    quota:raw.quota||{},
+    requests:raw.routing_decisions||raw.requests||[],
+    provider_distribution:raw.provider_dist||raw.provider_distribution||{},
+    cost_today:raw.cost_today??0,
+    cost_hour:raw.cost_hour??0,
+    btc_price_usd:raw.btc_price_usd||100000,
+    real_rates_tracker:raw.real_rates_tracker||null,
+    real_rates:raw.real_rates||{},
+    dispatch_gate:raw.dispatch_gate||null,
   };
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   PLOTLY DARK TEMPLATE
+   ASYMPTOTIC PRICING CURVE
+   price = baseRate × (1 + K × t / (1-t))   where t = quotaUsedFraction
+   As t→1, price→∞ (asymptotic)
    ════════════════════════════════════════════════════════════════════════ */
-const PLOT_BG='#0d1117', PLOT_GRID='rgba(48,54,61,.4)';
-const axisBase=(title,side)=>({
-  title:{text:title,font:{size:10,color:'#8b949e'}}, side, overlaying:side==='right'?'y':undefined,
-  showgrid:side!=='right', gridcolor:PLOT_GRID, zeroline:false,
-  tickfont:{size:9,color:'#8b949e'}, tickcolor:'transparent', automargin:true,
-});
-
-/* ── PANEL 3: PER-KEY PRICE CHARTS ── */
-const miniCharts={};
-function initMiniCharts(){
-  const grid=document.getElementById('charts-grid');
-  grid.innerHTML='';
-  for(const k of KEYS){
-    const wrap=document.createElement('div');wrap.className='mini-chart-wrap';
-    wrap.innerHTML=`<div class="mc-head"><span class="mc-name" style="color:${KEY_COLOR[k]}">${KEY_LABEL[k]}</span><span class="mc-price" id="mc-price-${k}">—</span></div><div class="mini-chart" id="mc-${k}"></div>`;
-    grid.appendChild(wrap);
-    miniCharts[k]=document.getElementById('mc-'+k);
-    const h=state.priceHist[k];
-    const _allY=[...h.map(p=>p.cost_basis),...h.map(p=>p.your_price)].filter(v=>v>0);
-    const _maxV=_allY.length?Math.max(..._allY):1;
-    const _yLogR=[Math.log10(_maxV*0.001),Math.log10(_maxV*2)];
-    Plotly.newPlot('mc-'+k,[
-      {x:h.map(p=>p.t*1000),y:h.map(p=>p.cost_basis),name:'Cost basis',mode:'lines',line:{color:'#58a6ff',width:2},yaxis:'y'},
-      {x:h.map(p=>p.t*1000),y:h.map(p=>p.your_price),name:'Your price',mode:'lines',line:{color:'#39d2c0',width:2,dash:'dash'},yaxis:'y'},
-      {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),name:'MARGIN %',mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)',yaxis:'y2'},
-    ],{
-      paper_bgcolor:PLOT_BG,plot_bgcolor:PLOT_BG,margin:{l:38,r:38,t:4,b:20},
-      showlegend:false,
-      xaxis:{...axisBase(''),type:'date',gridcolor:PLOT_GRID,tickfont:{size:8,color:'#6e7681'},tickformat:'%H:%M'},
-      yaxis:{...axisBase('$/M','left'),type:'log',tickformat:'.3f',range:_yLogR},
-      yaxis2:{...axisBase('%','right'),side:'right',overlaying:'y',showgrid:false,tickformat:'d',range:[0,60]},
-      font:{family:'ui-monospace,monospace',size:9},
-    },{displayModeBar:false,staticPlot:false,responsive:true});
-  }
-}
-function updateMiniCharts(){
-  for(const k of KEYS){
-    const h=state.priceHist[k]; if(!h.length) continue;
-    const last=h[h.length-1];
-    const _allY=[...h.map(p=>p.cost_basis),...h.map(p=>p.your_price)].filter(v=>v>0);
-    const _maxV=_allY.length?Math.max(..._allY):1;
-    const _yLogR=[Math.log10(_maxV*0.001),Math.log10(_maxV*2)];
-    const _el=document.getElementById('mc-'+k);
-    const _lay=_el?{..._el.layout,yaxis:{..._el.layout.yaxis,range:_yLogR}}:undefined;
-    Plotly.react('mc-'+k,[
-      {x:h.map(p=>p.t*1000),y:h.map(p=>p.cost_basis),mode:'lines',line:{color:'#58a6ff',width:2}},
-      {x:h.map(p=>p.t*1000),y:h.map(p=>p.your_price),mode:'lines',line:{color:'#39d2c0',width:2,dash:'dash'}},
-      {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)'},
-    ],_lay||{},{displayModeBar:false,responsive:true});
-    const el=document.getElementById('mc-price-'+k);
-    if(el) el.textContent=fmt$(last.your_price,3)+'/M · MARGIN '+last.margin_pct.toFixed(0)+'%';
-  }
+function asymptoticPrice(baseRate, usedPct){
+  const t = Math.max(0, Math.min(0.99, usedPct/100));
+  return baseRate * (1 + PRESSURE_K * t / (1 - t + 0.001));
 }
 
-/* ── PANEL 1: QR CODE ── */
-function renderQR(){
-  const url = resolveParticipantUrl();
-  document.getElementById('qr-url').textContent = url.length > 42 ? url.slice(0,42)+'…' : url;
-  try {
-    if (typeof window.qrcode !== 'function') throw new Error('qrcode lib not loaded');
-    const qr = window.qrcode(0, 'M');
-    qr.addData(url);
-    qr.make();
-    const count = qr.getModuleCount();
-    const sz = count + 4;
-    let cells = '';
-    for (let r = 0; r < count; r++) {
-      for (let c = 0; c < count; c++) {
-        if (qr.isDark(r, c)) cells += `<rect x="${c+2}" y="${r+2}" width="1" height="1"/>`;
+/* ════════════════════════════════════════════════════════════════════════
+   SUPERPOSITION PRICING — 5h + Weekly + Monthly quota windows
+   totalPrice = baseRate × (1 + K × Σ tᵢ/(1-tᵢ))
+   Each window contributes its own asymptotic pressure; the sum is the total.
+   ════════════════════════════════════════════════════════════════════════ */
+function superpositionPrice(baseRate, t5h, tWeekly, tMonthly) {
+  const clamp = t => Math.max(0, Math.min(0.99, t));
+  return baseRate * (1 + PRESSURE_K * (clamp(t5h)/(1-clamp(t5h)+0.001) + clamp(tWeekly)/(1-clamp(tWeekly)+0.001) + clamp(tMonthly)/(1-clamp(tMonthly)+0.001)));
+}
+
+// Single-window price (for faint curves): only one window has pressure
+function singleWindowPrice(baseRate, t) {
+  const c = Math.max(0, Math.min(0.99, t));
+  return baseRate * (1 + PRESSURE_K * c / (1 - c + 0.001));
+}
+
+// Get the three window usage fractions for a quota provider
+// session_usage/weekly_usage are already fractions (0–1); used_pct/weekly_pct are percentages (0–100)
+function getQuotaWindows(snap, provider) {
+  const q = snap.quota[provider] || {};
+  // 5h window
+  const t5h = q.session_usage != null ? q.session_usage
+            : q.session_limit && q.session_limit.usage != null ? q.session_limit.usage
+            : (q.used_pct || 0) / 100;
+  // Weekly (7d) window
+  const tWeekly = q.weekly_usage != null ? q.weekly_usage
+                : q.weekly_limit && q.weekly_limit.usage != null ? q.weekly_limit.usage
+                : (q.weekly_pct || 0) / 100;
+  // Monthly (30d) window — may not be present in all snapshots
+  const tMonthly = q.monthly_usage != null ? q.monthly_usage
+                 : q.monthly_limit && q.monthly_limit.usage != null ? q.monthly_limit.usage
+                 : (q.monthly_pct || 0) / 100;
+  return { t5h, tWeekly, tMonthly };
+}
+
+// Get base rate for a provider (fallback / aggregate)
+function getBaseRate(snap, provider){
+  const meta = snap.pricing_meta || {};
+  if(provider==='friend') return meta.flat_key_cost_per_m || 0.02;
+  if(provider==='ollama'){
+    const tok30d = meta.ollama_tokens_30d || 1;
+    return meta.ollama_monthly_usd / Math.max(1, tok30d/1e6);
+  }
+  if(provider==='ppq') return meta.ppq_cost_per_m_real || 0.14;
+  if(provider==='openrouter') return 0.135;
+  return 0.02;
+}
+
+// Get per-model base rate from snap.real_rates (real measured rates).
+// Falls back to provider _default, then to hardcoded baseRate in PROVIDER_MODELS.
+function getModelBaseRate(snap, provider, model){
+  const rr = (snap && snap.real_rates) || {};
+  // 'ollama' in PROVIDERS maps to 'ollama_cloud' in real_rates
+  const rrKey = provider === 'ollama' ? 'ollama_cloud' : provider;
+  const provRates = rr[rrKey] || rr[provider] || {};
+  // Try exact model match
+  if(provRates[model] && provRates[model].rate != null) return provRates[model].rate;
+  // Try _default for this provider
+  if(provRates._default && provRates._default.rate != null) return provRates._default.rate;
+  // Fall back to hardcoded baseRate
+  const models = PROVIDER_MODELS[provider] || [];
+  const found = models.find(m => m.model === model);
+  return found ? found.baseRate : getBaseRate(snap, provider);
+}
+
+// Get quota used percentage for a provider (max across all windows for marker)
+function getQuotaUsed(snap, provider){
+  const q = snap.quota[provider] || {};
+  if(provider==='ollama' || provider==='friend'){
+    const w = getQuotaWindows(snap, provider);
+    return Math.max(w.t5h, w.tWeekly, w.tMonthly) * 100;
+  }
+  return q.used_pct || 0;
+}
+
+// Is this provider pay-per-use (no quota cap)?
+function isPayPerUse(provider){return provider==='ppq'||provider==='openrouter';}
+
+/* ════════════════════════════════════════════════════════════════════════
+   RENDER: PROVIDER CARDS
+   ════════════════════════════════════════════════════════════════════════ */
+const PLOT_BG='#0d1117', PLOT_GRID='rgba(48,54,61,.3)';
+
+function initProviderCards(){
+  const row = document.getElementById('provider-row');
+  row.innerHTML='';
+  for(const p of PROVIDERS){
+    const card = document.createElement('div');
+    card.className='provider-card';
+    card.id=`prov-${p}`;
+    const alive = PROV_ALIVE[p];
+    const dotClass = alive?'alive':'dead';
+    card.innerHTML=`
+      <div class="card-header">
+        <span style="display:flex;align-items:center">
+          <span class="status-dot ${dotClass}"></span>
+          <span class="provider-name" style="color:${PROV_COLOR[p]}">${PROV_LABEL[p]}</span>
+        </span>
+        <span class="provider-rate" id="prov-rate-${p}">—</span>
+      </div>
+      <div class="provider-chart" id="prov-chart-${p}"></div>
+      <div class="provider-status" id="prov-status-${p}"></div>
+    `;
+    row.appendChild(card);
+  }
+}
+
+function renderProviders(snap){
+  for(const p of PROVIDERS){
+    const usedPct = getQuotaUsed(snap, p);
+    const ppu = isPayPerUse(p);
+    const provColor = PROV_COLOR[p];
+    const models = PROVIDER_MODELS[p] || [];
+    const w = ppu ? null : getQuotaWindows(snap, p);
+
+    // Resolve per-model real rates from snap.real_rates
+    const modelRates = models.map(m => getModelBaseRate(snap, p, m.model));
+
+    // Rate display: show range (cheapest to most expensive model)
+    const rateEl = document.getElementById(`prov-rate-${p}`);
+    if(rateEl && models.length){
+      let rates;
+      if(ppu){
+        rates = modelRates;
+      } else {
+        rates = modelRates.map(r => superpositionPrice(r, w.t5h, w.tWeekly, w.tMonthly));
+      }
+      const minR = Math.min(...rates), maxR = Math.max(...rates);
+      rateEl.textContent = minR === maxR ? `${fmt$(minR)}/M` : `${fmt$(minR)}–${fmt$(maxR)}/M`;
+    }
+
+    // Status
+    const statusEl = document.getElementById(`prov-status-${p}`);
+    if(statusEl){
+      if(ppu){
+        statusEl.innerHTML = `<span>Pay-per-use</span><span>${usedPct>0?'credits used':'$5 balance'}</span>`;
+      }else{
+        const q = snap.quota[p] || {};
+        const wPct5h = (w.t5h*100).toFixed(1);
+        const wPct7d = (w.tWeekly*100).toFixed(1);
+        const wPct30d = (w.tMonthly*100).toFixed(1);
+        statusEl.innerHTML = `<span>5h:${wPct5h}% · 7d:${wPct7d}% · 30d:${wPct30d}%</span><span>${q.remaining?fmtTok(q.remaining)+' tok left':'—'}</span>`;
       }
     }
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${sz} ${sz}" width="160" height="160" shape-rendering="crispEdges"><rect width="${sz}" height="${sz}" fill="#fff"/><g fill="#0a0e14">${cells}</g></svg>`;
-    document.getElementById('qr-box').innerHTML = svg;
-  } catch (e) {
-    console.warn('QR render failed:', e);
-    document.getElementById('qr-box').innerHTML = '<div style="color:#888;font-size:11px;padding:20px">QR unavailable</div>';
-  }
-}
 
-/* ── PANEL 2: SYSTEM DIAGRAM ── */
-function updateDiagram(snap){
-  // Show infrastructure topology — active when real requests are flowing
-  const reqs = (snap && snap.requests) || [];
-  const active = reqs.length > 0;
-  const dq05 = document.getElementById('node-dq05');
-  const relays = document.getElementById('node-relays');
-  dq05.classList.toggle('active', true);   // DQ05 is always running
-  relays.classList.toggle('active', true);  // Relays always connected
-  // Update relay count subtitle
-  const relaySub = document.getElementById('relay-sub');
-  if (relaySub) relaySub.textContent = active ? `${reqs.length} recent reqs` : '3 connected';
-  // Phone nodes — pulse based on real participant count
-  const parts = (snap && snap.participants) || {};
-  const phoneCount = parts.count || 0;
-  const phoneRow = document.getElementById('phone-row');
-  if (phoneCount === 0) {
-    // No real participants — show placeholder
-    phoneRow.innerHTML = '<div class="diag-node phone"><div class="dn-icon">📱</div><div class="dn-label">Waiting…</div></div>';
-  } else {
-    const n = Math.min(phoneCount, 6);
-    if (phoneRow.children.length !== n) {
-      phoneRow.innerHTML = '';
-      for (let i = 0; i < n; i++) {
-        phoneRow.innerHTML += `<div class="diag-node phone active"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>`;
+    const chartDiv = `prov-chart-${p}`;
+    const traces = [];
+
+    // For pay-per-use: flat lines per model
+    // For quota providers: 3 faint window curves + bold total curve per model + 3 vertical markers
+    for(let mi = 0; mi < models.length; mi++){
+      const m = models[mi];
+      const mColor = MODEL_COLORS[m.model] || provColor;
+      const mRate = modelRates[mi]; // real per-model rate from snap.real_rates
+
+      if(ppu){
+        // Flat line for pay-per-use
+        const xVals = [], yVals = [];
+        for(let pct=0; pct<=100; pct+=2){
+          xVals.push(pct);
+          yVals.push(mRate);
+        }
+        traces.push({
+          x:xVals, y:yVals, mode:'lines',
+          line:{color:mColor, width:1.5, dash: mi>0 ? 'dot' : 'solid'},
+          name:m.model, hovertemplate:`<b>${m.model}</b><br>flat rate<br>${fmt$(mRate)}/M<extra></extra>`,
+          showlegend:true,
+        });
+      } else {
+        // ── 3 faint individual window curves ──
+        // Each curve shows what the price would be if ONLY that window had pressure
+        const winColors = ['rgba(88,166,255,0.25)', 'rgba(188,140,255,0.25)', 'rgba(240,136,62,0.25)']; // blue=5h, purple=7d, orange=30d
+        const winNames = ['5h window', '7d window', '30d window'];
+        const winTs = [w.t5h, w.tWeekly, w.tMonthly];
+
+        for(let wi=0; wi<3; wi++){
+          const fxVals = [], fyVals = [];
+          for(let pct=0; pct<=99; pct+=1){
+            fxVals.push(pct);
+            // Sweep this window from 0 to its current value
+            fyVals.push(singleWindowPrice(mRate, (pct/100) * winTs[wi] * 100 / 100));
+          }
+          traces.push({
+            x:fxVals, y:fyVals, mode:'lines',
+            line:{color:winColors[wi], width:0.8, dash:'dot'},
+            name:winNames[wi], hoverinfo:'skip', showlegend: mi===0 && wi===0,
+            legendgroup: 'windows',
+          });
+        }
+
+        // ── Bold total curve (superposition of all 3 windows) ──
+        const xVals = [], yVals = [];
+        for(let pct=0; pct<=99; pct+=1){
+          xVals.push(pct);
+          // Sweep all three windows proportionally from 0 to current values
+          const scaleT = pct / 100;
+          yVals.push(superpositionPrice(mRate, w.t5h * scaleT, w.tWeekly * scaleT, w.tMonthly * scaleT));
+        }
+        const currentPrice = superpositionPrice(mRate, w.t5h, w.tWeekly, w.tMonthly);
+        traces.push({
+          x:xVals, y:yVals, mode:'lines',
+          line:{color:mColor, width:2.5, dash: mi>0 ? 'dash' : 'solid'},
+          name:m.model, hovertemplate:`<b>${m.model}</b><br>%{x:.0f}% quota sweep<br>now: ${fmt$(currentPrice)}/M<extra></extra>`,
+          showlegend:true,
+        });
+
+        // ── Fill area under total curve 0→max(usedPct, 5) — always visible ──
+        if(mi === 0){
+          const fillEnd = Math.max(usedPct, 5);
+          const fillX = [], fillY = [];
+          for(let pct=0; pct<=Math.min(fillEnd,99); pct+=1){
+            fillX.push(pct);
+            const scaleT = pct / 100;
+            fillY.push(superpositionPrice(mRate, w.t5h * scaleT, w.tWeekly * scaleT, w.tMonthly * scaleT));
+          }
+          // Ensure we always have at least a small visible area
+          if(fillX.length < 2){
+            fillX.push(0, 5);
+            fillY.push(mRate, superpositionPrice(mRate, w.t5h*0.05, w.tWeekly*0.05, w.tMonthly*0.05));
+          }
+          traces.push({
+            x:fillX, y:fillY, mode:'none', fill:'tozeroy',
+            fillcolor:provColor+'22', line:{width:0}, name:'Used quota', hoverinfo:'skip', showlegend:false,
+          });
+        }
+
+        // ── Current position marker (at max window usage) ──
+        traces.push({
+          x:[usedPct], y:[currentPrice], mode:'markers',
+          marker:{size:7, color:mColor, line:{color:'#fff', width:1}},
+          name:m.model+' now', showlegend:false,
+          hovertemplate:`<b>${m.model}</b><br>max ${usedPct.toFixed(1)}% used<br>${fmt$(currentPrice)}/M<extra></extra>`,
+        });
       }
     }
-  }
-}
 
-/* ── PANEL 4: QUOTA BARS ── */
-function updateQuota(snap){
-  const q=(snap && snap.quota)||{};
-  const wrap=document.getElementById('quota-wrap');
-  const keys=Object.keys(q).length?Object.keys(q):['ours','friend'];
-  wrap.innerHTML=keys.map(k=>{
-    const kk=q[k]||{used_pct:0,remaining:0,total:2e6,resets_in_min:0};
-    const pct=clampPct(kk.used_pct);
-    const cls=pct<50?'green':(pct<80?'yellow':'red');
-    const healthyTag = kk.healthy === false ? ' · LOCKED' : '';
-    return `<div class="qb"><div class="qb-top"><span class="qb-name">${KEY_LABEL[k]||k.toUpperCase()}</span><span class="qb-pct" style="color:var(--${cls==='green'?'green':cls==='yellow'?'yellow':'red'})">${pct.toFixed(1)}%</span></div><div class="qb-track"><div class="qb-fill ${cls}" style="width:${pct}%"></div></div><div class="qb-meta"><span>${fmtTok(kk.remaining)} tok remaining${healthyTag}</span><span>${kk.resets_in_min!=null?'resets in '+kk.resets_in_min+'m':'—'}</span></div></div>`;
-  }).join('');
-}
+    // ── 3 vertical window markers with labels (for quota providers) ──
+    if(!ppu){
+      const maxRate = Math.max(...modelRates.map(r => superpositionPrice(r, w.t5h, w.tWeekly, w.tMonthly)));
+      const winPcts = [w.t5h * 100, w.tWeekly * 100, w.tMonthly * 100];
+      const winLabels = ['5h', '7d', '30d'];
+      const winColors = ['rgba(88,166,255,0.5)', 'rgba(188,140,255,0.5)', 'rgba(240,136,62,0.5)'];
 
-/* ── PANEL 5: COST METER ── */
-function updateCost(snap){
-  const cost=(snap && snap.cost_today)||0;
-  const intp=Math.floor(cost), frac=Math.round((cost-intp)*100);
-  document.getElementById('cost-big').innerHTML='$'+intp+'<span class="cents">.'+String(frac).padStart(2,'0')+'</span>';
-  document.getElementById('burn-rate').textContent=fmt$(snap ? snap.burn_rate_per_hour : 0,2);
-  const reqs=(snap && snap.requests)||[];
-  document.getElementById('cost-ticks').textContent=reqs.length+' requests · '+new Date().toLocaleDateString();
-  const cap=10;
-  document.getElementById('cost-bar-fill').style.width=clampPct(cost/cap*100)+'%';
-}
-
-/* ── PANEL 6: REQUEST FLOW ── */
-function updateFlow(snap){
-  const reqs=(snap && snap.requests)||[];
-  const list=document.getElementById('flow-list');
-  if(!reqs.length){list.innerHTML='<div class="flow-empty">No recent requests</div>';return;}
-  list.innerHTML=reqs.slice(0,20).map(r=>{
-    const provClass=r.provider||'ours';
-    const provNorm = provClass.includes('ollama')?'ollama':provClass;
-    return `<div class="flow-card"><span class="fc-time">${fmtTime(r.ts)}</span><div class="fc-mid"><span class="fc-prov"><span class="pill ${provNorm}">${(r.provider||'?').toUpperCase()}</span></span> <span class="fc-model">${r.model||''}</span><br><span class="fc-model">${r.reason||''}</span></div><div class="fc-right"><div class="fc-cost">${fmt$(r.cost||0,5)}</div><div class="fc-tok">${fmtTok(r.tokens||0)} tok</div></div></div>`;
-  }).join('');
-}
-
-/* ── PANEL 7: DISPATCH GATE ── */
-function updateGate(snap){
-  const g=(snap && snap.dispatch_gate)||{can_dispatch:true};
-  const light=document.getElementById('gate-light');
-  const status=document.getElementById('gate-status');
-  if(g.can_dispatch){light.className='gate-light go'; light.textContent='✓';status.className='gi-status go'; status.textContent='CLEAR';}
-  else{light.className='gate-light hold'; light.textContent='✕';status.className='gi-status hold'; status.textContent='HOLD';}
-  document.getElementById('gate-model').textContent=g.recommended_model||'—';
-  document.getElementById('gate-reason').textContent=g.reason||'';
-  document.getElementById('gate-price').textContent=fmt$(g.effective_price_per_m,4)+'/M';
-  document.getElementById('gate-margin').textContent=(g.safety_margin||2)+'×';
-}
-
-/* ── PANEL 8: TOKEN ECONOMY SUMMARY ── */
-function updateEcon(snap){
-  const parts = (snap && snap.participants) || {};
-  const scarcity = (snap && snap.scarcity) || {};
-  const pricing = (snap && snap.pricing) || {};
-  const ledger = (snap && snap.ledger) || [];
-  // participants count
-  document.getElementById('econ-participants').textContent = parts.count != null ? parts.count : '—';
-  // total prompts
-  document.getElementById('econ-prompts').textContent = parts.total_prompts != null ? parts.total_prompts : '—';
-  // avg price — use ours your_price as representative
-  let avgPrice = '—';
-  if (pricing.ours && pricing.ours.your_price != null) avgPrice = fmt$(pricing.ours.your_price, 3)+'/M';
-  document.getElementById('econ-avgprice').textContent = avgPrice;
-  // tokens used
-  document.getElementById('econ-tokens').textContent = parts.total_tokens != null ? fmtTok(parts.total_tokens) : '—';
-  // scarcity
-  const sf = scarcity.factor || 1.0;
-  document.getElementById('econ-scarcity').textContent = sf.toFixed(1)+'× ('+(scarcity.level||'—')+')';
-  const budgetPct = scarcity.budget_used_pct || 0;
-  document.getElementById('econ-budget-pct').textContent = budgetPct.toFixed(0)+'% budget used';
-  // scarcity track highlight
-  const segs = document.querySelectorAll('.scarcity-seg');
-  const activeSeg = budgetPct < 20 ? 0 : budgetPct < 40 ? 1 : budgetPct < 60 ? 2 : budgetPct < 80 ? 3 : 4;
-  segs.forEach((s,i) => s.style.opacity = i <= activeSeg ? '1' : '0.2');
-  // leaderboard — real ledger data only
-  const lb=document.getElementById('econ-leaderboard');
-  if(!ledger.length){
-    lb.innerHTML='<div class="lb-empty">No participants yet</div>';
-  } else {
-    lb.innerHTML=ledger.slice(0,8).map(p=>
-      `<div class="lb-row"><span class="who">${shortNpub(p.npub_short||p.npub)}</span><span class="prompts">${p.prompts_sent||p.prompts||0} prompts</span><span class="spent">${fmtTok(p.tokens_spent||p.spent||0)} tok</span></div>`
-    ).join('');
-  }
-}
-
-/* ── PANEL 9: MEASURED RATES (RP-5a) ── */
-/* Renders the Python source-of-truth measured rates from
-   real_price_tracker.get_rate_with_fallback(), surfaced by the CVM server as
-   `real_rates_tracker`. When that's absent (export file missing or stale),
-   falls back to the TS-reimplemented `real_rates`._default so the panel never
-   goes blank. Shows one row per provider with rate ($/M) and a MEASURED /
-   FALLBACK badge. */
-function updateMeasuredRates(snap){
-  const box = document.getElementById('rate-rows');
-  const foot = document.getElementById('rate-foot');
-  if(!box) return;
-
-  // Prefer the Python source-of-truth export; fall back to the TS path.
-  const tracker = snap && snap.real_rates_tracker;
-  const tsRates = snap && snap.real_rates;   // {provider: {model: {rate,...}, _default:{rate,...}}}
-
-  // Dashboard display-name → tracker provider-name map (the export uses the
-  // real_price_tracker provider keys; the TS path uses the same).
-  const PROVS = [
-    {key:'ours',         label:'Ours (z.ai)'},
-    {key:'friend',       label:'Friend (z.ai)'},
-    {key:'ollama_cloud', label:'Ollama Cloud'},
-    {key:'ppq',          label:'PPQ'},
-  ];
-
-  let rowsHtml = '';
-  let measuredCount = 0;
-  let source = 'real_price_tracker.get_rate_with_fallback()';
-
-  if(tracker && Array.isArray(tracker.providers) && tracker.providers.length){
-    // Python export path — one entry per provider with {rate_per_m, source, measured}
-    for(const p of PROVS){
-      const e = tracker.providers.find(x => x.provider === p.key);
-      if(!e){ rowsHtml += `<div class="rate-row"><span class="rate-prov">${p.label}</span><span class="rate-val">—</span><span class="src-badge fallback">n/a</span></div>`; continue; }
-      const isMeasured = !!e.measured;
-      if(isMeasured) measuredCount++;
-      const rateStr = e.rate_per_m === 0 ? '$0.00'
-        : fmt$(e.rate_per_m, 4) + '/M';
-      const cls = e.rate_per_m === 0 ? 'rate-val zero' : 'rate-val';
-      const badge = isMeasured
-        ? '<span class="src-badge measured">measured</span>'
-        : `<span class="src-badge fallback">${e.fallback_reason || 'fallback'}</span>`;
-      rowsHtml += `<div class="rate-row"><span class="rate-prov">${p.label}</span><span class="${cls}">${rateStr}</span>${badge}</div>`;
+      for(let wi=0; wi<3; wi++){
+        const pct = winPcts[wi];
+        // Vertical line
+        traces.push({
+          x:[pct, pct], y:[0.001, maxRate * 1.1],
+          mode:'lines', line:{color:winColors[wi], width:1.5, dash:'dashdot'},
+          hoverinfo:'skip', showlegend:false,
+        });
+        // Label annotation via a text trace
+        traces.push({
+          x:[pct], y:[maxRate * 1.15],
+          mode:'text', text:[`${winLabels[wi]}: ${pct.toFixed(1)}%`],
+          textfont:{size:8, color:winColors[wi].replace('0.5','1')},
+          hoverinfo:'skip', showlegend:false,
+        });
+      }
     }
-  } else {
-    // TS fallback — reconstruct from real_rates._default
-    source = 'computeRealRates() (TS fallback — Python export unavailable)';
-    for(const p of PROVS){
-      const provEntry = tsRates && tsRates[p.key];
-      const def = provEntry && provEntry._default;
-      if(!def){ rowsHtml += `<div class="rate-row"><span class="rate-prov">${p.label}</span><span class="rate-val">—</span><span class="src-badge fallback">n/a</span></div>`; continue; }
-      const isMeasured = def.source === 'measured';
-      if(isMeasured) measuredCount++;
-      const rateStr = def.rate === 0 ? '$0.00' : fmt$(def.rate, 4) + '/M';
-      const cls = def.rate === 0 ? 'rate-val zero' : 'rate-val';
-      const badge = isMeasured
-        ? '<span class="src-badge measured">measured</span>'
-        : `<span class="src-badge fallback">${def.source || 'fallback'}</span>`;
-      rowsHtml += `<div class="rate-row"><span class="rate-prov">${p.label}</span><span class="${cls}">${rateStr}</span>${badge}</div>`;
+
+    const xTitle = ppu ? 'Credits Used %' : 'Quota Used % (5h · 7d · 30d)';
+    const layout = {
+      paper_bgcolor:PLOT_BG, plot_bgcolor:PLOT_BG,
+      margin:{l:40,r:8,t:20,b:28},
+      showlegend:true,
+      legend:{orientation:'h', y:-0.2, font:{size:8, color:'#8b949e'}, x:0.5, xanchor:'center'},
+      xaxis:{title:xTitle, gridcolor:PLOT_GRID, zeroline:false,
+        tickfont:{size:9,color:'#8b949e'}, range:[0,100], tickvals:[0,25,50,75,100]},
+      yaxis:{title:'Price/M', gridcolor:PLOT_GRID, zeroline:false,
+        tickfont:{size:9,color:'#8b949e'}, type:'log',
+        tickformat:'$.3f', automargin:true},
+      font:{family:'SF Mono,monospace', size:9, color:'#8b949e'},
+    };
+
+    Plotly.react(chartDiv, traces, layout, {displayModeBar:false, responsive:true});
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   RENDER: CONSUMER CHART (Price/M over time per provider)
+   ════════════════════════════════════════════════════════════════════════ */
+function renderConsumer(snap){
+  const traces=[];
+  
+  for(const p of PROVIDERS){
+    const hist = state.priceHist[p] || [];
+    if(!hist.length) continue;
+    
+    const baseRate = getBaseRate(snap, p);
+    const usedPct = getQuotaUsed(snap, p);
+    const currentPrice = isPayPerUse(p) ? baseRate : (() => {
+      const w = getQuotaWindows(snap, p);
+      return superpositionPrice(baseRate, w.t5h, w.tWeekly, w.tMonthly);
+    })();
+    
+    // Historical line
+    traces.push({
+      x: hist.map(pt=>pt.t*1000), y: hist.map(pt=>pt.your_price||pt.cost_basis),
+      mode:'lines', line:{color:PROV_COLOR[p],width:1.5}, name:PROV_LABEL[p],
+      hovertemplate:`<b>${PROV_LABEL[p]}</b><br>%{y:$.4f}/M<br>%{x}<extra></extra>`,
+    });
+    
+    // Current price point
+    traces.push({
+      x:[Date.now()], y:[currentPrice], mode:'markers',
+      marker:{size:8,color:PROV_COLOR[p],symbol:'circle',line:{color:'#fff',width:1}},
+      name:PROV_LABEL[p]+' now', showlegend:false,
+      hovertemplate:`<b>${PROV_LABEL[p]} NOW</b><br>${fmt$(currentPrice)}/M<extra></extra>`,
+    });
+  }
+  
+  const layout={
+    paper_bgcolor:PLOT_BG, plot_bgcolor:PLOT_BG,
+    margin:{l:50,r:20,t:10,b:35},
+    showlegend:true,
+    legend:{orientation:'h',y:-0.15,font:{size:10,color:'#8b949e'},
+      traceorder:'normal',x:0.5,xanchor:'center'},
+    xaxis:{title:'',gridcolor:PLOT_GRID,zeroline:false,
+      tickfont:{size:9,color:'#8b949e'},type:'date',tickformat:'%m/%d'},
+    yaxis:{title:'Price / M ($)',gridcolor:PLOT_GRID,zeroline:false,
+      tickfont:{size:9,color:'#8b949e'},type:'log',
+      tickformat:'$.4f',automargin:true},
+    font:{family:'SF Mono,monospace',size:10,color:'#8b949e'},
+  };
+  
+  Plotly.react('consumer-chart', traces, layout, {displayModeBar:false,responsive:true});
+  
+  // Update consumer rate display
+  const meta = snap.pricing_meta||{};
+  const avgRate = getBaseRate(snap,'friend') * (1+(meta.margin||0.266));
+  document.getElementById('consumer-rate').textContent = `Avg: ${fmt$(avgRate)}/M · Spend today: ${fmt$(snap.cost_today||0,2)}`;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   RENDER: EDGES (SVG lines from providers to consumer)
+   ════════════════════════════════════════════════════════════════════════ */
+function renderEdges(snap){
+  const svg = document.getElementById('edges-svg');
+  const container = document.getElementById('arch-container');
+  const consumerEl = document.querySelector('.consumer-card');
+  const containerRect = container.getBoundingClientRect();
+  
+  svg.setAttribute('viewBox',`0 0 ${containerRect.width} ${containerRect.height}`);
+  svg.setAttribute('width',containerRect.width);
+  svg.setAttribute('height',containerRect.height);
+  
+  // Get consumer card top-center position
+  const consumerRect = consumerEl.getBoundingClientRect();
+  const consumerTop = consumerRect.top - containerRect.top + 5; // top of consumer card
+  const consumerCenterX = consumerRect.left - containerRect.left + consumerRect.width/2;
+  
+  // Determine active provider from recent routing decisions
+  const reqs = snap.requests || [];
+  let activeProvider = null;
+  if(reqs.length){
+    const last = reqs[0];
+    const key = last.key || last.provider || '';
+    const keyMap = {'friend':'friend','ollama_cloud':'ollama','ollama':'ollama','ppq':'ppq','openrouter':'openrouter'};
+    activeProvider = keyMap[key] || keyMap[last.provider] || null;
+  }
+  
+  // Also check provider distribution
+  const dist = snap.provider_distribution || {};
+  let maxDist = 0, distProvider = null;
+  for(const p of PROVIDERS){
+    const d = dist[p] || 0;
+    if(d > maxDist){maxDist=d; distProvider=p;}
+  }
+  
+  // Draw edges
+  let svgContent='';
+  for(const p of PROVIDERS){
+    const card = document.getElementById(`prov-${p}`);
+    if(!card) continue;
+    const cardRect = card.getBoundingClientRect();
+    const cardBottom = cardRect.bottom - containerRect.top;
+    const cardCenterX = cardRect.left - containerRect.left + cardRect.width/2;
+    
+    const isActive = (p===activeProvider) || (!activeProvider && p===distProvider);
+    const color = PROV_COLOR[p];
+    const width = isActive?3:1.5;
+    const opacity = isActive?0.9:0.4;
+    
+    // Curved bezier from provider bottom to consumer top
+    const midY = (cardBottom + consumerTop)/2;
+    const path = `M ${cardCenterX} ${cardBottom} C ${cardCenterX} ${midY}, ${consumerCenterX} ${midY}, ${consumerCenterX} ${consumerTop}`;
+    
+    svgContent += `<path class="edge-line ${isActive?'active':''}" d="${path}" stroke="${color}" stroke-width="${width}" opacity="${opacity}" fill="none"/>`;
+    
+    // Flow dot on active edges
+    if(isActive){
+      const dotId = `dot-${p}`;
+      svgContent += `<circle r="4" fill="${color}" opacity="0.9">
+        <animateMotion dur="2s" repeatCount="indefinite">
+          <mpath href="#${dotId}-path"/>
+        </animateMotion>
+      </circle>
+      <path id="${dotId}-path" d="${path}" fill="none" stroke="none"/>`;
+    }
+  }
+  
+  svg.innerHTML = svgContent;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   RENDER: DASHBOARD PANELS (Cost Meter, Quota Bars, Request Flow,
+   Dispatch Gate, Measured Rates)
+   ════════════════════════════════════════════════════════════════════════ */
+
+// Providers shown in quota bars and request flow (excludes 'ours' which is disabled)
+const QUOTA_BAR_PROVIDERS = ['friend','ollama'];
+
+// Map routing decision keys to provider labels/colors
+function keyToProvider(key){
+  const m = {'friend':'friend','ollama_cloud':'ollama','ollama':'ollama','ppq':'ppq','openrouter':'openrouter'};
+  return m[key] || key;
+}
+
+function renderCostMeter(snap){
+  const costToday = snap.cost_today || 0;
+  document.getElementById('cost-today').textContent = '$' + costToday.toFixed(2);
+  
+  // Calculate burn rate from routing decisions in last hour
+  const reqs = snap.requests || [];
+  const now = Date.now()/1000;
+  const oneHourAgo = now - 3600;
+  const recentReqs = reqs.filter(r => (r.ts||0) > oneHourAgo);
+  const hourlyCost = recentReqs.reduce((s,r) => s + (r.cost||0), 0);
+  document.getElementById('burn-rate').textContent = '$' + hourlyCost.toFixed(2) + '/h';
+  
+  // Request count: from provider_distribution sum or requests length
+  const dist = snap.provider_distribution || {};
+  const totalReqs = Object.values(dist).reduce((s,v) => s + (v||0), 0) || reqs.length;
+  document.getElementById('req-count').textContent = String(totalReqs);
+  
+  const meta = snap.pricing_meta || {};
+  document.getElementById('cost-meter-subtitle').textContent = `margin: ${((meta.margin||0.266)*100).toFixed(1)}%`;
+}
+
+function renderQuotaBars(snap){
+  const body = document.getElementById('quota-bars-body');
+  let html = '';
+  for(const p of QUOTA_BAR_PROVIDERS){
+    const q = snap.quota[p] || {};
+    const w = getQuotaWindows(snap, p);
+    const color = PROV_COLOR[p];
+    const resetsIn = q.resets_in_min || 0;
+    const resetStr = resetsIn > 0 ? `${Math.floor(resetsIn/60)}h ${resetsIn%60}m` : '—';
+    const remaining = q.remaining || 0;
+
+    // 3 sub-bars: 5h, 7d, 30d
+    const windows = [
+      {label:'5h', pct: w.t5h * 100, color: 'rgba(88,166,255,0.8)'},
+      {label:'7d', pct: w.tWeekly * 100, color: 'rgba(188,140,255,0.8)'},
+      {label:'30d', pct: w.tMonthly * 100, color: 'rgba(240,136,62,0.8)'},
+    ];
+
+    html += `<div class="quota-bar-row">
+      <span class="quota-bar-label" style="color:${color};min-width:60px">${PROV_LABEL[p]}</span>
+      <div style="flex:1;display:flex;flex-direction:column;gap:3px">`;
+
+    for(const win of windows){
+      html += `<div style="display:flex;align-items:center;gap:6px">
+        <span style="font-size:9px;color:var(--txt-dim);min-width:24px;font-family:var(--mono)">${win.label}</span>
+        <div class="quota-bar-track" style="height:12px">
+          <div class="quota-bar-fill" style="width:${Math.min(win.pct,100)}%;background:${win.color}"></div>
+        </div>
+        <span style="font-size:9px;color:var(--txt-dim);min-width:40px;text-align:right;font-family:var(--mono)">${win.pct.toFixed(1)}%</span>
+      </div>`;
+    }
+
+    html += `</div>
+      <span class="quota-bar-info" style="min-width:140px">${fmtTok(remaining)} left · resets ${resetStr}</span>
+    </div>`;
+  }
+  body.innerHTML = html;
+}
+
+function renderRequestFlow(snap){
+  const list = document.getElementById('req-flow-list');
+  const reqs = snap.requests || [];
+  
+  if(!reqs.length){
+    list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--txt-dim)">No routing decisions yet</div>';
+    return;
+  }
+  
+  let html = '';
+  for(const r of reqs.slice(0, 20)){
+    const ts = r.ts ? new Date(r.ts * 1000).toLocaleTimeString('en-GB', {hour12:false}) : '—';
+    const key = r.key || r.provider || '—';
+    const provKey = keyToProvider(key);
+    const color = PROV_COLOR[provKey] || '#8b949e';
+    const model = r.model || '—';
+    const reason = (r.reason || '').slice(0, 60);
+    const cost = r.cost != null ? '$' + Number(r.cost).toFixed(4) : '—';
+    const tokens = r.tokens != null ? fmtTok(r.tokens) : '—';
+    
+    html += `<div class="req-row">
+      <span class="req-ts">${ts}</span>
+      <span class="req-key" style="color:${color}">${key}</span>
+      <span class="req-model">${model}</span>
+      <span class="req-reason" title="${(r.reason||'').replace(/"/g,'&quot;')}">${reason}</span>
+      <span class="req-cost">${cost}</span>
+      <span class="req-tokens">${tokens}</span>
+    </div>`;
+  }
+  list.innerHTML = html;
+}
+
+function renderDispatchGate(snap){
+  const gate = snap.dispatch_gate || snap.dispatch_gate || {};
+  const status = (gate.status || 'clear').toUpperCase();
+  const model = gate.model || '—';
+  const reason = gate.reason || '—';
+  const effRate = gate.effective_rate || gate.effective_rate_per_m || 0;
+  const margin = gate.margin || 0;
+  
+  const grid = document.getElementById('gate-grid');
+  const badgeClass = status === 'CLEAR' ? 'clear' : 'blocked';
+  
+  grid.innerHTML = `
+    <span class="gate-badge ${badgeClass}">${status}</span>
+    <div class="gate-stat">
+      <span class="gate-stat-label">Model</span>
+      <span class="gate-stat-value">${model}</span>
+    </div>
+    <div class="gate-stat">
+      <span class="gate-stat-label">Reason</span>
+      <span class="gate-stat-value" style="font-size:12px">${reason}</span>
+    </div>
+    <div class="gate-stat">
+      <span class="gate-stat-label">Effective $/M</span>
+      <span class="gate-stat-value">${fmt$(effRate)}</span>
+    </div>
+    <div class="gate-stat">
+      <span class="gate-stat-label">Margin Multiplier</span>
+      <span class="gate-stat-value">${margin.toFixed(3)}x</span>
+    </div>
+  `;
+  
+  document.getElementById('gate-subtitle').textContent = status === 'CLEAR' ? 'routing active' : 'blocked';
+}
+
+function renderMeasuredRates(snap){
+  const tbody = document.getElementById('rates-tbody');
+  const rr = snap.real_rates || {};
+
+  // Build rows from snap.real_rates: { provider: { model: {rate, source, calls, window} } }
+  const rows = [];
+  for(const [provKey, models] of Object.entries(rr)){
+    const provDisplay = keyToProvider(provKey) || provKey;
+    const color = PROV_COLOR[provDisplay] || '#8b949e';
+    for(const [model, info] of Object.entries(models)){
+      rows.push({
+        provider: provDisplay,
+        model: model,
+        rate: info.rate || 0,
+        source: (info.source || '').toLowerCase().includes('measur') ? 'measured' : 'fallback',
+        window: info.window || '—',
+        calls: info.calls || 0,
+        color: color,
+      });
     }
   }
 
-  box.innerHTML = rowsHtml;
-  const allMeasured = measuredCount === PROVS.length;
-  foot.innerHTML = `Source: ${source} · <span class="${allMeasured?'ok':''}">${measuredCount}/${PROVS.length} measured</span>`;
+  if(!rows.length){
+    // Fallback to old tracker format
+    const tracker = snap.real_rates_tracker || {};
+    const providers = tracker.providers || [];
+    if(!providers.length){
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--txt-dim);padding:16px">No measured rates yet</td></tr>';
+      return;
+    }
+    let html = '';
+    for(const p of providers){
+      const provKey = keyToProvider(p.provider || p.key || '');
+      const color = PROV_COLOR[provKey] || '#8b949e';
+      const rate = p.rate_per_m || 0;
+      const source = (p.source || p.measured || '').toLowerCase().includes('measur') ? 'measured' : 'fallback';
+      const sourceLabel = source === 'measured' ? 'MEASURED' : 'FALLBACK';
+      const windowH = p.window_hours || '—';
+      html += `<tr>
+        <td style="color:${color};font-weight:700">${p.provider || p.key || '—'}</td>
+        <td>—</td>
+        <td>${fmt$(rate)}</td>
+        <td><span class="source-badge ${source}">${sourceLabel}</span></td>
+        <td>${windowH}</td>
+      </tr>`;
+    }
+    tbody.innerHTML = html;
+    return;
+  }
+
+  let html = '';
+  for(const r of rows){
+    const sourceLabel = r.source === 'measured' ? 'MEASURED' : 'FALLBACK';
+    html += `<tr>
+      <td style="color:${r.color};font-weight:700">${r.provider}</td>
+      <td>${r.model === '_default' ? '<i style="color:#8b949e">default</i>' : r.model}</td>
+      <td>${fmt$(r.rate)}</td>
+      <td><span class="source-badge ${r.source}">${sourceLabel}</span></td>
+      <td>${r.window}</td>
+    </tr>`;
+  }
+  tbody.innerHTML = html;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -773,208 +1023,148 @@ function updateMeasuredRates(snap){
    ════════════════════════════════════════════════════════════════════════ */
 function renderAll(){
   const snap = state.snapshot;
-  // Append current pricing to history for charts
-  if(snap && snap.pricing){
-    const now=Date.now()/1000;
-    for(const k of KEYS){
-      const p=snap.pricing[k]; if(!p) continue;
-      const h=state.priceHist[k];
-      h.push({t:now,cost_basis:p.cost_basis,your_price:p.your_price,margin_pct:p.margin_pct});
-      if(h.length>HIST_MAX) h.shift();
-    }
-  }
-  updateMiniCharts();
-  updateDiagram(snap);
-  updateQuota(snap);
-  updateCost(snap);
-  updateFlow(snap);
-  updateGate(snap);
-  updateEcon(snap);
-  updateMeasuredRates(snap);
+  if(!snap) return;
+  renderProviders(snap);
+  renderConsumer(snap);
+  renderEdges(snap);
+  renderCostMeter(snap);
+  renderQuotaBars(snap);
+  renderRequestFlow(snap);
+  renderDispatchGate(snap);
+  renderMeasuredRates(snap);
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   SNAPSHOT FETCH — Nostr-native (production) with HTTP fallback (?api=)
+   SNAPSHOT FETCH — Nostr + HTTP fallback (reused)
    ════════════════════════════════════════════════════════════════════════ */
-let nostrPool = null;
-let nostrSub = null;
-let pollInterval = POLL_MS;            // current delay; grows on failure, resets on success
-let lastNostrEventAt = 0;              // ts (ms) of the last received kind-30315 event
-let nostrWatchdog = null;             // setInterval handle for the freshness watchdog
-let nostrReconnectTimer = null;       // setInterval handle for the reconnect health check
-let priceHistSeeded = false;          // true once a snapshot's price_history was applied
+let nostrPool=null, nostrSub=null;
+let pollInterval=POLL_MS, lastNostrEventAt=0;
+let nostrWatchdog=null, nostrReconnectTimer=null;
+let priceHistSeeded=false;
 
-// Freshness / reconnect thresholds. ?stale_ms= and ?reconnect_ms= are test
-// seams that shrink the production windows for fast, deterministic tests.
-const STALE_THRESHOLD_MS = parseInt(param('stale_ms')) || 15_000;
-const NOSTR_RECONNECT_MS = parseInt(param('reconnect_ms')) || 60_000;
+const STALE_THRESHOLD_MS = parseInt(param('stale_ms'))||15000;
+const NOSTR_RECONNECT_MS = parseInt(param('reconnect_ms'))||60000;
 
-/* Seed Panel 3 price-history charts from a snapshot's price_history array
-   (Task 13). Called once on the first snapshot that carries history, so the
-   charts start full instead of accruing 1 point per snapshot. */
 function seedPriceHistory(points){
-  if(!Array.isArray(points) || !points.length || priceHistSeeded) return;
-  const byKey = {};
+  if(!Array.isArray(points)||!points.length||priceHistSeeded) return;
+  const byKey={};
   for(const pt of points){
-    const k = pt.key;
-    if(!byKey[k]) byKey[k] = [];
-    byKey[k].push({t: pt.t ?? pt.ts, cost_basis: pt.cost_basis, your_price: pt.your_price, margin_pct: pt.margin_pct});
+    const k=pt.key;
+    // Map 'ollama_cloud' -> 'ollama'
+    const mk = k==='ollama_cloud'?'ollama':k;
+    if(!PROVIDERS.includes(mk)) continue;
+    if(!byKey[mk]) byKey[mk]=[];
+    byKey[mk].push({t:pt.t??pt.ts, cost_basis:pt.cost_basis, your_price:pt.your_price, margin_pct:pt.margin_pct});
   }
-  for(const k of KEYS){
-    const seeded = byKey[k];
-    if(seeded && seeded.length){
+  for(const k of PROVIDERS){
+    const seeded=byKey[k];
+    if(seeded&&seeded.length){
       seeded.sort((a,b)=>a.t-b.t);
-      state.priceHist[k] = seeded.slice(-HIST_MAX);
+      state.priceHist[k]=seeded.slice(-HIST_MAX);
     }
   }
-  priceHistSeeded = true;
+  priceHistSeeded=true;
 }
 
-/* In Nostr mode the display subscribes to the CVM's public kind-30315
-   replaceable event. New snapshots are pushed in real-time — no polling
-   required. Idempotent against re-subscribe: calling it again (e.g. from the
-   reconnect watchdog) closes the previous subscription first. */
 async function initNostr(){
-  if(nostrSub){                        // close any prior sub before re-subscribing
-    try { nostrSub.close(); } catch(e){}
-    nostrSub = null;
-  }
-  const N = window.NostrTools;
-  // window.__testNostrPool lets tests inject a deterministic fake pool.
-  const PoolCtor = window.__testNostrPool || (N && N.SimplePool);
+  if(nostrSub){try{nostrSub.close();}catch(e){}nostrSub=null;}
+  const N=window.NostrTools;
+  const PoolCtor=window.__testNostrPool||(N&&N.SimplePool);
   if(!PoolCtor) throw new Error('nostr-tools not loaded');
-  if(!nostrPool) nostrPool = new PoolCtor();
-  nostrSub = nostrPool.subscribeMany(CVM_RELAYS, {
-    kinds: [30315],
-    authors: [CVM_NPUB_HEX],
-    "#d": ["cvm-snapshot"],
-    limit: 1,
-  }, {
-    onevent: (event) => {
-      lastNostrEventAt = Date.now();
-      try {
-        const raw = JSON.parse(event.content);
-        const snap = normalizeSnapshot(raw);
+  if(!nostrPool) nostrPool=new PoolCtor();
+  nostrSub=nostrPool.subscribeMany(CVM_RELAYS,{
+    kinds:[30315], authors:[CVM_NPUB_HEX], "#d":["cvm-snapshot"], limit:1,
+  },{
+    onevent:(event)=>{
+      lastNostrEventAt=Date.now();
+      try{
+        const raw=JSON.parse(event.content);
+        const snap=normalizeSnapshot(raw);
         if(!snap) throw new Error('invalid snapshot');
-        if(raw.price_history) seedPriceHistory(raw.price_history);   // Task 13
-        state.snapshot = snap;
-        if(raw.cost_today != null) state.costToday = raw.cost_today;
+        if(raw.price_history) seedPriceHistory(raw.price_history);
+        state.snapshot=snap;
+        if(raw.cost_today!=null) state.costToday=raw.cost_today;
         setConn('live');
         renderAll();
-      } catch(e) {
-        console.warn('Failed to parse Nostr snapshot:', e.message);
-      }
+      }catch(e){console.warn('Parse error:',e.message);}
     },
-    oneose: () => { console.log('Nostr EOSE'); },
+    oneose:()=>{console.log('Nostr EOSE');},
   });
   startNostrWatchdog();
 }
 
-/* Freshness watchdog (Task 9) + reconnect health check (Task 10). Both are
-   started once and stay running for the page lifetime. */
 function startNostrWatchdog(){
-  if(nostrWatchdog) return;            // already armed — never stack intervals
-  // Task 9: if no kind-30315 event arrives within STALE_THRESHOLD_MS, transition
-  // LIVE → STALE while keeping the last-known data on screen.
-  nostrWatchdog = setInterval(() => {
-    if(!state.snapshot || !lastNostrEventAt) return;   // nothing received yet
-    if(Date.now() - lastNostrEventAt > STALE_THRESHOLD_MS){
-      setConn('stale');
+  if(nostrWatchdog) return;
+  nostrWatchdog=setInterval(()=>{
+    if(!state.snapshot||!lastNostrEventAt) return;
+    if(Date.now()-lastNostrEventAt>STALE_THRESHOLD_MS) setConn('stale');
+  },Math.min(5000,STALE_THRESHOLD_MS));
+  nostrReconnectTimer=setInterval(()=>{
+    const since=lastNostrEventAt?Date.now()-lastNostrEventAt:Infinity;
+    if(since>NOSTR_RECONNECT_MS){
+      console.warn('[nostr] reconnecting…');
+      lastNostrEventAt=0;
+      initNostr().catch(e=>console.warn('[nostr] reconnect failed:',e.message));
     }
-  }, Math.min(5_000, STALE_THRESHOLD_MS));
-  // Task 10: if no event arrives within NOSTR_RECONNECT_MS, the relay WebSocket
-  // is presumed dead — re-call initNostr() to re-subscribe.
-  nostrReconnectTimer = setInterval(() => {
-    const since = lastNostrEventAt ? Date.now() - lastNostrEventAt : Infinity;
-    if(since > NOSTR_RECONNECT_MS){
-      console.warn(`[nostr] no events in ${NOSTR_RECONNECT_MS}ms — reconnecting…`);
-      lastNostrEventAt = 0;            // give the new sub a fresh window
-      initNostr().catch(e => console.warn('[nostr] reconnect failed:', e.message));
-    }
-  }, Math.min(10_000, NOSTR_RECONNECT_MS));
+  },Math.min(10000,NOSTR_RECONNECT_MS));
 }
 
-/* HTTP fallback poll — used when ?api=<url> is given (local testing). */
 async function pollHttp(){
-  const isFirst = !state.snapshot;
-  let ok = false;
+  let ok=false;
   try{
-    if(isFirst) setConn('connecting');
-    const resp = await fetch(`${API_BASE}/snapshot`, {signal: AbortSignal.timeout(8000)});
+    setConn('connecting');
+    const resp=await fetch(`${API_BASE}/snapshot`,{signal:AbortSignal.timeout(8000)});
     if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const raw = await resp.json();
-    if(!raw) throw new Error('no snapshot data');
-    const snap = normalizeSnapshot(raw);
+    const raw=await resp.json();
+    const snap=normalizeSnapshot(raw);
     if(!snap) throw new Error('invalid snapshot');
-    if(raw.price_history) seedPriceHistory(raw.price_history);   // Task 13
-    state.snapshot = snap;
+    if(raw.price_history) seedPriceHistory(raw.price_history);
+    state.snapshot=snap;
     if(snap.cost_today!=null) state.costToday=snap.cost_today;
     setConn('live');
-    ok = true;
+    ok=true;
   }catch(e){
-    console.warn('HTTP snapshot fetch failed:', e.message);
-    if(state.snapshot) setConn('stale');
-    else setConn('offline');
+    console.warn('HTTP fetch failed:',e.message);
+    if(state.snapshot) setConn('stale'); else setConn('offline');
   }
   renderAll();
-  let nextDelay;
-  if(ok){
-    nextDelay = POLL_MIN;
-    pollInterval = POLL_MIN;
-  }else{
-    nextDelay = pollInterval;
-    pollInterval = Math.min(pollInterval * 2, POLL_MAX);
-  }
-  setTimeout(pollHttp, nextDelay);
+  let nextDelay=ok?POLL_MIN:pollInterval;
+  if(!ok) pollInterval=Math.min(pollInterval*2,POLL_MAX);
+  setTimeout(pollHttp,nextDelay);
 }
 
 /* ════════════════════════════════════════════════════════════════════════
-   CLOCK
+   CLOCK + INIT
    ════════════════════════════════════════════════════════════════════════ */
 function tickClock(){document.getElementById('time-text').textContent=new Date().toLocaleTimeString('en-GB',{hour12:false});}
 
-/* ════════════════════════════════════════════════════════════════════════
-   INIT
-   ════════════════════════════════════════════════════════════════════════ */
 async function init(){
-  renderQR();                     // Panel 1
-  initMiniCharts();               // Panel 3 charts
+  initProviderCards();
   tickClock(); setInterval(tickClock,1000);
   setConn('connecting');
-  // Seed price-history charts (HTTP-testing path only; in Nostr mode history
-  // accrues live from snapshots, so no localhost fetch is made).
+  
+  // HTTP path: also fetch price history
   if(!USE_NOSTR){
-    try {
-      const phResp = await fetch(`${API_BASE}/price-history?hours=24`);
-      if (phResp.ok) {
-        const ph = await phResp.json();
-        if (ph && ph.points) {
-          // Group by key
-          const byKey = {};
-          for (const pt of ph.points) {
-            if (!byKey[pt.key]) byKey[pt.key] = [];
-            byKey[pt.key].push({t: pt.ts, cost_basis: pt.cost_basis, your_price: pt.your_price, margin_pct: pt.margin_pct});
-          }
-          for (const k of KEYS) {
-            if (byKey[k]) state.priceHist[k] = byKey[k].slice(-HIST_MAX);
-          }
-        }
+    try{
+      const phResp=await fetch(`${API_BASE}/price-history?hours=168`);
+      if(phResp.ok){
+        const ph=await phResp.json();
+        if(ph&&ph.points) seedPriceHistory(ph.points);
       }
-    } catch(e) { console.warn('Price history fetch failed (non-fatal):', e.message); }
+    }catch(e){console.warn('Price history fetch failed:',e.message);}
   }
+  
   if(USE_NOSTR){
-    // Nostr mode: subscribe once, updates are pushed in real-time
     setConn('connecting');
-    try {
-      await initNostr();
-    } catch(e) {
-      console.warn('Nostr init failed:', e.message);
-      setConn('offline');
-    }
-  } else {
-    // HTTP mode: poll with backoff
+    try{await initNostr();}catch(e){console.warn('Nostr init failed:',e.message);setConn('offline');}
+  }else{
     await pollHttp();
   }
+  
+  // Redraw edges on window resize
+  window.addEventListener('resize',()=>{
+    if(state.snapshot) renderEdges(state.snapshot);
+  });
 }
 init();
 </script>

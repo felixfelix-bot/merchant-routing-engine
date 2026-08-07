@@ -87,17 +87,11 @@ def _is_measured(provider: str, *, db_path: str | None, _now: float | None) -> b
     came from guarantees the two never contradict.
     """
     try:
-        if rpt.get_real_rate(provider, None, db_path=db_path, _now=_now) is not None:
+        # Use provider-specific trailing window (same as get_rate_with_fallback)
+        if rpt.get_trailing_rate(provider, db_path=db_path, _now=_now) is not None:
             return True
     except Exception:  # pragma: no cover - documented never-raise
         pass
-    if provider == "ollama_cloud":
-        try:
-            trailing = rpt.get_trailing_rate(provider, db_path=db_path, _now=_now)
-            if trailing is not None and trailing > 0:
-                return True
-        except Exception:  # pragma: no cover
-            pass
     return False
 
 

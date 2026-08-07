@@ -57,7 +57,7 @@ const CFG = {
   basePricePerToken: 1.0,   // demo-tokens per estimated-token
   // Pricing model
   flatKeyCostPerM: 0.02,    // $/M for ours+friend (flat-rate keys)
-  ollamaMonthlyUsd: 100.0,
+  ollamaMonthlyUsd: 25.0,
   margin: 0.266,            // 21% displayed margin (0.266 markup = 21% of sell price)
   btcPriceUsd: 100_000,
   demoModel: process.env.DEMO_MODEL || "glm-4.5-flash",
@@ -338,6 +338,32 @@ await refreshProxyCache();
 setInterval(() => refreshProxyCache().catch(() => {}), CFG.proxyCacheMs);
 
 // ═══════════════════════════════════════════════════════════════════════════
+// OLLAMA PER-MODEL RATES (duration-allocated hybrid)
+// Allocates $25/mo across models proportional to GPU time (duration_ms)
+// per_model_rate = (model_duration / total_duration) * $25 / (model_tokens/1e6)
+// ═══════════════════════════════════════════════════════════════════════════
+
+function computeOllamaModelRates(db: any): Record<string, number> {
+  const now = Math.floor(Date.now() / 1000);
+  const monthAgo = now - 30 * 86400;
+  const rows = qall(db,
+    `SELECT model, SUM(duration_ms) as dur, SUM(prompt_tokens + completion_tokens) as tok
+     FROM api_calls
+     WHERE key_name='ollama_cloud' AND model IS NOT NULL AND ts > ?
+     GROUP BY model`, [monthAgo]);
+  const totalDur = rows.reduce((s: number, r: any) => s + (r.dur || 0), 0);
+  if (totalDur <= 0) return {};
+  const rates: Record<string, number> = {};
+  for (const r of rows) {
+    const tok = r.tok || 0;
+    if (tok <= 0) continue;
+    const alloc = (r.dur / totalDur) * CFG.ollamaMonthlyUsd;
+    rates[r.model] = round(alloc / (tok / 1e6), 5);
+  }
+  return rates;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PRICING COMPUTATION
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -381,6 +407,7 @@ function computePricing(): any {
     _meta: {
       ollama_tokens_30d: ollamaTokens,
       ollama_monthly_usd: CFG.ollamaMonthlyUsd,
+      ollama_model_rates: computeOllamaModelRates(zaiDb),
       ppq_cost_per_m_real: round(ppqCostPerM, 4),
       flat_key_cost_per_m: CFG.flatKeyCostPerM,
       margin: CFG.margin,
@@ -482,7 +509,29 @@ function computeRealRates(): Record<string, Record<string, RealRateEntry>> {
         const rate = (provRow.cost / provRow.tokens) * 1e6;
         entry._default = { rate: round(rate, 6), source: "measured", calls: provRow.calls, window: windowLabel };
       } else if (prov === "ollama_cloud") {
-        // Ollama fallback: amortize monthly fee
+        // Ollama: duration-allocated per-model rates (hybrid approach)
+        // Allocate $25/mo across models proportional to wall-clock GPU-time consumed
+        const since30d = now - 30 * 86400;
+        const ollamaRows = qall(zaiDb,
+          `SELECT model, SUM(duration_ms) as total_ms, SUM(total_tokens) as tokens, COUNT(*) as calls
+           FROM api_calls WHERE key_name='ollama_cloud' AND ts > ? AND duration_ms > 0 AND total_tokens > 0
+           GROUP BY model`,
+          [since30d]);
+        let totalMs = 0;
+        const modelData: Record<string, { ms: number; tokens: number; calls: number }> = {};
+        for (const r of ollamaRows) {
+          if (!r.model) continue;
+          totalMs += r.total_ms;
+          modelData[r.model] = { ms: r.total_ms, tokens: r.tokens, calls: r.calls };
+        }
+        for (const [model, d] of Object.entries(modelData)) {
+          if (totalMs > 0 && d.tokens > 0) {
+            const allocUsd = (d.ms / totalMs) * CFG.ollamaMonthlyUsd;
+            const rate = allocUsd / (d.tokens / 1e6);
+            entry[model] = { rate: round(rate, 6), source: "measured", calls: d.calls, window: "30d" };
+          }
+        }
+        // _default: blended amortized
         entry._default = { rate: round(ollamaAmortizedPerM(), 6), source: "amortized", calls: 0, window: windowLabel };
       } else {
         entry._default = { rate: REAL_RATE_CONFIG.SEEDS[prov] ?? 1.0, source: "seed", calls: provRow?.calls || 0, window: windowLabel };
@@ -708,7 +757,7 @@ function computeRequests(limit = 20): any[] {
 function costForCall(r: any): number {
   const tokens = r.tokens ?? 0;
   if (tokens <= 0) return 0;
-  const perM = r.key_name === "ppq" ? 0 : r.key_name === "ollama_cloud" ? CFG.ollamaMonthlyUsd : CFG.flatKeyCostPerM;
+  const perM = r.key_name === "ppq" ? 0 : r.key_name === "ollama_cloud" ? ollamaAmortizedPerM() : CFG.flatKeyCostPerM;
   return round(tokens / 1e6 * (perM || CFG.flatKeyCostPerM), 6);
 }
 
@@ -1033,7 +1082,7 @@ const TOOLS: Record<string, ToolHandler> = {
     // Panel 3 charts can bootstrap immediately in Nostr mode (which skips the
     // separate /price-history HTTP fetch). Trimmed to the same 24h/1h-bucket
     // shape the dedicated tool returns.
-    let priceHistory = (TOOLS.get_price_history({ hours: 24 })?.points) || [];
+    let priceHistory = (TOOLS.get_price_history({ hours: 4000 })?.points) || [];
     return {
       ts: Math.floor(Date.now() / 1000),
       quota: await computeQuota(),
@@ -1049,6 +1098,7 @@ const TOOLS: Record<string, ToolHandler> = {
       estimated_vs_measured: computeEstimatedVsMeasured(pricing, realRates),
       cost_today: computeCostToday(),
       cost_hour: round(computeCostToday() / Math.max(1, new Date().getHours() + new Date().getMinutes() / 60), 4),
+      btc_price_usd: CFG.btcPriceUsd,
       routing_decisions: computeRequests(20),
       provider_dist: computeDistribution(),
       dispatch_gate: gate,
@@ -1168,15 +1218,15 @@ const TOOLS: Record<string, ToolHandler> = {
   // Returns pricing history for charts, bucketed by hour.
   // Capped at 200 data points to stay well under relay size limits (~50KB).
   get_price_history: (args: any) => {
-    const hours = Math.min(168, Math.max(1, args?.hours || 24));
+    const hours = Math.min(8760, Math.max(1, args?.hours || 24));
     const now = Math.floor(Date.now() / 1000);
     const since = now - hours * 3600;
-    // Adaptive bucket size: aim for ~hours/4 data points per key (4 keys → ~hours points total)
-    // For 24h → 1h buckets (24 points/key), for 168h → 4h buckets (42 points/key)
-    const bucketSize = hours <= 24 ? 3600 : 3600 * 4;
+    // Adaptive bucket size: larger windows get bigger buckets to stay under size limits
+    // 24h → 1h buckets, 168h → 4h buckets, 720h → 12h buckets, 8760h → 24h buckets
+    const bucketSize = hours <= 24 ? 3600 : hours <= 168 ? 3600 * 4 : hours <= 720 ? 3600 * 12 : 3600 * 24;
 
     // Aggregate api_calls per key per bucket — limit to keep response small
-    const maxBuckets = 50;
+    const maxBuckets = 200;
     const buckets = qall(zaiDb,
       `SELECT (ts / ?) * ? as bucket_ts, key_name,
               COALESCE(SUM(total_tokens),0) as tokens,
@@ -1185,7 +1235,7 @@ const TOOLS: Record<string, ToolHandler> = {
        WHERE ts > ? AND key_name IS NOT NULL
        GROUP BY bucket_ts, key_name
        ORDER BY bucket_ts ASC
-       LIMIT ?`, [bucketSize, bucketSize, since, maxBuckets * 4]);
+       LIMIT ?`, [bucketSize, bucketSize, since, maxBuckets * 3]);
 
     // Build pricing history — one entry per key per bucket
     const history: any[] = [];
@@ -1200,7 +1250,7 @@ const TOOLS: Record<string, ToolHandler> = {
       seenBuckets.add(b.bucket_ts);
       if (seenBuckets.size > maxBuckets) break;
 
-      for (const key of ["ours", "friend", "ollama", "ppq"]) {
+      for (const key of ["ours", "friend", "ollama"]) {
         const row = buckets.find((r) => {
           const rKey = r.key_name === "ollama_cloud" ? "ollama" : r.key_name;
           return rKey === key && r.bucket_ts === b.bucket_ts;

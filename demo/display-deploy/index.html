@@ -642,31 +642,90 @@ function renderProviders(snap){
    ════════════════════════════════════════════════════════════════════════ */
 function renderConsumer(snap){
   const traces=[];
+  const meta = snap.pricing_meta||{};
+  const ollamaRates = meta.ollama_model_rates || {};
   
+  // Build per-model price history from provider price history
+  // Each model's cheapest rate = min across all providers that serve it
+  const modelData = {}; // model → [{x, y, isOllama}]
+  
+  // Map provider → models
+  const provModels = {};
   for(const p of PROVIDERS){
-    const hist = state.priceHist[p] || [];
-    if(!hist.length) continue;
+    const models = PROVIDER_MODELS[p] || [];
+    for(const m of models){
+      if(!provModels[m.model]) provModels[m.model] = [];
+      provModels[m.model].push(p);
+    }
+  }
+  
+  // For each model, compute cheapest rate at each timestamp
+  const allModels = Object.keys(provModels).sort();
+  
+  for(const model of allModels){
+    const color = MODEL_COLORS[model] || '#8b949e';
+    const providers = provModels[model];
     
-    const baseRate = getBaseRate(snap, p);
-    const usedPct = getQuotaUsed(snap, p);
-    const currentPrice = isPayPerUse(p) ? baseRate : (() => {
-      const w = getQuotaWindows(snap, p);
-      return superpositionPrice(baseRate, w.t5h, w.tWeekly, w.tMonthly);
-    })();
+    // Get rate for this model from each provider
+    // Use ollama_model_rates for ollama models, PROVIDER_MODELS rates otherwise
+    function getModelRate(prov, mdl){
+      if(prov === 'ollama') return ollamaRates[mdl] || 0.024;
+      // For other providers, use the baseRate from PROVIDER_MODELS
+      const models = PROVIDER_MODELS[prov] || [];
+      const entry = models.find(m => m.model === mdl);
+      return entry ? entry.baseRate : 0.02;
+    }
     
-    // Historical line
+    // Find cheapest provider for this model
+    let cheapestProv = null;
+    let cheapestRate = Infinity;
+    for(const p of providers){
+      const r = getModelRate(p, model);
+      if(r < cheapestRate){ cheapestRate = r; cheapestProv = p; }
+    }
+    
+    if(!cheapestProv || cheapestRate === Infinity) continue;
+    
+    const isOllama = cheapestProv === 'ollama';
+    const hist = state.priceHist[cheapestProv] || [];
+    
+    // Build time series: use provider's price history, mapped to this model's rate
+    const x = [], y = [];
+    if(hist.length){
+      for(const pt of hist){
+        x.push(pt.t * 1000);
+        // Apply quota pressure if not pay-per-use
+        if(isPayPerUse(cheapestProv)){
+          y.push(cheapestRate);
+        } else {
+          const w = getQuotaWindows(snap, cheapestProv);
+          y.push(superpositionPrice(cheapestRate, w.t5h, w.tWeekly, w.tMonthly));
+        }
+      }
+    } else {
+      // Seed with current rate
+      x.push(Date.now() - 3600000);
+      x.push(Date.now());
+      const w = getQuotaWindows(snap, cheapestProv);
+      const price = isPayPerUse(cheapestProv) ? cheapestRate : superpositionPrice(cheapestRate, w.t5h, w.tWeekly, w.tMonthly);
+      y.push(price);
+      y.push(price);
+    }
+    
     traces.push({
-      x: hist.map(pt=>pt.t*1000), y: hist.map(pt=>pt.your_price||pt.cost_basis),
-      mode:'lines', line:{color:PROV_COLOR[p],width:1.5}, name:PROV_LABEL[p],
-      hovertemplate:`<b>${PROV_LABEL[p]}</b><br>%{y:$.4f}/M<br>%{x}<extra></extra>`,
+      x, y, mode:'lines',
+      line:{color:color, width:2, dash: isOllama ? 'dash' : 'solid'},
+      name: model,
+      hovertemplate:`<b>${model}</b><br>%{y:$.4f}/M<br>%{x}<extra></extra>`,
     });
     
-    // Current price point
+    // Current price marker
+    const w = getQuotaWindows(snap, cheapestProv);
+    const currentPrice = isPayPerUse(cheapestProv) ? cheapestRate : superpositionPrice(cheapestRate, w.t5h, w.tWeekly, w.tMonthly);
     traces.push({
       x:[Date.now()], y:[currentPrice], mode:'markers',
-      marker:{size:8,color:PROV_COLOR[p],symbol:'circle',line:{color:'#fff',width:1}},
-      name:PROV_LABEL[p]+' now', showlegend:false,
-      hovertemplate:`<b>${PROV_LABEL[p]} NOW</b><br>${fmt$(currentPrice)}/M<extra></extra>`,
+      marker:{size:7, color:color, line:{color:'#fff', width:1}},
+      name: model+' now', showlegend:false,
     });
   }
   
@@ -682,12 +741,17 @@ function renderConsumer(snap){
       tickfont:{size:9,color:'#8b949e'},type:'log',
       tickformat:'$.4f',automargin:true},
     font:{family:'SF Mono,monospace',size:10,color:'#8b949e'},
+    annotations:[{
+      text:'dashed = subscription (Ollama)',
+      xref:'paper',yref:'paper',x:0.98,y:0.98,
+      showarrow:false,font:{size:8,color:'#8b949e'},
+      xanchor:'right',yanchor:'top',
+    }],
   };
   
   Plotly.react('consumer-chart', traces, layout, {displayModeBar:false,responsive:true});
   
   // Update consumer rate display
-  const meta = snap.pricing_meta||{};
   const avgRate = getBaseRate(snap,'friend') * (1+(meta.margin||0.266));
   document.getElementById('consumer-rate').textContent = `Avg: ${fmt$(avgRate)}/M · Spend today: ${fmt$(snap.cost_today||0,2)}`;
 }
