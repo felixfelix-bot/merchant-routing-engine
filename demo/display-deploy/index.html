@@ -209,7 +209,7 @@
     <div class="dash-body" style="padding:0">
       <table class="rates-table" id="rates-table">
         <thead>
-          <tr><th>Provider</th><th>Rate $/M</th><th>Source</th><th>Window (h)</th></tr>
+          <tr><th>Provider</th><th>Model</th><th>Rate $/M</th><th>Source</th><th>Window</th></tr>
         </thead>
         <tbody id="rates-tbody"></tbody>
       </table>
@@ -375,16 +375,25 @@ function singleWindowPrice(baseRate, t) {
 }
 
 // Get the three window usage fractions for a quota provider
+// session_usage/weekly_usage are already fractions (0–1); used_pct/weekly_pct are percentages (0–100)
 function getQuotaWindows(snap, provider) {
   const q = snap.quota[provider] || {};
-  return {
-    t5h: (q.session_usage || 0) / 100,
-    tWeekly: (q.weekly_usage || 0) / 100,
-    tMonthly: (q.used_pct || 0) / 100,
-  };
+  // 5h window
+  const t5h = q.session_usage != null ? q.session_usage
+            : q.session_limit && q.session_limit.usage != null ? q.session_limit.usage
+            : (q.used_pct || 0) / 100;
+  // Weekly (7d) window
+  const tWeekly = q.weekly_usage != null ? q.weekly_usage
+                : q.weekly_limit && q.weekly_limit.usage != null ? q.weekly_limit.usage
+                : (q.weekly_pct || 0) / 100;
+  // Monthly (30d) window — may not be present in all snapshots
+  const tMonthly = q.monthly_usage != null ? q.monthly_usage
+                 : q.monthly_limit && q.monthly_limit.usage != null ? q.monthly_limit.usage
+                 : (q.monthly_pct || 0) / 100;
+  return { t5h, tWeekly, tMonthly };
 }
 
-// Get base rate for a provider
+// Get base rate for a provider (fallback / aggregate)
 function getBaseRate(snap, provider){
   const meta = snap.pricing_meta || {};
   if(provider==='friend') return meta.flat_key_cost_per_m || 0.02;
@@ -397,10 +406,30 @@ function getBaseRate(snap, provider){
   return 0.02;
 }
 
-// Get quota used percentage for a provider
+// Get per-model base rate from snap.real_rates (real measured rates).
+// Falls back to provider _default, then to hardcoded baseRate in PROVIDER_MODELS.
+function getModelBaseRate(snap, provider, model){
+  const rr = (snap && snap.real_rates) || {};
+  // 'ollama' in PROVIDERS maps to 'ollama_cloud' in real_rates
+  const rrKey = provider === 'ollama' ? 'ollama_cloud' : provider;
+  const provRates = rr[rrKey] || rr[provider] || {};
+  // Try exact model match
+  if(provRates[model] && provRates[model].rate != null) return provRates[model].rate;
+  // Try _default for this provider
+  if(provRates._default && provRates._default.rate != null) return provRates._default.rate;
+  // Fall back to hardcoded baseRate
+  const models = PROVIDER_MODELS[provider] || [];
+  const found = models.find(m => m.model === model);
+  return found ? found.baseRate : getBaseRate(snap, provider);
+}
+
+// Get quota used percentage for a provider (max across all windows for marker)
 function getQuotaUsed(snap, provider){
   const q = snap.quota[provider] || {};
-  if(provider==='ollama') return Math.max(q.session_usage||0, q.weekly_usage||0) * 100;
+  if(provider==='ollama' || provider==='friend'){
+    const w = getQuotaWindows(snap, provider);
+    return Math.max(w.t5h, w.tWeekly, w.tMonthly) * 100;
+  }
   return q.used_pct || 0;
 }
 
@@ -443,20 +472,23 @@ function renderProviders(snap){
     const provColor = PROV_COLOR[p];
     const models = PROVIDER_MODELS[p] || [];
     const w = ppu ? null : getQuotaWindows(snap, p);
-    
+
+    // Resolve per-model real rates from snap.real_rates
+    const modelRates = models.map(m => getModelBaseRate(snap, p, m.model));
+
     // Rate display: show range (cheapest to most expensive model)
     const rateEl = document.getElementById(`prov-rate-${p}`);
     if(rateEl && models.length){
       let rates;
       if(ppu){
-        rates = models.map(m => m.baseRate);
+        rates = modelRates;
       } else {
-        rates = models.map(m => superpositionPrice(m.baseRate, w.t5h, w.tWeekly, w.tMonthly));
+        rates = modelRates.map(r => superpositionPrice(r, w.t5h, w.tWeekly, w.tMonthly));
       }
       const minR = Math.min(...rates), maxR = Math.max(...rates);
       rateEl.textContent = minR === maxR ? `${fmt$(minR)}/M` : `${fmt$(minR)}–${fmt$(maxR)}/M`;
     }
-    
+
     // Status
     const statusEl = document.getElementById(`prov-status-${p}`);
     if(statusEl){
@@ -464,43 +496,49 @@ function renderProviders(snap){
         statusEl.innerHTML = `<span>Pay-per-use</span><span>${usedPct>0?'credits used':'$5 balance'}</span>`;
       }else{
         const q = snap.quota[p] || {};
-        statusEl.innerHTML = `<span>${usedPct.toFixed(1)}% used</span><span>${q.remaining?fmtTok(q.remaining)+' tok left':'—'}</span>`;
+        const wPct5h = (w.t5h*100).toFixed(1);
+        const wPct7d = (w.tWeekly*100).toFixed(1);
+        const wPct30d = (w.tMonthly*100).toFixed(1);
+        statusEl.innerHTML = `<span>5h:${wPct5h}% · 7d:${wPct7d}% · 30d:${wPct30d}%</span><span>${q.remaining?fmtTok(q.remaining)+' tok left':'—'}</span>`;
       }
     }
-    
+
     const chartDiv = `prov-chart-${p}`;
     const traces = [];
-    
-    // For pay-per-use: flat lines per model (same as before)
-    // For quota providers: 3 faint window curves + bold total curve per model
+
+    // For pay-per-use: flat lines per model
+    // For quota providers: 3 faint window curves + bold total curve per model + 3 vertical markers
     for(let mi = 0; mi < models.length; mi++){
       const m = models[mi];
       const mColor = MODEL_COLORS[m.model] || provColor;
-      
+      const mRate = modelRates[mi]; // real per-model rate from snap.real_rates
+
       if(ppu){
         // Flat line for pay-per-use
         const xVals = [], yVals = [];
         for(let pct=0; pct<=100; pct+=2){
           xVals.push(pct);
-          yVals.push(m.baseRate);
+          yVals.push(mRate);
         }
         traces.push({
           x:xVals, y:yVals, mode:'lines',
           line:{color:mColor, width:1.5, dash: mi>0 ? 'dot' : 'solid'},
-          name:m.model, hovertemplate:`<b>${m.model}</b><br>flat rate<br>${fmt$(m.baseRate)}/M<extra></extra>`,
+          name:m.model, hovertemplate:`<b>${m.model}</b><br>flat rate<br>${fmt$(mRate)}/M<extra></extra>`,
           showlegend:true,
         });
       } else {
-        // ── 3 faint curves (one per window) ──
-        const winColors = ['#58a6ff44', '#bc8cff44', '#f0883e44']; // blue=5h, purple=weekly, orange=monthly
-        const winNames = ['5h window', 'weekly window', 'monthly window'];
+        // ── 3 faint individual window curves ──
+        // Each curve shows what the price would be if ONLY that window had pressure
+        const winColors = ['rgba(88,166,255,0.25)', 'rgba(188,140,255,0.25)', 'rgba(240,136,62,0.25)']; // blue=5h, purple=7d, orange=30d
+        const winNames = ['5h window', '7d window', '30d window'];
         const winTs = [w.t5h, w.tWeekly, w.tMonthly];
-        
+
         for(let wi=0; wi<3; wi++){
           const fxVals = [], fyVals = [];
           for(let pct=0; pct<=99; pct+=1){
             fxVals.push(pct);
-            fyVals.push(singleWindowPrice(m.baseRate, pct/100));
+            // Sweep this window from 0 to its current value
+            fyVals.push(singleWindowPrice(mRate, (pct/100) * winTs[wi] * 100 / 100));
           }
           traces.push({
             x:fxVals, y:fyVals, mode:'lines',
@@ -509,71 +547,92 @@ function renderProviders(snap){
             legendgroup: 'windows',
           });
         }
-        
-        // ── Bold total curve (superposition) ──
+
+        // ── Bold total curve (superposition of all 3 windows) ──
         const xVals = [], yVals = [];
         for(let pct=0; pct<=99; pct+=1){
           xVals.push(pct);
-          // For the curve, we sweep all three windows proportionally
-          // Each window scales from 0 to its current value as pct goes 0→100
+          // Sweep all three windows proportionally from 0 to current values
           const scaleT = pct / 100;
-          yVals.push(superpositionPrice(m.baseRate, w.t5h * scaleT * 100 / 100, w.tWeekly * scaleT * 100 / 100, w.tMonthly * scaleT * 100 / 100));
+          yVals.push(superpositionPrice(mRate, w.t5h * scaleT, w.tWeekly * scaleT, w.tMonthly * scaleT));
         }
+        const currentPrice = superpositionPrice(mRate, w.t5h, w.tWeekly, w.tMonthly);
         traces.push({
           x:xVals, y:yVals, mode:'lines',
           line:{color:mColor, width:2.5, dash: mi>0 ? 'dash' : 'solid'},
-          name:m.model, hovertemplate:`<b>${m.model}</b><br>%{x:.0f}% quota<br>${fmt$(0)}/M<extra></extra>`.replace('${fmt$(0)}',fmt$(superpositionPrice(m.baseRate, w.t5h, w.tWeekly, w.tMonthly))),
+          name:m.model, hovertemplate:`<b>${m.model}</b><br>%{x:.0f}% quota sweep<br>now: ${fmt$(currentPrice)}/M<extra></extra>`,
           showlegend:true,
         });
-        
-        // ── Fill area under total curve 0→max(usedPct, 5) ──
+
+        // ── Fill area under total curve 0→max(usedPct, 5) — always visible ──
         if(mi === 0){
           const fillEnd = Math.max(usedPct, 5);
           const fillX = [], fillY = [];
           for(let pct=0; pct<=Math.min(fillEnd,99); pct+=1){
             fillX.push(pct);
             const scaleT = pct / 100;
-            fillY.push(superpositionPrice(m.baseRate, w.t5h * scaleT, w.tWeekly * scaleT, w.tMonthly * scaleT));
+            fillY.push(superpositionPrice(mRate, w.t5h * scaleT, w.tWeekly * scaleT, w.tMonthly * scaleT));
+          }
+          // Ensure we always have at least a small visible area
+          if(fillX.length < 2){
+            fillX.push(0, 5);
+            fillY.push(mRate, superpositionPrice(mRate, w.t5h*0.05, w.tWeekly*0.05, w.tMonthly*0.05));
           }
           traces.push({
             x:fillX, y:fillY, mode:'none', fill:'tozeroy',
             fillcolor:provColor+'22', line:{width:0}, name:'Used quota', hoverinfo:'skip', showlegend:false,
           });
         }
-        
-        // ── Current position marker ──
-        const currentPrice = superpositionPrice(m.baseRate, w.t5h, w.tWeekly, w.tMonthly);
+
+        // ── Current position marker (at max window usage) ──
         traces.push({
           x:[usedPct], y:[currentPrice], mode:'markers',
           marker:{size:7, color:mColor, line:{color:'#fff', width:1}},
           name:m.model+' now', showlegend:false,
-          hovertemplate:`<b>${m.model}</b><br>${usedPct.toFixed(1)}% used<br>${fmt$(currentPrice)}/M<extra></extra>`,
+          hovertemplate:`<b>${m.model}</b><br>max ${usedPct.toFixed(1)}% used<br>${fmt$(currentPrice)}/M<extra></extra>`,
         });
       }
     }
-    
-    // Vertical line at current usage (for quota providers)
+
+    // ── 3 vertical window markers with labels (for quota providers) ──
     if(!ppu){
-      const maxRate = Math.max(...models.map(m => superpositionPrice(m.baseRate, w.t5h, w.tWeekly, w.tMonthly)));
-      traces.push({
-        x:[usedPct, usedPct], y:[0.001, maxRate],
-        mode:'lines', line:{color:provColor+'66', width:1, dash:'dot'}, hoverinfo:'skip', showlegend:false,
-      });
+      const maxRate = Math.max(...modelRates.map(r => superpositionPrice(r, w.t5h, w.tWeekly, w.tMonthly)));
+      const winPcts = [w.t5h * 100, w.tWeekly * 100, w.tMonthly * 100];
+      const winLabels = ['5h', '7d', '30d'];
+      const winColors = ['rgba(88,166,255,0.5)', 'rgba(188,140,255,0.5)', 'rgba(240,136,62,0.5)'];
+
+      for(let wi=0; wi<3; wi++){
+        const pct = winPcts[wi];
+        // Vertical line
+        traces.push({
+          x:[pct, pct], y:[0.001, maxRate * 1.1],
+          mode:'lines', line:{color:winColors[wi], width:1.5, dash:'dashdot'},
+          hoverinfo:'skip', showlegend:false,
+        });
+        // Label annotation via a text trace
+        traces.push({
+          x:[pct], y:[maxRate * 1.15],
+          mode:'text', text:[`${winLabels[wi]}: ${pct.toFixed(1)}%`],
+          textfont:{size:8, color:winColors[wi].replace('0.5','1')},
+          hoverinfo:'skip', showlegend:false,
+        });
+      }
     }
-    
+
+    const xTitle = ppu ? 'Credits Used %' : 'Quota Used % (5h · 7d · 30d)';
     const layout = {
       paper_bgcolor:PLOT_BG, plot_bgcolor:PLOT_BG,
-      margin:{l:40,r:8,t:4,b:28},
+      margin:{l:40,r:8,t:20,b:28},
       showlegend:true,
       legend:{orientation:'h', y:-0.2, font:{size:8, color:'#8b949e'}, x:0.5, xanchor:'center'},
-      xaxis:{title:'Quota Used %', gridcolor:PLOT_GRID, zeroline:false,
+      xaxis:{title:xTitle, gridcolor:PLOT_GRID, zeroline:false,
         tickfont:{size:9,color:'#8b949e'}, range:[0,100], tickvals:[0,25,50,75,100]},
       yaxis:{title:'Price/M', gridcolor:PLOT_GRID, zeroline:false,
         tickfont:{size:9,color:'#8b949e'}, type:'log',
         tickformat:'$.3f', automargin:true},
       font:{family:'SF Mono,monospace', size:9, color:'#8b949e'},
     };
-    
+
     Plotly.react(chartDiv, traces, layout, {displayModeBar:false, responsive:true});
   }
 }
@@ -744,18 +803,35 @@ function renderQuotaBars(snap){
   let html = '';
   for(const p of QUOTA_BAR_PROVIDERS){
     const q = snap.quota[p] || {};
-    const usedPct = q.used_pct || 0;
-    const remaining = q.remaining || 0;
-    const resetsIn = q.resets_in_min || 0;
+    const w = getQuotaWindows(snap, p);
     const color = PROV_COLOR[p];
+    const resetsIn = q.resets_in_min || 0;
     const resetStr = resetsIn > 0 ? `${Math.floor(resetsIn/60)}h ${resetsIn%60}m` : '—';
-    
+    const remaining = q.remaining || 0;
+
+    // 3 sub-bars: 5h, 7d, 30d
+    const windows = [
+      {label:'5h', pct: w.t5h * 100, color: 'rgba(88,166,255,0.8)'},
+      {label:'7d', pct: w.tWeekly * 100, color: 'rgba(188,140,255,0.8)'},
+      {label:'30d', pct: w.tMonthly * 100, color: 'rgba(240,136,62,0.8)'},
+    ];
+
     html += `<div class="quota-bar-row">
-      <span class="quota-bar-label" style="color:${color}">${PROV_LABEL[p]}</span>
-      <div class="quota-bar-track">
-        <div class="quota-bar-fill" style="width:${Math.min(usedPct,100)}%;background:${color}"></div>
-      </div>
-      <span class="quota-bar-info">${usedPct.toFixed(1)}% · ${fmtTok(remaining)} left · resets ${resetStr}</span>
+      <span class="quota-bar-label" style="color:${color};min-width:60px">${PROV_LABEL[p]}</span>
+      <div style="flex:1;display:flex;flex-direction:column;gap:3px">`;
+
+    for(const win of windows){
+      html += `<div style="display:flex;align-items:center;gap:6px">
+        <span style="font-size:9px;color:var(--txt-dim);min-width:24px;font-family:var(--mono)">${win.label}</span>
+        <div class="quota-bar-track" style="height:12px">
+          <div class="quota-bar-fill" style="width:${Math.min(win.pct,100)}%;background:${win.color}"></div>
+        </div>
+        <span style="font-size:9px;color:var(--txt-dim);min-width:40px;text-align:right;font-family:var(--mono)">${win.pct.toFixed(1)}%</span>
+      </div>`;
+    }
+
+    html += `</div>
+      <span class="quota-bar-info" style="min-width:140px">${fmtTok(remaining)} left · resets ${resetStr}</span>
     </div>`;
   }
   body.innerHTML = html;
@@ -829,28 +905,63 @@ function renderDispatchGate(snap){
 
 function renderMeasuredRates(snap){
   const tbody = document.getElementById('rates-tbody');
-  const tracker = snap.real_rates_tracker || {};
-  const providers = tracker.providers || [];
-  
-  if(!providers.length){
-    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--txt-dim);padding:16px">No measured rates yet</td></tr>';
+  const rr = snap.real_rates || {};
+
+  // Build rows from snap.real_rates: { provider: { model: {rate, source, calls, window} } }
+  const rows = [];
+  for(const [provKey, models] of Object.entries(rr)){
+    const provDisplay = keyToProvider(provKey) || provKey;
+    const color = PROV_COLOR[provDisplay] || '#8b949e';
+    for(const [model, info] of Object.entries(models)){
+      rows.push({
+        provider: provDisplay,
+        model: model,
+        rate: info.rate || 0,
+        source: (info.source || '').toLowerCase().includes('measur') ? 'measured' : 'fallback',
+        window: info.window || '—',
+        calls: info.calls || 0,
+        color: color,
+      });
+    }
+  }
+
+  if(!rows.length){
+    // Fallback to old tracker format
+    const tracker = snap.real_rates_tracker || {};
+    const providers = tracker.providers || [];
+    if(!providers.length){
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--txt-dim);padding:16px">No measured rates yet</td></tr>';
+      return;
+    }
+    let html = '';
+    for(const p of providers){
+      const provKey = keyToProvider(p.provider || p.key || '');
+      const color = PROV_COLOR[provKey] || '#8b949e';
+      const rate = p.rate_per_m || 0;
+      const source = (p.source || p.measured || '').toLowerCase().includes('measur') ? 'measured' : 'fallback';
+      const sourceLabel = source === 'measured' ? 'MEASURED' : 'FALLBACK';
+      const windowH = p.window_hours || '—';
+      html += `<tr>
+        <td style="color:${color};font-weight:700">${p.provider || p.key || '—'}</td>
+        <td>—</td>
+        <td>${fmt$(rate)}</td>
+        <td><span class="source-badge ${source}">${sourceLabel}</span></td>
+        <td>${windowH}</td>
+      </tr>`;
+    }
+    tbody.innerHTML = html;
     return;
   }
-  
+
   let html = '';
-  for(const p of providers){
-    const provKey = keyToProvider(p.provider || p.key || '');
-    const color = PROV_COLOR[provKey] || '#8b949e';
-    const rate = p.rate_per_m || 0;
-    const source = (p.source || p.measured || '').toLowerCase().includes('measur') ? 'measured' : 'fallback';
-    const sourceLabel = source === 'measured' ? 'MEASURED' : 'FALLBACK';
-    const windowH = p.window_hours || '—';
-    
+  for(const r of rows){
+    const sourceLabel = r.source === 'measured' ? 'MEASURED' : 'FALLBACK';
     html += `<tr>
-      <td style="color:${color};font-weight:700">${p.provider || p.key || '—'}</td>
-      <td>${fmt$(rate)}</td>
-      <td><span class="source-badge ${source}">${sourceLabel}</span></td>
-      <td>${windowH}</td>
+      <td style="color:${r.color};font-weight:700">${r.provider}</td>
+      <td>${r.model === '_default' ? '<i style="color:#8b949e">default</i>' : r.model}</td>
+      <td>${fmt$(r.rate)}</td>
+      <td><span class="source-badge ${r.source}">${sourceLabel}</span></td>
+      <td>${r.window}</td>
     </tr>`;
   }
   tbody.innerHTML = html;
