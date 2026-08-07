@@ -1,0 +1,747 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sovereign Routing Engine — Burn Dashboard</title>
+<!-- Offline-bundled vendor libs (no CDN) -->
+<script src="vendor/plotly-2.35.2.min.js"></script>
+<script src="vendor/nostr-tools.min.js"></script>
+<style>
+/* ════════════════════════════════════════════════════════════════════════
+   DARK THEME + RESPONSIVE GRID (reused from display-deploy)
+   ════════════════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#0a0e14; --bg2:#0d1117; --card:#131820; --card2:#161b22;
+  --border:#21262d; --border2:#30363d;
+  --txt:#c9d1d9; --txt-dim:#8b949e; --txt-bright:#f0f6fc;
+  --blue:#58a6ff; --green:#3fb950; --red:#f85149; --yellow:#d29922;
+  --purple:#bc8cff; --cyan:#39d2c0; --orange:#f0883e;
+  --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg);color:var(--txt);font-family:var(--sans);
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;
+}
+
+/* ── top bar ── */
+.topbar{
+  display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  padding:12px 20px;background:var(--bg2);border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:50;backdrop-filter:blur(8px);
+}
+.topbar h1{font-size:16px;font-weight:600;color:var(--txt-bright);letter-spacing:-.2px}
+.topbar h1 .accent{color:var(--cyan)}
+.topbar .spacer{flex:1}
+.badge{
+  font-family:var(--mono);font-size:11px;font-weight:600;padding:3px 8px;
+  border-radius:4px;border:1px solid var(--border2);color:var(--txt-dim);
+  display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
+}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+.badge.live .dot{background:var(--green);animation:pulse 2s infinite}
+.badge.error{border-color:var(--red);color:var(--red)}
+.badge.error .dot{background:var(--red)}
+.badge.connecting{border-color:var(--blue);color:var(--blue)}
+.badge.connecting .dot{background:var(--blue);animation:pulse 1s infinite}
+.badge.stale{border-color:var(--orange);color:var(--orange)}
+.badge.stale .dot{background:var(--orange);animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── responsive grid ── */
+.grid{
+  display:grid;gap:14px;padding:14px 20px 40px;
+  grid-template-columns:repeat(12,1fr);
+  grid-auto-rows:min-content;
+  max-width:1800px;margin:0 auto;
+}
+.card{
+  background:var(--card);border:1px solid var(--border);border-radius:10px;
+  padding:16px;display:flex;flex-direction:column;min-width:0;overflow:hidden;
+}
+.card h2{
+  font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;
+  color:var(--txt-dim);margin-bottom:12px;display:flex;align-items:center;gap:8px;
+}
+.card h2 .num{
+  width:18px;height:18px;border-radius:5px;background:var(--border2);
+  display:inline-flex;align-items:center;justify-content:center;font-size:10px;
+  color:var(--cyan);
+}
+/* spans */
+.col-bar   {grid-column:span 7}
+.col-cost  {grid-column:span 5}
+.col-time  {grid-column:span 7}
+.col-flow  {grid-column:span 5}
+.col-gauge {grid-column:span 5}
+.col-table {grid-column:span 7}
+.full      {grid-column:span 12}
+
+/* ── phone / tablet ── */
+@media(max-width:1100px){
+  .col-bar,.col-cost,.col-time,.col-flow,.col-gauge,.col-table{grid-column:span 6}
+}
+@media(max-width:700px){
+  .grid{grid-template-columns:1fr;padding:10px}
+  .col-bar,.col-cost,.col-time,.col-flow,.col-gauge,.col-table,.full{grid-column:span 1}
+  .topbar{padding:10px 12px}
+  .topbar h1{font-size:14px}
+}
+
+/* ── Cost meter ── */
+.cost-big{font-family:var(--mono);font-size:48px;font-weight:700;color:var(--green);line-height:1;text-align:center;margin:8px 0}
+.cost-big .cents{font-size:26px;color:var(--txt-dim)}
+.cost-sub{text-align:center;font-size:12px;color:var(--txt-dim);font-family:var(--mono)}
+.cost-sub .burn{color:var(--orange)}
+.cost-bar{height:6px;background:var(--bg2);border-radius:3px;margin-top:14px;overflow:hidden}
+.cost-bar .cb-fill{height:100%;background:linear-gradient(90deg,var(--green),var(--yellow));border-radius:3px;transition:width .8s}
+.cost-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+.cost-stat{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;text-align:center}
+.cost-stat .cs-l{font-size:9px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:.4px}
+.cost-stat .cs-v{font-family:var(--mono);font-size:18px;font-weight:600;color:var(--txt-bright);margin-top:2px}
+.cost-stat .cs-v.cyan{color:var(--cyan)}
+.cost-stat .cs-v.orange{color:var(--orange)}
+
+/* ── Request flow ── */
+.flow-list{display:flex;flex-direction:column;gap:7px;max-height:380px;overflow-y:auto;flex:1}
+.flow-list::-webkit-scrollbar{width:6px} .flow-list::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+.flow-card{
+  background:var(--bg2);border:1px solid var(--border);border-radius:7px;padding:9px 12px;
+  display:grid;grid-template-columns:auto 1fr auto;gap:8px 12px;align-items:center;
+  animation:slidein .4s ease;font-size:12px;
+}
+@keyframes slidein{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
+.flow-card .fc-time{font-family:var(--mono);font-size:10px;color:var(--txt-dim);white-space:nowrap}
+.flow-card .fc-mid{min-width:0}
+.flow-card .fc-model{font-weight:600;font-size:12px}
+.flow-card .fc-prompt{font-family:var(--mono);font-size:10px;color:var(--txt-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.flow-card .fc-right{text-align:right;font-family:var(--mono);font-size:11px;white-space:nowrap}
+.flow-card .fc-cost{color:var(--orange)}
+.flow-card .fc-tok{color:var(--txt-dim);font-size:10px}
+.flow-card .fc-lat{color:var(--blue);font-size:10px}
+.flow-card.fail{border-color:rgba(248,81,73,.3)}
+.flow-card.fail .fc-model{color:var(--red)}
+.flow-empty{padding:30px;text-align:center;color:var(--txt-dim);font-size:12px}
+
+/* ── Model table ── */
+.mt-wrap{overflow-x:auto;flex:1}
+.mt-table{width:100%;border-collapse:collapse;font-size:12px}
+.mt-table th{
+  text-align:left;padding:8px 10px;font-size:10px;text-transform:uppercase;
+  letter-spacing:.4px;color:var(--txt-dim);border-bottom:1px solid var(--border);
+  font-weight:600;
+}
+.mt-table td{
+  padding:8px 10px;border-bottom:1px solid var(--border);
+  font-family:var(--mono);color:var(--txt);
+}
+.mt-table tr:last-child td{border-bottom:none}
+.mt-table .mt-model{font-weight:600;color:var(--txt-bright);font-family:var(--sans)}
+.mt-table .mt-cost{color:var(--orange)}
+.mt-table .mt-lat{color:var(--blue)}
+.mt-table .mt-tok{color:var(--cyan)}
+
+/* ── Quota gauges ── */
+.gauge-wrap{display:flex;gap:20px;flex:1;justify-content:center;align-items:center;flex-wrap:wrap}
+.gauge-item{display:flex;flex-direction:column;align-items:center;gap:8px}
+.gauge-item .gi-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--txt-bright)}
+.gauge-item .gi-sub{font-size:10px;color:var(--txt-dim);font-family:var(--mono)}
+
+/* ── Empty state ── */
+.waiting{text-align:center;padding:40px;color:var(--txt-dim);font-size:13px}
+.waiting .pulse-dot{
+  width:12px;height:12px;border-radius:50%;background:var(--blue);
+  margin:0 auto 12px;animation:pulse 1s infinite;
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ TOP BAR ═══ -->
+<div class="topbar">
+  <h1>⚡ Sovereign Routing <span class="accent">Engine</span> — Burn Dashboard</h1>
+  <span class="spacer"></span>
+  <span class="badge connecting" id="conn-badge"><span class="dot"></span><span id="conn-text">connecting…</span></span>
+  <span class="badge" id="elapsed-badge"><span class="dot" style="background:var(--txt-dim)"></span><span id="elapsed-text">--:--</span></span>
+  <span class="badge" id="time-badge"><span class="dot" style="background:var(--txt-dim)"></span><span id="time-text">--:--:--</span></span>
+</div>
+
+<div class="grid">
+
+  <!-- ═══ ROW 1: Per-model bar chart ═══ -->
+  <div class="card col-bar">
+    <h2><span class="num">1</span> Token Burn per Model — live</h2>
+    <div id="bar-chart" style="width:100%;height:300px"></div>
+  </div>
+
+  <!-- ═══ ROW 1: Cost meter ═══ -->
+  <div class="card col-cost">
+    <h2><span class="num">2</span> Cost Meter — total burn</h2>
+    <div style="flex:1;display:flex;flex-direction:column;justify-content:center">
+      <div class="cost-big" id="cost-big">$0<span class="cents">.00</span></div>
+      <div class="cost-sub"><span class="burn" id="burn-rate">$0.00</span> / hour burn rate</div>
+      <div class="cost-bar"><div class="cb-fill" id="cost-bar-fill" style="width:0%"></div></div>
+      <div class="cost-stats">
+        <div class="cost-stat"><div class="cs-l">Total Requests</div><div class="cs-v cyan" id="stat-reqs">0</div></div>
+        <div class="cost-stat"><div class="cs-l">Total Tokens</div><div class="cs-v" id="stat-tokens">0</div></div>
+        <div class="cost-stat"><div class="cs-l">Tokens IN</div><div class="cs-v" id="stat-tin">0</div></div>
+        <div class="cost-stat"><div class="cs-l">Tokens OUT</div><div class="cs-v orange" id="stat-tout">0</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ ROW 2: Token burn over time ═══ -->
+  <div class="card col-time">
+    <h2><span class="num">3</span> Token Burn Over Time — stacked area per model</h2>
+    <div id="time-chart" style="width:100%;height:320px"></div>
+  </div>
+
+  <!-- ═══ ROW 2: Request flow ═══ -->
+  <div class="card col-flow">
+    <h2><span class="num">4</span> Request Flow — last 10, live</h2>
+    <div class="flow-list" id="flow-list"><div class="flow-empty">Waiting for first request…</div></div>
+  </div>
+
+  <!-- ═══ ROW 3: Quota gauges ═══ -->
+  <div class="card col-gauge">
+    <h2><span class="num">5</span> Quota Pressure — z.ai API keys</h2>
+    <div class="gauge-wrap" id="gauge-wrap">
+      <div class="gauge-item">
+        <div id="gauge-ours" style="width:180px;height:180px"></div>
+        <div class="gi-label" style="color:var(--blue)">OURS</div>
+        <div class="gi-sub" id="gauge-ours-sub">— % · 5h window</div>
+      </div>
+      <div class="gauge-item">
+        <div id="gauge-friend" style="width:180px;height:180px"></div>
+        <div class="gi-label" style="color:var(--purple)">FRIEND</div>
+        <div class="gi-sub" id="gauge-friend-sub">— % · 5h window</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ ROW 3: Model comparison table ═══ -->
+  <div class="card col-table">
+    <h2><span class="num">6</span> Model Comparison — latency · cost · requests</h2>
+    <div class="mt-wrap">
+      <table class="mt-table" id="mt-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Requests</th>
+            <th>Tokens IN</th>
+            <th>Tokens OUT</th>
+            <th>Cost ($)</th>
+            <th>Avg Latency (ms)</th>
+            <th>Cost / 1K tok</th>
+          </tr>
+        </thead>
+        <tbody id="mt-body">
+          <tr><td colspan="7" style="text-align:center;color:var(--txt-dim);padding:20px">No data yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════════════
+   CONFIG
+   ════════════════════════════════════════════════════════════════════════ */
+const BURN_NPUB_HEX = param('npub') || 'f556f7c414b5bf21f8459d610102ac8d1e8e973056c22ff14cc769470da8f305';
+const RELAYS = param('relays')
+  ? param('relays').split(',').map(s => s.trim()).filter(Boolean)
+  : ['wss://relay.primal.net','wss://nos.lol','wss://nostr.mom'];
+
+const MODELS = ['glm-5.2','glm-4.5-flash','glm-4.5-air','kimi-k2.7-code','kimi-k3:cloud'];
+const MODEL_COLORS = {
+  'glm-5.2':'#58a6ff',
+  'glm-4.5-flash':'#39d2c0',
+  'glm-4.5-air':'#3fb950',
+  'kimi-k2.7-code':'#bc8cff',
+  'kimi-k3:cloud':'#f0883e',
+};
+
+const STALE_MS = 15000;
+
+/* ════════════════════════════════════════════════════════════════════════
+   STATE
+   ════════════════════════════════════════════════════════════════════════ */
+let state = {
+  lastEvent: null,       // latest parsed summary
+  lastEventAt: 0,       // ms timestamp
+  timeSeries: {},       // model -> [{t, tokens_in, tokens_out, cost}]
+  connected: false,
+};
+MODELS.forEach(m => state.timeSeries[m] = []);
+
+/* ════════════════════════════════════════════════════════════════════════
+   URL / UTILITIES
+   ════════════════════════════════════════════════════════════════════════ */
+function param(name) {
+  return new URLSearchParams(location.search).get(name);
+}
+function fmt$(n, dp=3) {
+  if(n==null||isNaN(n)) return '—';
+  if(n>=1) return '$'+n.toFixed(2);
+  return '$'+n.toFixed(dp);
+}
+function fmtTok(n) {
+  if(n==null||isNaN(n)) return '—';
+  n = Number(n);
+  if(n>=1e6) return (n/1e6).toFixed(2)+'M';
+  if(n>=1e3) return (n/1e3).toFixed(1)+'K';
+  return String(Math.round(n));
+}
+function fmtTime(ts) {
+  const d = new Date(ts*1000);
+  return d.toLocaleTimeString('en-GB',{hour12:false});
+}
+function clampPct(p) { return Math.max(0, Math.min(100, p)); }
+
+function setConn(mode) {
+  const b = document.getElementById('conn-badge');
+  const t = document.getElementById('conn-text');
+  b.className = 'badge';
+  if(mode==='live') { b.classList.add('live'); t.textContent='LIVE · BURNING'; }
+  else if(mode==='connecting') { b.classList.add('connecting'); t.textContent='CONNECTING…'; }
+  else if(mode==='stale') { b.classList.add('stale'); t.textContent='STALE · RECONNECTING'; }
+  else { b.classList.add('error'); t.textContent='OFFLINE'; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   PLOTLY DARK TEMPLATE
+   ════════════════════════════════════════════════════════════════════════ */
+const PLOT_BG = '#0d1117';
+const PLOT_GRID = 'rgba(48,54,61,.4)';
+const axisBase = (title) => ({
+  title: {text:title, font:{size:10,color:'#8b949e'}},
+  showgrid: true, gridcolor: PLOT_GRID, zeroline:false,
+  tickfont: {size:9, color:'#8b949e'}, tickcolor:'transparent', automargin:true,
+});
+
+/* ════════════════════════════════════════════════════════════════════════
+   BAR CHART — Token Burn per Model
+   ════════════════════════════════════════════════════════════════════════ */
+function initBarChart() {
+  const traces = MODELS.map(m => ({
+    name: m,
+    x: [m],
+    y: [0],
+    type: 'bar',
+    marker: {color: MODEL_COLORS[m]},
+    text: ['0'],
+    textposition: 'auto',
+    textfont: {size:10, color:'#c9d1d9'},
+    hovertemplate: '<b>%{x}</b><br>Tokens: %{y:,.0f}<extra></extra>',
+  }));
+
+  Plotly.newPlot('bar-chart', traces, {
+    paper_bgcolor: PLOT_BG, plot_bgcolor: PLOT_BG,
+    margin: {l:50, r:20, t:10, b:40},
+    showlegend: true,
+    legend: {font:{size:9, color:'#8b949e'}, orientation:'h', y:-0.2},
+    barmode: 'group',
+    xaxis: {showgrid:false, tickfont:{size:9,color:'#8b949e'}, tickangle:-25, automargin:true},
+    yaxis: {...axisBase('Tokens Burned'), tickformat:'.0f'},
+    font: {family:'ui-monospace,monospace', size:9},
+  }, {displayModeBar:false, responsive:true});
+}
+
+function updateBarChart(summary) {
+  const perModel = summary.per_model || {};
+  const traces = MODELS.map(m => {
+    const d = perModel[m] || {};
+    const tokens = (d.tokens_in || 0) + (d.tokens_out || 0);
+    return {
+      name: m, x: [m], y: [tokens],
+      marker: {color: MODEL_COLORS[m]},
+      text: [fmtTok(tokens)],
+      textposition: 'auto',
+      textfont: {size:10, color:'#c9d1d9'},
+      hovertemplate: '<b>%{x}</b><br>Tokens: %{y:,.0f}<extra></extra>',
+    };
+  });
+  Plotly.react('bar-chart', traces, document.getElementById('bar-chart').layout, {displayModeBar:false, responsive:true});
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   TIME CHART — Stacked Area per Model
+   ════════════════════════════════════════════════════════════════════════ */
+function initTimeChart() {
+  const traces = MODELS.map(m => ({
+    name: m,
+    x: [],
+    y: [],
+    type: 'scatter',
+    mode: 'lines',
+    fill: 'tozeroy',
+    stackgroup: 'one',
+    line: {color: MODEL_COLORS[m], width:1},
+    fillcolor: MODEL_COLORS[m] + '33',
+    hovertemplate: '<b>'+m+'</b><br>%{x}<br>Tokens: %{y:,.0f}<extra></extra>',
+  }));
+
+  Plotly.newPlot('time-chart', traces, {
+    paper_bgcolor: PLOT_BG, plot_bgcolor: PLOT_BG,
+    margin: {l:50, r:20, t:10, b:30},
+    showlegend: true,
+    legend: {font:{size:9, color:'#8b949e'}, orientation:'h', y:-0.15},
+    xaxis: {...axisBase(''), type:'date', showgrid:false, tickfont:{size:8,color:'#6e7681'}, tickformat:'%H:%M:%S'},
+    yaxis: {...axisBase('Cumulative Tokens'), tickformat:'.0f'},
+    font: {family:'ui-monospace,monospace', size:9},
+  }, {displayModeBar:false, responsive:true});
+}
+
+function updateTimeChart(summary) {
+  const perModel = summary.per_model || {};
+  const elapsed = summary.elapsed_s || 0;
+  const t = (summary.burn_start || Math.floor(Date.now()/1000)) + elapsed;
+
+  // Build cumulative traces — we use per_model totals as current cumulative
+  // and push a single point per event. Since we get cumulative totals, we
+  // store them directly.
+  const traces = MODELS.map(m => {
+    const d = perModel[m] || {};
+    const tokens = (d.tokens_in || 0) + (d.tokens_out || 0);
+    const hist = state.timeSeries[m];
+    // Add data point
+    if(hist.length === 0 || hist[hist.length-1].tokens !== tokens) {
+      hist.push({t: t * 1000, tokens: tokens});
+    }
+    return {
+      name: m,
+      x: hist.map(p => p.t),
+      y: hist.map(p => p.tokens),
+      type: 'scatter',
+      mode: 'lines',
+      fill: 'tozeroy',
+      stackgroup: 'one',
+      line: {color: MODEL_COLORS[m], width:1},
+      fillcolor: MODEL_COLORS[m] + '33',
+      hovertemplate: '<b>'+m+'</b><br>%{x}<br>Tokens: %{y:,.0f}<extra></extra>',
+    };
+  });
+
+  Plotly.react('time-chart', traces, document.getElementById('time-chart').layout, {displayModeBar:false, responsive:true});
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   QUOTA GAUGES — Circular
+   ════════════════════════════════════════════════════════════════════════ */
+function initGauges() {
+  const gaugeLayout = {
+    paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+    margin: {l:20, r:20, t:20, b:20},
+    xaxis: {visible:false, range:[-1,1]},
+    yaxis: {visible:false, range:[-1,1]},
+    showlegend: false,
+    font: {family:'ui-monospace,monospace'},
+  };
+
+  // OURS gauge
+  Plotly.newPlot('gauge-ours', [makeGaugeTrace(0, '#58a6ff')], gaugeLayout, {displayModeBar:false, staticPlot:true});
+
+  // FRIEND gauge
+  Plotly.newPlot('gauge-friend', [makeGaugeTrace(0, '#bc8cff')], gaugeLayout, {displayModeBar:false, staticPlot:true});
+}
+
+function makeGaugeTrace(pct, color) {
+  // Draw an arc gauge using a scatterpolar or shape. We'll use a simple
+  // approach: draw a circle and fill portion using shapes.
+  // Actually, let's use a bar-like gauge with Plotly's built-in indicator.
+  const angle = pct / 100 * 270; // 270 degree arc
+  return {
+    type: 'scatterpolar',
+    mode: 'lines',
+    r: [1, 1],
+    theta: [0, angle],
+    line: {color: color, width: 12, shape: 'spline'},
+    subplot: 'polar',
+  };
+}
+
+// Simpler approach: use Plotly indicator gauge
+function drawGauge(divId, pct, color) {
+  const data = [{
+    type: 'indicator',
+    mode: 'gauge+number',
+    value: pct,
+    number: {font: {size: 28, color: color}, suffix: '%'},
+    gauge: {
+      axis: {range: [0, 100], tickwidth: 1, tickcolor: '#30363d', tickfont: {size: 8, color: '#8b949e'}},
+      bar: {color: color, thickness: 0.25},
+      bgcolor: '#0d1117',
+      borderwidth: 1,
+      bordercolor: '#21262d',
+      steps: [
+        {range: [0, 50], color: 'rgba(63,185,80,.15)'},
+        {range: [50, 80], color: 'rgba(210,153,34,.15)'},
+        {range: [80, 100], color: 'rgba(248,81,73,.15)'},
+      ],
+      threshold: {
+        line: {color: color, width: 3},
+        thickness: 0.8,
+        value: pct,
+      },
+    },
+  }];
+
+  Plotly.react(divId, data, {
+    paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+    margin: {l:15, r:15, t:5, b:5},
+    font: {family:'ui-monospace,monospace'},
+    height: 180, width: 180,
+  }, {displayModeBar:false, staticPlot:true});
+}
+
+function updateGauges(summary) {
+  const qp = summary.quota_pressure || {};
+  const ours = qp.ours || {used_pct: 0};
+  const friend = qp.friend || {used_pct: 0};
+
+  drawGauge('gauge-ours', clampPct(ours.used_pct || 0), '#58a6ff');
+  drawGauge('gauge-friend', clampPct(friend.used_pct || 0), '#bc8cff');
+
+  document.getElementById('gauge-ours-sub').textContent = (ours.used_pct||0).toFixed(1) + '% · ' + (ours.window||'5h') + ' window';
+  document.getElementById('gauge-friend-sub').textContent = (friend.used_pct||0).toFixed(1) + '% · ' + (friend.window||'5h') + ' window';
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   COST METER
+   ════════════════════════════════════════════════════════════════════════ */
+function updateCostMeter(summary) {
+  const cost = summary.total_cost_usd || 0;
+  const intp = Math.floor(cost);
+  const frac = Math.round((cost - intp) * 100);
+  document.getElementById('cost-big').innerHTML = '$' + intp + '<span class="cents">.' + String(frac).padStart(2,'0') + '</span>';
+
+  // Burn rate = cost / elapsed hours
+  const elapsedH = (summary.elapsed_s || 1) / 3600;
+  const burnRate = cost / elapsedH;
+  document.getElementById('burn-rate').textContent = fmt$(burnRate, 2);
+
+  // Stats
+  document.getElementById('stat-reqs').textContent = summary.total_requests || 0;
+  document.getElementById('stat-tokens').textContent = fmtTok((summary.total_tokens_in || 0) + (summary.total_tokens_out || 0));
+  document.getElementById('stat-tin').textContent = fmtTok(summary.total_tokens_in || 0);
+  document.getElementById('stat-tout').textContent = fmtTok(summary.total_tokens_out || 0);
+
+  // Cost bar — scale to $5 cap for visual
+  const cap = 5;
+  document.getElementById('cost-bar-fill').style.width = clampPct(cost / cap * 100) + '%';
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   REQUEST FLOW
+   ════════════════════════════════════════════════════════════════════════ */
+function updateFlow(summary) {
+  const reqs = summary.recent_requests || [];
+  const list = document.getElementById('flow-list');
+  if(!reqs.length) {
+    list.innerHTML = '<div class="flow-empty">Waiting for requests…</div>';
+    return;
+  }
+
+  list.innerHTML = reqs.slice(0, 10).map(r => {
+    const failClass = r.success === false ? ' fail' : '';
+    const statusIcon = r.success === false ? '✗' : '✓';
+    const color = MODEL_COLORS[r.model] || '#8b949e';
+    const tokens = (r.tokens_in || 0) + (r.tokens_out || 0);
+    return `<div class="flow-card${failClass}">
+      <span class="fc-time">${fmtTime(r.ts)}</span>
+      <div class="fc-mid">
+        <span class="fc-model" style="color:${color}">${statusIcon} ${r.model || '—'}</span>
+        <br><span class="fc-prompt">${escapeHtml(r.prompt || '')}</span>
+      </div>
+      <div class="fc-right">
+        <div class="fc-cost">${fmt$(r.cost_usd || 0, 5)}</div>
+        <div class="fc-tok">${fmtTok(tokens)} tok</div>
+        <div class="fc-lat">${r.latency_ms || 0}ms</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   MODEL COMPARISON TABLE
+   ════════════════════════════════════════════════════════════════════════ */
+function updateModelTable(summary) {
+  const perModel = summary.per_model || {};
+  const tbody = document.getElementById('mt-body');
+
+  let html = '';
+  for(const m of MODELS) {
+    const d = perModel[m] || {};
+    if(!d.requests) {
+      html += `<tr>
+        <td class="mt-model" style="color:${MODEL_COLORS[m]}">${m}</td>
+        <td colspan="6" style="text-align:center;color:var(--txt-dim)">no requests yet</td>
+      </tr>`;
+      continue;
+    }
+    const totalTok = (d.tokens_in || 0) + (d.tokens_out || 0);
+    const costPerK = totalTok > 0 ? (d.cost_usd || 0) / (totalTok / 1000) : 0;
+    html += `<tr>
+      <td class="mt-model" style="color:${MODEL_COLORS[m]}">${m}</td>
+      <td>${d.requests || 0}</td>
+      <td class="mt-tok">${fmtTok(d.tokens_in || 0)}</td>
+      <td class="mt-tok">${fmtTok(d.tokens_out || 0)}</td>
+      <td class="mt-cost">${fmt$(d.cost_usd || 0, 5)}</td>
+      <td class="mt-lat">${Math.round(d.avg_latency_ms || 0)}</td>
+      <td class="mt-cost">${fmt$(costPerK, 5)}</td>
+    </tr>`;
+  }
+  tbody.innerHTML = html;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   ELAPSED TIME
+   ════════════════════════════════════════════════════════════════════════ */
+function updateElapsed(summary) {
+  const elapsed = summary.elapsed_s || 0;
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  document.getElementById('elapsed-text').textContent = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   RENDER ALL
+   ════════════════════════════════════════════════════════════════════════ */
+function renderAll(summary) {
+  updateBarChart(summary);
+  updateTimeChart(summary);
+  updateCostMeter(summary);
+  updateFlow(summary);
+  updateGauges(summary);
+  updateModelTable(summary);
+  updateElapsed(summary);
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   NOSTR SUBSCRIPTION
+   ════════════════════════════════════════════════════════════════════════ */
+let nostrPool = null;
+let nostrSub = null;
+
+async function initNostr() {
+  if(nostrSub) {
+    try { nostrSub.close(); } catch(e) {}
+    nostrSub = null;
+  }
+
+  const N = window.NostrTools;
+  if(!N || !N.SimplePool) {
+    console.error('nostr-tools not loaded');
+    setConn('error');
+    return;
+  }
+
+  if(!nostrPool) nostrPool = new N.SimplePool();
+
+  console.log('[nostr] Subscribing to kind 30000 from', BURN_NPUB_HEX.slice(0,16)+'…');
+
+  nostrSub = nostrPool.subscribeMany(RELAYS, {
+    kinds: [30000],
+    authors: [BURN_NPUB_HEX],
+    "#d": ["burn-summary"],
+    limit: 1,
+  }, {
+    onevent: (event) => {
+      lastNostrEventAt = Date.now();
+      try {
+        const summary = JSON.parse(event.content);
+        state.lastEvent = summary;
+        state.lastEventAt = Date.now();
+        if(!state.connected) {
+          state.connected = true;
+        }
+        setConn('live');
+        renderAll(summary);
+        console.log('[nostr] Received burn summary:', summary.total_requests, 'requests,', summary.total_cost_usd, 'USD');
+      } catch(e) {
+        console.warn('[nostr] Failed to parse event:', e.message);
+      }
+    },
+    oneose: () => {
+      console.log('[nostr] EOSE received');
+      // If we haven't gotten any events yet, stay connecting
+      if(!state.lastEventAt) setConn('connecting');
+    },
+    onclose: () => {
+      console.log('[nostr] Subscription closed');
+    },
+  });
+
+  // Stale watchdog
+  if(!window._staleWatchdog) {
+    window._staleWatchdog = setInterval(() => {
+      if(state.lastEventAt && (Date.now() - state.lastEventAt > STALE_MS)) {
+        setConn('stale');
+      }
+    }, 5000);
+  }
+
+  // Reconnect watchdog
+  if(!window._reconnectTimer) {
+    window._reconnectTimer = setInterval(() => {
+      const since = state.lastEventAt ? Date.now() - state.lastEventAt : Date.now() - (window._startTime || Date.now());
+      if(since > 60000) {
+        console.warn('[nostr] No events in 60s, reconnecting...');
+        state.lastEventAt = 0;
+        initNostr().catch(e => console.warn('[nostr] reconnect failed:', e.message));
+      }
+    }, 15000);
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   CLOCK
+   ════════════════════════════════════════════════════════════════════════ */
+function tickClock() {
+  document.getElementById('time-text').textContent = new Date().toLocaleTimeString('en-GB', {hour12: false});
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   INIT
+   ════════════════════════════════════════════════════════════════════════ */
+async function init() {
+  // Initialize charts
+  initBarChart();
+  initTimeChart();
+  initGauges();
+
+  // Clock
+  tickClock();
+  setInterval(tickClock, 1000);
+
+  setConn('connecting');
+
+  // Show npub info
+  console.log('[config] NPUB:', BURN_NPUB_HEX);
+  console.log('[config] Relays:', RELAYS);
+
+  window._startTime = Date.now();
+
+  // Connect to Nostr
+  try {
+    await initNostr();
+  } catch(e) {
+    console.warn('[nostr] init failed:', e.message);
+    setConn('error');
+  }
+}
+
+init();
+</script>
+</body>
+</html>

@@ -81,15 +81,35 @@ body{
 .col-quota {grid-column:span 4}
 .col-flow  {grid-column:span 5}
 .col-gate  {grid-column:span 3}
+.col-rates {grid-column:span 5}
 .full      {grid-column:span 12}
+
+/* ── RP-5a: measured-rates table ── */
+.rate-rows{display:flex;flex-direction:column;gap:2px;flex:1;align-content:start}
+.rate-row{
+  display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:center;
+  padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px;
+}
+.rate-row:last-child{border-bottom:none}
+.rate-prov{color:var(--txt);font-weight:500;text-transform:capitalize}
+.rate-val{font-family:var(--mono);color:var(--cyan);font-weight:600;white-space:nowrap}
+.rate-val.zero{color:var(--txt-dim)}
+.src-badge{
+  font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.5px;
+  padding:2px 6px;border-radius:3px;text-transform:uppercase;white-space:nowrap;
+}
+.src-badge.measured{background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.4)}
+.src-badge.fallback{background:rgba(210,153,34,.15);color:var(--yellow);border:1px solid rgba(210,153,34,.4)}
+.rate-foot{font-size:10px;color:var(--txt-dim);margin-top:8px;line-height:1.4}
+.rate-foot .ok{color:var(--green)}
 
 /* ── phone / tablet ── */
 @media(max-width:1100px){
-  .col-qr,.col-diag,.col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate{grid-column:span 6}
+  .col-qr,.col-diag,.col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate,.col-rates{grid-column:span 6}
 }
 @media(max-width:700px){
   .grid{grid-template-columns:1fr;padding:10px}
-  .col-qr,.col-diag,.col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate,.full{grid-column:span 1}
+  .col-qr,.col-diag,.col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate,.col-rates,.full{grid-column:span 1}
   .topbar{padding:10px 12px}
   .topbar h1{font-size:14px}
 }
@@ -369,6 +389,15 @@ body{
     </div>
   </div>
 
+  <!-- ═══ PANEL 9: MEASURED RATES (RP-5a) ═══ -->
+  <div class="card col-rates">
+    <h2><span class="num">9</span> Measured Rates — real_price_tracker · live $/M</h2>
+    <div class="rate-rows" id="rate-rows">
+      <div class="rate-row"><span class="rate-prov" style="color:var(--txt-dim)">loading…</span></div>
+    </div>
+    <div class="rate-foot" id="rate-foot">Source: real_price_tracker.get_rate_with_fallback()</div>
+  </div>
+
 </div>
 
 <script>
@@ -467,6 +496,9 @@ function normalizeSnapshot(raw) {
     scarcity: raw.scarcity || {},
     participants: raw.participants || {},
     ledger: raw.ledger || [],
+    // RP-5a: Python source-of-truth measured rates (preferred) + TS fallback
+    real_rates_tracker: raw.real_rates_tracker || null,
+    real_rates: raw.real_rates || {},
   };
 }
 
@@ -661,6 +693,73 @@ function updateEcon(snap){
   }
 }
 
+/* ── PANEL 9: MEASURED RATES (RP-5a) ── */
+/* Renders the Python source-of-truth measured rates from
+   real_price_tracker.get_rate_with_fallback(), surfaced by the CVM server as
+   `real_rates_tracker`. When that's absent (export file missing or stale),
+   falls back to the TS-reimplemented `real_rates`._default so the panel never
+   goes blank. Shows one row per provider with rate ($/M) and a MEASURED /
+   FALLBACK badge. */
+function updateMeasuredRates(snap){
+  const box = document.getElementById('rate-rows');
+  const foot = document.getElementById('rate-foot');
+  if(!box) return;
+
+  // Prefer the Python source-of-truth export; fall back to the TS path.
+  const tracker = snap && snap.real_rates_tracker;
+  const tsRates = snap && snap.real_rates;   // {provider: {model: {rate,...}, _default:{rate,...}}}
+
+  // Dashboard display-name → tracker provider-name map (the export uses the
+  // real_price_tracker provider keys; the TS path uses the same).
+  const PROVS = [
+    {key:'ours',         label:'Ours (z.ai)'},
+    {key:'friend',       label:'Friend (z.ai)'},
+    {key:'ollama_cloud', label:'Ollama Cloud'},
+    {key:'ppq',          label:'PPQ'},
+  ];
+
+  let rowsHtml = '';
+  let measuredCount = 0;
+  let source = 'real_price_tracker.get_rate_with_fallback()';
+
+  if(tracker && Array.isArray(tracker.providers) && tracker.providers.length){
+    // Python export path — one entry per provider with {rate_per_m, source, measured}
+    for(const p of PROVS){
+      const e = tracker.providers.find(x => x.provider === p.key);
+      if(!e){ rowsHtml += `<div class="rate-row"><span class="rate-prov">${p.label}</span><span class="rate-val">—</span><span class="src-badge fallback">n/a</span></div>`; continue; }
+      const isMeasured = !!e.measured;
+      if(isMeasured) measuredCount++;
+      const rateStr = e.rate_per_m === 0 ? '$0.00'
+        : fmt$(e.rate_per_m, 4) + '/M';
+      const cls = e.rate_per_m === 0 ? 'rate-val zero' : 'rate-val';
+      const badge = isMeasured
+        ? '<span class="src-badge measured">measured</span>'
+        : `<span class="src-badge fallback">${e.fallback_reason || 'fallback'}</span>`;
+      rowsHtml += `<div class="rate-row"><span class="rate-prov">${p.label}</span><span class="${cls}">${rateStr}</span>${badge}</div>`;
+    }
+  } else {
+    // TS fallback — reconstruct from real_rates._default
+    source = 'computeRealRates() (TS fallback — Python export unavailable)';
+    for(const p of PROVS){
+      const provEntry = tsRates && tsRates[p.key];
+      const def = provEntry && provEntry._default;
+      if(!def){ rowsHtml += `<div class="rate-row"><span class="rate-prov">${p.label}</span><span class="rate-val">—</span><span class="src-badge fallback">n/a</span></div>`; continue; }
+      const isMeasured = def.source === 'measured';
+      if(isMeasured) measuredCount++;
+      const rateStr = def.rate === 0 ? '$0.00' : fmt$(def.rate, 4) + '/M';
+      const cls = def.rate === 0 ? 'rate-val zero' : 'rate-val';
+      const badge = isMeasured
+        ? '<span class="src-badge measured">measured</span>'
+        : `<span class="src-badge fallback">${def.source || 'fallback'}</span>`;
+      rowsHtml += `<div class="rate-row"><span class="rate-prov">${p.label}</span><span class="${cls}">${rateStr}</span>${badge}</div>`;
+    }
+  }
+
+  box.innerHTML = rowsHtml;
+  const allMeasured = measuredCount === PROVS.length;
+  foot.innerHTML = `Source: ${source} · <span class="${allMeasured?'ok':''}">${measuredCount}/${PROVS.length} measured</span>`;
+}
+
 /* ════════════════════════════════════════════════════════════════════════
    RENDER ALL
    ════════════════════════════════════════════════════════════════════════ */
@@ -683,6 +782,7 @@ function renderAll(){
   updateFlow(snap);
   updateGate(snap);
   updateEcon(snap);
+  updateMeasuredRates(snap);
 }
 
 /* ════════════════════════════════════════════════════════════════════════
