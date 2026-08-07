@@ -77,7 +77,6 @@ body{
 .col-diag  {grid-column:span 5}
 .col-cost  {grid-column:span 4}
 .col-charts{grid-column:span 7}
-.col-econ  {grid-column:span 5}
 .col-quota {grid-column:span 4}
 .col-flow  {grid-column:span 5}
 .col-gate  {grid-column:span 3}
@@ -105,11 +104,11 @@ body{
 
 /* ── phone / tablet ── */
 @media(max-width:1100px){
-  .col-qr,.col-diag,.col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate,.col-rates{grid-column:span 6}
+  .col-qr,.col-diag,.col-cost,.col-charts,.col-quota,.col-flow,.col-gate,.col-rates{grid-column:span 6}
 }
 @media(max-width:700px){
   .grid{grid-template-columns:1fr;padding:10px}
-  .col-qr,.col-diag,.col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate,.col-rates,.full{grid-column:span 1}
+  .col-qr,.col-diag,.col-cost,.col-charts,.col-quota,.col-flow,.col-gate,.col-rates,.full{grid-column:span 1}
   .topbar{padding:10px 12px}
   .topbar h1{font-size:14px}
 }
@@ -247,26 +246,6 @@ body{
 .gate-stats .gs .gs-l{color:var(--txt-dim);text-transform:uppercase;letter-spacing:.3px;font-size:8px}
 .gate-stats .gs .gs-v{font-family:var(--mono);color:var(--txt-bright);font-size:12px}
 
-/* ═══ PANEL 8: TOKEN ECONOMY SUMMARY ═══ */
-.econ-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;flex:1;align-content:start}
-.econ-stat{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
-.econ-stat .es-l{font-size:9px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:.4px}
-.econ-stat .es-v{font-family:var(--mono);font-size:20px;font-weight:600;color:var(--txt-bright);margin-top:2px}
-.econ-stat .es-v.cyan{color:var(--cyan)} .es-stat .es-v.green{color:var(--green)} .es-stat .es-v.orange{color:var(--orange)}
-.econ-stat .es-sub{font-size:10px;color:var(--txt-dim);font-family:var(--mono);margin-top:1px}
-.scarcity-bar{margin-top:10px}
-.scarcity-bar .sb-top{display:flex;justify-content:space-between;font-size:10px;color:var(--txt-dim);margin-bottom:4px}
-.scarcity-track{height:10px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;overflow:hidden;display:flex}
-.scarcity-seg{height:100%;transition:opacity .5s}
-.scarcity-seg.s1{background:#1a7f37} .scarcity-seg.s2{background:#9e6a03}
-.scarcity-seg.s3{background:#d29922} .scarcity-seg.s4{background:#f0883e} .scarcity-seg.s5{background:#da3633}
-.leaderboard-mini{margin-top:10px;max-height:100px;overflow-y:auto;border:1px solid var(--border);border-radius:6px}
-.lb-row{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);font-size:11px}
-.lb-row:last-child{border-bottom:none}
-.lb-row .who{font-family:var(--mono);color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.lb-row .spent{font-family:var(--mono);color:var(--orange);font-size:10px}
-.lb-row .prompts{font-family:var(--mono);color:var(--txt-dim);font-size:10px}
-.lb-empty{padding:14px;text-align:center;color:var(--txt-dim);font-size:11px}
 </style>
 </head>
 <body>
@@ -336,28 +315,6 @@ body{
       <span class="lg"><span class="swatch sw-price"></span> Your price + margin ($/M)</span>
       <span class="lg"><span class="swatch sw-margin"></span> MARGIN % (right axis)</span>
     </div>
-  </div>
-
-  <!-- ═══ PANEL 8: TOKEN ECONOMY SUMMARY ═══ -->
-  <div class="card col-econ">
-    <h2><span class="num">8</span> Token Economy — participants · price · scarcity</h2>
-    <div class="econ-stats">
-      <div class="econ-stat"><div class="es-l">Participants</div><div class="es-v cyan" id="econ-participants">—</div></div>
-      <div class="econ-stat"><div class="es-l">Total Prompts</div><div class="es-v" id="econ-prompts">—</div></div>
-      <div class="econ-stat"><div class="es-l">Avg Price $/M</div><div class="es-v cyan" id="econ-avgprice">—</div></div>
-      <div class="econ-stat"><div class="es-l">Tokens Used</div><div class="es-v" id="econ-tokens">—</div></div>
-    </div>
-    <div class="scarcity-bar">
-      <div class="sb-top"><span>Scarcity <span id="econ-scarcity" style="color:var(--yellow);font-family:var(--mono)">1.0×</span></span><span id="econ-budget-pct">0% budget used</span></div>
-      <div class="scarcity-track">
-        <div class="scarcity-seg s1" style="flex:20"></div>
-        <div class="scarcity-seg s2" style="flex:20"></div>
-        <div class="scarcity-seg s3" style="flex:20"></div>
-        <div class="scarcity-seg s4" style="flex:20"></div>
-        <div class="scarcity-seg s5" style="flex:20"></div>
-      </div>
-    </div>
-    <div class="leaderboard-mini" id="econ-leaderboard"><div class="lb-empty">No participants yet</div></div>
   </div>
 
   <!-- ═══ PANEL 4: QUOTA BARS ═══ -->
@@ -665,42 +622,6 @@ function updateGate(snap){
   document.getElementById('gate-margin').textContent=(g.safety_margin||2)+'×';
 }
 
-/* ── PANEL 8: TOKEN ECONOMY SUMMARY ── */
-function updateEcon(snap){
-  const parts = (snap && snap.participants) || {};
-  const scarcity = (snap && snap.scarcity) || {};
-  const pricing = (snap && snap.pricing) || {};
-  const ledger = (snap && snap.ledger) || [];
-  // participants count
-  document.getElementById('econ-participants').textContent = parts.count != null ? parts.count : '—';
-  // total prompts
-  document.getElementById('econ-prompts').textContent = parts.total_prompts != null ? parts.total_prompts : '—';
-  // avg price — use ours your_price as representative
-  let avgPrice = '—';
-  if (pricing.ours && pricing.ours.your_price != null) avgPrice = fmt$(pricing.ours.your_price, 3)+'/M';
-  document.getElementById('econ-avgprice').textContent = avgPrice;
-  // tokens used
-  document.getElementById('econ-tokens').textContent = parts.total_tokens != null ? fmtTok(parts.total_tokens) : '—';
-  // scarcity
-  const sf = scarcity.factor || 1.0;
-  document.getElementById('econ-scarcity').textContent = sf.toFixed(1)+'× ('+(scarcity.level||'—')+')';
-  const budgetPct = scarcity.budget_used_pct || 0;
-  document.getElementById('econ-budget-pct').textContent = budgetPct.toFixed(0)+'% budget used';
-  // scarcity track highlight
-  const segs = document.querySelectorAll('.scarcity-seg');
-  const activeSeg = budgetPct < 20 ? 0 : budgetPct < 40 ? 1 : budgetPct < 60 ? 2 : budgetPct < 80 ? 3 : 4;
-  segs.forEach((s,i) => s.style.opacity = i <= activeSeg ? '1' : '0.2');
-  // leaderboard — real ledger data only
-  const lb=document.getElementById('econ-leaderboard');
-  if(!ledger.length){
-    lb.innerHTML='<div class="lb-empty">No participants yet</div>';
-  } else {
-    lb.innerHTML=ledger.slice(0,8).map(p=>
-      `<div class="lb-row"><span class="who">${shortNpub(p.npub_short||p.npub)}</span><span class="prompts">${p.prompts_sent||p.prompts||0} prompts</span><span class="spent">${fmtTok(p.tokens_spent||p.spent||0)} tok</span></div>`
-    ).join('');
-  }
-}
-
 /* ── PANEL 9: MEASURED RATES (RP-5a) ── */
 /* Renders the Python source-of-truth measured rates from
    real_price_tracker.get_rate_with_fallback(), surfaced by the CVM server as
@@ -789,7 +710,6 @@ function renderAll(){
   updateCost(snap);
   updateFlow(snap);
   updateGate(snap);
-  updateEcon(snap);
   updateMeasuredRates(snap);
 }
 

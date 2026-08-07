@@ -1,0 +1,105 @@
+{
+  "timestamp": 1786092842.753731,
+  "recent_requests": [
+    {
+      "model": "glm-4.5-flash",
+      "provider": "ours",
+      "key_name": "ours",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "duration_ms": 8260,
+      "status": "error",
+      "error": "Unterminated string starting at: line 1 column 918 (char 917)",
+      "timestamp": 1786092833.255609
+    },
+    {
+      "model": "kimi-k2.7-code",
+      "provider": "ollama_cloud",
+      "key_name": "ollama_cloud",
+      "prompt_tokens": 31,
+      "completion_tokens": 200,
+      "total_tokens": 231,
+      "cost_usd": 5.543999999999993e-06,
+      "duration_ms": 2470,
+      "status": "success",
+      "error": null,
+      "timestamp": 1786092838.0800977
+    },
+    {
+      "model": "kimi-k3:cloud",
+      "provider": "unknown",
+      "key_name": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "duration_ms": 274,
+      "status": "error_503",
+      "error": "{\"error\":\"ollama cloud failed for ollama-only model kimi-k3:cloud\"}",
+      "timestamp": 1786092840.4177558
+    },
+    {
+      "model": "kimi-k3:cloud",
+      "provider": "unknown",
+      "key_name": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "cost_usd": 0.0,
+      "duration_ms": 293,
+      "status": "error_503",
+      "error": "{\"error\":\"ollama cloud failed for ollama-only model kimi-k3:cloud\"}",
+      "timestamp": 1786092842.7520835
+    }
+  ],
+  "aggregate": {
+    "total_tokens": 231,
+    "total_cost": 5.54e-06,
+    "total_requests": 4,
+    "per_model": {
+      "glm-4.5-flash": {
+        "requests": 1,
+        "tokens": 0,
+        "cost": 0.0,
+        "avg_tokens_per_req": 0.0,
+        "avg_cost_per_req": 0.0
+      },
+      "kimi-k2.7-code": {
+        "requests": 1,
+        "tokens": 231,
+        "cost": 5.54e-06,
+        "avg_tokens_per_req": 231.0,
+        "avg_cost_per_req": 5.54e-06
+      },
+      "kimi-k3:cloud": {
+        "requests": 2,
+        "tokens": 0,
+        "cost": 0.0,
+        "avg_tokens_per_req": 0.0,
+        "avg_cost_per_req": 0.0
+      }
+    },
+    "per_provider": {
+      "ours": {
+        "requests": 1,
+        "tokens": 0,
+        "cost": 0.0,
+        "rate_per_m": 0
+      },
+      "ollama_cloud": {
+        "requests": 1,
+        "tokens": 231,
+        "cost": 5.54e-06,
+        "rate_per_m": 0.024
+      },
+      "unknown": {
+        "requests": 2,
+        "tokens": 0,
+        "cost": 0.0,
+        "rate_per_m": 0
+      }
+    }
+  }
+}

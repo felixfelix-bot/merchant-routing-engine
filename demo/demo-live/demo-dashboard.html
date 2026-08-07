@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sovereign Routing Engine — Live Burn Dashboard</title>
+<script src="vendor/plotly-2.35.2.min.js"></script>
+<style>
+/* ════════════════════════════════════════════════════════════════════════
+   DARK THEME — PROJECTOR-OPTIMIZED
+   ════════════════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#0a0e14; --bg2:#0d1117; --card:#131820; --card2:#161b22;
+  --border:#21262d; --border2:#30363d;
+  --txt:#c9d1d9; --txt-dim:#8b949e; --txt-bright:#f0f6fc;
+  --blue:#58a6ff; --green:#3fb950; --red:#f85149; --yellow:#d29922;
+  --purple:#bc8cff; --cyan:#39d2c0; --orange:#f0883e;
+  --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow-x:hidden}
+body{
+  background:var(--bg);color:var(--txt);font-family:var(--sans);
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;
+}
+
+/* ── top bar ── */
+.topbar{
+  display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  padding:14px 24px;background:var(--bg2);border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:50;backdrop-filter:blur(8px);
+}
+.topbar h1{font-size:18px;font-weight:600;color:var(--txt-bright);letter-spacing:-.3px}
+.topbar h1 .accent{color:var(--cyan)}
+.topbar .spacer{flex:1}
+.badge{
+  font-family:var(--mono);font-size:11px;font-weight:600;padding:4px 10px;
+  border-radius:5px;border:1px solid var(--border2);color:var(--txt-dim);
+  display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
+}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
+.badge.live .dot{background:var(--green);animation:pulse 2s infinite}
+.badge.error{border-color:var(--red);color:var(--red)}
+.badge.error .dot{background:var(--red)}
+.badge.connecting{border-color:var(--blue);color:var(--blue)}
+.badge.connecting .dot{background:var(--blue);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── grid ── */
+.grid{
+  display:grid;gap:16px;padding:18px 24px 40px;
+  grid-template-columns:repeat(12,1fr);
+  grid-auto-rows:min-content;max-width:1900px;margin:0 auto;
+}
+.card{
+  background:var(--card);border:1px solid var(--border);border-radius:12px;
+  padding:20px;display:flex;flex-direction:column;min-width:0;overflow:hidden;
+  transition:border-color .3s;
+}
+.card:hover{border-color:var(--border2)}
+.card h2{
+  font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;
+  color:var(--txt-dim);margin-bottom:14px;display:flex;align-items:center;gap:8px;
+}
+.card h2 .num{
+  width:20px;height:20px;border-radius:5px;background:var(--border2);
+  display:inline-flex;align-items:center;justify-content:center;font-size:10px;
+  color:var(--cyan);
+}
+
+/* spans */
+.col-counters{grid-column:span 12}
+.col-stream{grid-column:span 5}
+.col-models{grid-column:span 4}
+.col-providers{grid-column:span 3}
+.col-rates{grid-column:span 5}
+.col-quota{grid-column:span 4}
+.col-routing{grid-column:span 3}
+.full{grid-column:span 12}
+
+/* ── big counters ── */
+.counters{display:flex;gap:24px;flex-wrap:wrap;justify-content:space-around;align-items:center;padding:10px 0}
+.counter{text-align:center;flex:1;min-width:180px}
+.counter .label{
+  font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--txt-dim);
+  margin-bottom:6px;
+}
+.counter .value{
+  font-family:var(--mono);font-size:42px;font-weight:700;line-height:1;
+  transition:color .5s;
+}
+.counter .sub{font-size:12px;color:var(--txt-dim);margin-top:4px;font-family:var(--mono)}
+.counter.tokens .value{color:var(--cyan)}
+.counter.cost .value{color:var(--green)}
+.counter.requests .value{color:var(--blue)}
+.counter.rate .value{color:var(--orange)}
+
+/* ── live request stream ── */
+.stream-list{
+  display:flex;flex-direction:column;gap:8px;
+  max-height:480px;overflow-y:auto;flex:1;
+}
+.stream-list::-webkit-scrollbar{width:6px}
+.stream-list::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+.stream-card{
+  background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;
+  display:grid;grid-template-columns:auto 1fr auto;gap:8px 14px;align-items:center;
+  animation:slidein .4s ease;font-size:12px;
+}
+.stream-card.error{border-color:rgba(248,81,73,.3)}
+.stream-card.cache{border-color:rgba(63,185,80,.2)}
+@keyframes slidein{from{opacity:0;transform:translateY(-10px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+.sc-time{font-family:var(--mono);font-size:10px;color:var(--txt-dim);white-space:nowrap}
+.sc-mid{min-width:0}
+.sc-model{font-family:var(--mono);font-weight:600;font-size:12px;color:var(--txt-bright)}
+.sc-prov{font-family:var(--mono);font-size:10px;color:var(--txt-dim);margin-top:2px}
+.sc-prov .pill{
+  display:inline-block;padding:1px 7px;border-radius:10px;font-size:10px;font-weight:600;
+}
+.pill.ours{background:rgba(88,166,255,.15);color:var(--blue)}
+.pill.friend{background:rgba(188,140,255,.15);color:var(--purple)}
+.pill.ollama_cloud{background:rgba(57,210,192,.15);color:var(--cyan)}
+.pill.ppq{background:rgba(240,136,62,.15);color:var(--orange)}
+.pill.deepinfra{background:rgba(210,153,34,.15);color:var(--yellow)}
+.pill.openrouter{background:rgba(63,185,80,.15);color:var(--green)}
+.pill.unknown{background:rgba(139,148,158,.15);color:var(--txt-dim)}
+.sc-right{text-align:right;font-family:var(--mono);font-size:11px;white-space:nowrap}
+.sc-tokens{color:var(--cyan);font-weight:600}
+.sc-cost{color:var(--orange);font-size:11px}
+.sc-dur{color:var(--txt-dim);font-size:10px}
+.sc-status{font-size:9px;font-weight:700}
+.sc-status.ok{color:var(--green)}
+.sc-status.err{color:var(--red)}
+.stream-empty{padding:40px;text-align:center;color:var(--txt-dim);font-size:13px}
+
+/* ── plotly chart containers ── */
+.chart-wrap{flex:1;min-height:280px}
+.chart-wrap.tall{min-height:340px}
+
+/* ── rate table ── */
+.rate-table{display:flex;flex-direction:column;gap:2px;flex:1}
+.rate-row{
+  display:grid;grid-template-columns:1fr auto auto;gap:14px;align-items:center;
+  padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px;
+  transition:background .2s;
+}
+.rate-row:hover{background:var(--bg2)}
+.rate-row:last-child{border-bottom:none}
+.rate-prov{color:var(--txt-bright);font-weight:500;text-transform:capitalize}
+.rate-val{font-family:var(--mono);color:var(--cyan);font-weight:600;white-space:nowrap;font-size:16px}
+.rate-reqs{font-family:var(--mono);font-size:11px;color:var(--txt-dim)}
+.rate-val.zero{color:var(--txt-dim)}
+
+/* ── quota pressure ── */
+.quota-list{display:flex;flex-direction:column;gap:10px;flex:1}
+.quota-item{
+  background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 14px;
+  font-size:12px;
+}
+.quota-item .qi-top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+.quota-item .qi-key{font-weight:600;color:var(--txt-bright);text-transform:capitalize}
+.quota-item .qi-status{font-family:var(--mono);font-size:11px}
+.quota-item .qi-status.ok{color:var(--green)}
+.quota-item .qi-status.warn{color:var(--yellow)}
+.quota-item .qi-status.crit{color:var(--red)}
+.quota-bar{height:14px;background:var(--bg);border:1px solid var(--border);border-radius:4px;overflow:hidden}
+.quota-bar-fill{height:100%;border-radius:3px;transition:width .8s cubic-bezier(.4,0,.2,1)}
+.quota-bar-fill.green{background:linear-gradient(90deg,#1a7f37,#3fb950)}
+.quota-bar-fill.yellow{background:linear-gradient(90deg,#9e6a03,#d29922)}
+.quota-bar-fill.red{background:linear-gradient(90deg,#da3633,#f85149)}
+.quota-bar-fill::after{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.12),transparent);animation:shimmer 2.5s infinite}
+@keyframes shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}
+
+/* ── routing decisions ── */
+.routing-list{display:flex;flex-direction:column;gap:6px;max-height:380px;overflow-y:auto;flex:1}
+.routing-list::-webkit-scrollbar{width:5px}
+.routing-list::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+.routing-item{
+  background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;
+  font-size:11px;animation:slidein .3s ease;
+}
+.routing-item .ri-prov{font-weight:600;color:var(--txt-bright)}
+.routing-item .ri-model{font-family:var(--mono);color:var(--cyan);font-size:10px}
+.routing-item .ri-cost{font-family:var(--mono);color:var(--orange)}
+.routing-item .ri-reason{color:var(--txt-dim);font-size:10px;margin-top:3px;line-height:1.3}
+
+/* ── responsive ── */
+@media(max-width:1200px){
+  .col-stream,.col-models,.col-providers{grid-column:span 6}
+  .col-rates,.col-quota,.col-routing{grid-column:span 6}
+}
+@media(max-width:700px){
+  .grid{grid-template-columns:1fr;padding:12px}
+  .col-stream,.col-models,.col-providers,.col-rates,.col-quota,.col-routing,.full{grid-column:span 1}
+  .topbar{padding:10px 14px}
+  .topbar h1{font-size:15px}
+  .counter .value{font-size:32px}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Sovereign Routing Engine — <span class="accent">Live Burn Dashboard</span></h1>
+  <span class="spacer"></span>
+  <span class="badge live" id="status-badge">
+    <span class="dot"></span>
+    <span id="status-text">Connecting…</span>
+  </span>
+  <span class="badge" id="update-time">—</span>
+</div>
+
+<div class="grid">
+
+  <!-- ═══ BIG COUNTERS ═══ -->
+  <div class="card col-counters">
+    <div class="counters">
+      <div class="counter tokens">
+        <div class="label">Total Tokens Burned</div>
+        <div class="value" id="counter-tokens">0</div>
+        <div class="sub" id="counter-tokens-sub">— tokens</div>
+      </div>
+      <div class="counter cost">
+        <div class="label">Total Spend</div>
+        <div class="value" id="counter-cost">$0.00</div>
+        <div class="sub" id="counter-cost-sub">$0.00 / M tokens</div>
+      </div>
+      <div class="counter requests">
+        <div class="label">Total Requests</div>
+        <div class="value" id="counter-requests">0</div>
+        <div class="sub" id="counter-requests-sub">— req/min</div>
+      </div>
+      <div class="counter rate">
+        <div class="label">Avg $/M Rate</div>
+        <div class="value" id="counter-rate">$0.00</div>
+        <div class="sub">across all providers</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ LIVE REQUEST STREAM ═══ -->
+  <div class="card col-stream">
+    <h2><span class="num">📡</span> Live Request Stream</h2>
+    <div class="stream-list" id="stream-list">
+      <div class="stream-empty">Waiting for data…</div>
+    </div>
+  </div>
+
+  <!-- ═══ PER-MODEL TOKEN BAR CHART ═══ -->
+  <div class="card col-models">
+    <h2><span class="num">📊</span> Tokens by Model</h2>
+    <div class="chart-wrap" id="chart-models"></div>
+  </div>
+
+  <!-- ═══ PER-PROVIDER PIE CHART ═══ -->
+  <div class="card col-providers">
+    <h2><span class="num">🥧</span> Provider Distribution</h2>
+    <div class="chart-wrap" id="chart-providers"></div>
+  </div>
+
+  <!-- ═══ $/M RATE PER PROVIDER ═══ -->
+  <div class="card col-rates">
+    <h2><span class="num">💲</span> Measured $/M per Provider</h2>
+    <div class="rate-table" id="rate-table">
+      <div class="rate-row"><span class="rate-prov" style="color:var(--txt-dim)">No data yet</span></div>
+    </div>
+  </div>
+
+  <!-- ═══ QUOTA PRESSURE ═══ -->
+  <div class="card col-quota">
+    <h2><span class="num">⚡</span> Quota Pressure</h2>
+    <div class="quota-list" id="quota-list">
+      <div class="stream-empty" style="padding:20px">No quota data</div>
+    </div>
+  </div>
+
+  <!-- ═══ ROUTING DECISIONS ═══ -->
+  <div class="card col-routing">
+    <h2><span class="num">🔀</span> Routing Decisions</h2>
+    <div class="routing-list" id="routing-list">
+      <div class="stream-empty" style="padding:20px">No routing data</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ════════════════════════════════════════════════════════════════════════
+//  DASHBOARD LOGIC
+// ════════════════════════════════════════════════════════════════════════
+
+const COLORS = {
+  bg: '#0a0e14', bg2: '#0d1117', card: '#131820',
+  border: '#21262d', txt: '#c9d1d9', txtDim: '#8b949e', txtBright: '#f0f6fc',
+  blue: '#58a6ff', green: '#3fb950', red: '#f85149', yellow: '#d29922',
+  purple: '#bc8cff', cyan: '#39d2c0', orange: '#f0883e',
+};
+
+const MODEL_COLORS = ['#39d2c0', '#58a6ff', '#bc8cff', '#f0883e', '#3fb950', '#d29922', '#f85149'];
+const PROVIDER_COLORS = {
+  'ours': '#58a6ff', 'friend': '#bc8cff', 'ollama_cloud': '#39d2c0',
+  'ppq': '#f0883e', 'deepinfra': '#d29922', 'openrouter': '#3fb950',
+  'unknown': '#8b949e',
+};
+
+let lastData = null;
+let prevTokens = 0, prevCost = 0, prevReqs = 0;
+let updateCount = 0;
+
+// ─── Number formatting ───────────────────────────────────────────────────
+function fmtTokens(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toLocaleString();
+}
+function fmtCost(n) {
+  if (n >= 1) return '$' + n.toFixed(2);
+  if (n >= 0.01) return '$' + n.toFixed(4);
+  return '$' + n.toFixed(6);
+}
+function fmtTime(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString('en-US', { hour12: false });
+}
+function pillClass(prov) {
+  return prov ? prov.replace(/\./g, '_') : 'unknown';
+}
+
+// ─── Animated counter ────────────────────────────────────────────────────
+function animateCounter(el, targetVal, fmtFn) {
+  const startVal = parseFloat(el.dataset.val || '0');
+  el.dataset.val = targetVal;
+  const duration = 800;
+  const startTime = performance.now();
+  function step(now) {
+    const t = Math.min((now - startTime) / duration, 1);
+    const eased = 1 - Math.pow(1 - t, 3);
+    const val = startVal + (targetVal - startVal) * eased;
+    el.textContent = fmtFn(val);
+    if (t < 1) requestAnimationFrame(step);
+    else el.textContent = fmtFn(targetVal);
+  }
+  requestAnimationFrame(step);
+}
+
+// ─── Fetch data ──────────────────────────────────────────────────────────
+async function fetchData() {
+  try {
+    const resp = await fetch('/data.json?_t=' + Date.now());
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+    lastData = data;
+    updateCount++;
+    updateStatus('live', 'Live');
+    render(data);
+  } catch (e) {
+    updateStatus('error', 'Connection Error');
+    console.error('Fetch error:', e);
+  }
+}
+
+function updateStatus(cls, text) {
+  const badge = document.getElementById('status-badge');
+  badge.className = 'badge ' + cls;
+  document.getElementById('status-text').textContent = text;
+  document.getElementById('update-time').textContent =
+    new Date().toLocaleTimeString('en-US', { hour12: false });
+}
+
+// ─── Render ──────────────────────────────────────────────────────────────
+function render(data) {
+  renderCounters(data);
+  renderStream(data);
+  renderModelChart(data);
+  renderProviderChart(data);
+  renderRateTable(data);
+  renderQuota(data);
+  renderRouting(data);
+}
+
+function renderCounters(data) {
+  const agg = data.aggregate || {};
+  const totalTok = agg.total_tokens || 0;
+  const totalCost = agg.total_cost || 0;
+  const totalReq = agg.total_requests || 0;
+  const ratePerM = totalTok > 0 ? (totalCost / totalTok * 1e6) : 0;
+
+  animateCounter(document.getElementById('counter-tokens'), totalTok, v => fmtTokens(Math.round(v)));
+  animateCounter(document.getElementById('counter-cost'), totalCost, v => fmtCost(v));
+  animateCounter(document.getElementById('counter-requests'), totalReq, v => Math.round(v).toLocaleString());
+  animateCounter(document.getElementById('counter-rate'), ratePerM, v => '$' + v.toFixed(2));
+
+  // Sub-labels
+  const tokDelta = totalTok - prevTokens;
+  const costDelta = totalCost - prevCost;
+  document.getElementById('counter-tokens-sub').textContent = '+' + fmtTokens(tokDelta) + ' since last update';
+  document.getElementById('counter-cost-sub').textContent = '+' + fmtCost(costDelta) + ' | $' + ratePerM.toFixed(2) + '/M avg';
+  document.getElementById('counter-requests-sub').textContent = totalReq + ' total requests';
+
+  prevTokens = totalTok;
+  prevCost = totalCost;
+  prevReqs = totalReq;
+}
+
+function renderStream(data) {
+  const container = document.getElementById('stream-list');
+  const reqs = (data.recent_requests || []).slice(0, 40);
+
+  if (reqs.length === 0) {
+    container.innerHTML = '<div class="stream-empty">No requests yet…</div>';
+    return;
+  }
+
+  // Only re-render if new data arrived
+  const firstId = reqs[0]?.id;
+  if (container.dataset.firstId === String(firstId) && updateCount > 1) return;
+  container.dataset.firstId = String(firstId);
+
+  container.innerHTML = reqs.map(r => {
+    const prov = r.provider || 'unknown';
+    const isError = r.status && r.status !== 'success';
+    const isCache = r.cache_hit || r.ollama_hit;
+    const cls = isError ? 'stream-card error' : (isCache ? 'stream-card cache' : 'stream-card');
+    const statusIcon = isError ? '✗' : '✓';
+    const statusCls = isError ? 'sc-status err' : 'sc-status ok';
+    const cacheBadge = r.cache_hit ? ' <span style="color:var(--green);font-size:9px">CACHE</span>'
+                    : r.ollama_hit ? ' <span style="color:var(--cyan);font-size:9px">OLLAMA</span>'
+                    : r.ppq_hit ? ' <span style="color:var(--orange);font-size:9px">PPQ</span>' : '';
+    return `
+      <div class="${cls}">
+        <div class="sc-time">${fmtTime(r.ts)}</div>
+        <div class="sc-mid">
+          <div class="sc-model">${r.model || '—'} ${cacheBadge}</div>
+          <div class="sc-prov"><span class="pill ${pillClass(prov)}">${prov}</span> · ${r.duration_ms || 0}ms</div>
+        </div>
+        <div class="sc-right">
+          <div class="sc-tokens">${fmtTokens(r.total_tokens || 0)} tok</div>
+          <div class="sc-cost">${fmtCost(r.cost_usd || 0)}</div>
+          <div class="${statusCls}">${statusIcon} ${r.status_code || ''}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderModelChart(data) {
+  const perModel = data.aggregate?.per_model || {};
+  const models = Object.keys(perModel).sort((a, b) => (perModel[b].tokens || 0) - (perModel[a].tokens || 0));
+
+  if (models.length === 0) {
+    Plotly.purge('chart-models');
+    document.getElementById('chart-models').innerHTML = '<div class="stream-empty">No data yet</div>';
+    return;
+  }
+
+  const tokens = models.map(m => perModel[m].tokens || 0);
+  const costs = models.map(m => perModel[m].cost || 0);
+
+  const trace = {
+    x: models,
+    y: tokens,
+    type: 'bar',
+    marker: { color: models.map((_, i) => MODEL_COLORS[i % MODEL_COLORS.length]) },
+    text: tokens.map(t => fmtTokens(t)),
+    textposition: 'outside',
+    textfont: { color: COLORS.txtDim, size: 11 },
+    hovertemplate: '<b>%{x}</b><br>Tokens: %{y:,.0f}<br>Cost: $' + costs.map(c => c.toFixed(6)).join(',') + '<extra></extra>',
+  };
+
+  Plotly.react('chart-models', [trace], {
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: 'transparent',
+    font: { color: COLORS.txtDim, size: 11 },
+    margin: { l: 50, r: 20, t: 10, b: 60 },
+    xaxis: { tickangle: -25, gridcolor: COLORS.border, zerolinecolor: COLORS.border },
+    yaxis: { gridcolor: COLORS.border, zerolinecolor: COLORS.border, tickfont: { size: 10 } },
+    showlegend: false,
+    height: 280,
+  }, { displayModeBar: false, responsive: true });
+}
+
+function renderProviderChart(data) {
+  const perProv = data.aggregate?.per_provider || {};
+  const providers = Object.keys(perProv).sort((a, b) => (perProv[b].tokens || 0) - (perProv[a].tokens || 0));
+
+  if (providers.length === 0) {
+    Plotly.purge('chart-providers');
+    document.getElementById('chart-providers').innerHTML = '<div class="stream-empty">No data yet</div>';
+    return;
+  }
+
+  const tokens = providers.map(p => perProv[p].tokens || 0);
+  const colors = providers.map(p => PROVIDER_COLORS[p] || '#8b949e');
+
+  const trace = {
+    labels: providers,
+    values: tokens,
+    type: 'pie',
+    marker: { colors },
+    textinfo: 'label+percent',
+    textfont: { color: COLORS.txtBright, size: 11 },
+    hovertemplate: '<b>%{label}</b><br>Tokens: %{value:,.0f}<br>Share: %{percent}<extra></extra>',
+    hole: 0.4,
+  };
+
+  Plotly.react('chart-providers', [trace], {
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: 'transparent',
+    font: { color: COLORS.txtDim, size: 11 },
+    margin: { l: 10, r: 10, t: 10, b: 10 },
+    showlegend: true,
+    legend: { font: { size: 10, color: COLORS.txtDim }, orientation: 'h', y: -0.1 },
+    height: 280,
+  }, { displayModeBar: false, responsive: true });
+}
+
+function renderRateTable(data) {
+  const perProv = data.aggregate?.per_provider || {};
+  const container = document.getElementById('rate-table');
+  const providers = Object.keys(perProv).sort((a, b) => (perProv[b].rate_per_m || 0) - (perProv[a].rate_per_m || 0));
+
+  if (providers.length === 0) {
+    container.innerHTML = '<div class="rate-row"><span class="rate-prov" style="color:var(--txt-dim)">No data yet</span></div>';
+    return;
+  }
+
+  container.innerHTML = providers.map(p => {
+    const v = perProv[p];
+    const rate = v.rate_per_m || 0;
+    const rateCls = rate === 0 ? 'rate-val zero' : 'rate-val';
+    const color = PROVIDER_COLORS[p] || COLORS.txtDim;
+    return `
+      <div class="rate-row">
+        <span class="rate-prov" style="color:${color}">${p}</span>
+        <span class="${rateCls}">$${rate.toFixed(2)}/M</span>
+        <span class="rate-reqs">${v.requests || 0} req · ${fmtTokens(v.tokens || 0)} tok</span>
+      </div>`;
+  }).join('');
+}
+
+function renderQuota(data) {
+  const container = document.getElementById('quota-list');
+  const limits = data.rate_limits || [];
+
+  if (limits.length === 0) {
+    container.innerHTML = '<div class="stream-empty" style="padding:20px">No quota data</div>';
+    return;
+  }
+
+  container.innerHTML = limits.slice(0, 6).map(rl => {
+    const key = rl.key_name || 'unknown';
+    const is429 = rl.is_429_limited;
+    const consec = rl.consecutive_429_count || 0;
+    const rem = rl.requests_remaining || 0;
+    const limit = rl.tokens_limit || 0;
+    const usedPct = limit > 0 ? Math.min((1 - rem / limit) * 100, 100) : 0;
+
+    const statusCls = is429 ? 'crit' : (usedPct > 80 ? 'warn' : 'ok');
+    const statusText = is429 ? 'RATE LIMITED' : (usedPct > 80 ? 'HIGH' : 'OK');
+    const barCls = usedPct > 90 ? 'red' : (usedPct > 70 ? 'yellow' : 'green');
+    const color = PROVIDER_COLORS[key] || COLORS.txtDim;
+
+    return `
+      <div class="quota-item">
+        <div class="qi-top">
+          <span class="qi-key" style="color:${color}">${key}</span>
+          <span class="qi-status ${statusCls}">${statusText} · ${consec}×429</span>
+        </div>
+        <div class="quota-bar">
+          <div class="quota-bar-fill ${barCls}" style="width:${usedPct.toFixed(0)}%"></div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderRouting(data) {
+  const container = document.getElementById('routing-list');
+  const decisions = data.routing_decisions || [];
+
+  if (decisions.length === 0) {
+    container.innerHTML = '<div class="stream-empty" style="padding:20px">No routing data</div>';
+    return;
+  }
+
+  container.innerHTML = decisions.slice(0, 25).map(d => {
+    const prov = d.live_provider || '—';
+    const model = d.live_model || '—';
+    const cost = d.live_cost || 0;
+    const reason = d.reason || '';
+    const color = PROVIDER_COLORS[prov] || COLORS.txtDim;
+    return `
+      <div class="routing-item">
+        <span class="ri-prov" style="color:${color}">${prov}</span>
+        → <span class="ri-model">${model}</span>
+        <span class="ri-cost">$${cost.toFixed(6)}</span>
+        <div class="ri-reason">${reason.substring(0, 120)}</div>
+      </div>`;
+  }).join('');
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────
+fetchData();
+setInterval(fetchData, 2000);
+</script>
+</body>
+</html>

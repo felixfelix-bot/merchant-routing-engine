@@ -80,7 +80,8 @@ def _fetch_rows(conn: sqlite3.Connection) -> list[dict]:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(
         "SELECT id, ts, provider, response_received, response_valid, "
-        "latency_ms, error_type, billed_tokens, actual_tokens, token_mismatch "
+        "latency_ms, error_type, billed_tokens, actual_tokens, "
+        "token_mismatch, model "
         "FROM provider_telemetry ORDER BY id"
     ).fetchall()
     conn.row_factory = None  # reset
@@ -115,6 +116,7 @@ class TestTelemetryTableSchema:
         assert "billed_tokens" in col_map
         assert "actual_tokens" in col_map
         assert "token_mismatch" in col_map
+        assert "model" in col_map  # Phase 4.5b — per-model quality tracking
 
         # ts must be NOT NULL
         ts_col = [c for c in cols if c[1] == "ts"][0]
@@ -374,3 +376,106 @@ class TestTelemetryMultipleInserts:
         for i, r in enumerate(rows):
             assert r["provider"] == f"provider_{i}"
             assert r["latency_ms"] == 100 + i
+
+
+# ── Tests: model column (Phase 4.5b) ───────────────────────────────────────
+
+
+class TestTelemetryModelColumn:
+    """Phase 4.5b: provider_telemetry carries a ``model`` column so the
+    model-aware CPVO calculator can track quality per (provider, model) pair.
+    """
+
+    def test_model_column_in_schema(self, conn):
+        """_ensure_telemetry_table creates the model column on a fresh DB."""
+        zai_proxy._ensure_telemetry_table(conn)
+        cols = {
+            r[1]
+            for r in conn.execute(
+                "PRAGMA table_info(provider_telemetry)"
+            ).fetchall()
+        }
+        assert "model" in cols
+
+    def test_model_populated_when_passed(self, conn):
+        """Passing model= stores it in the model column."""
+        zai_proxy._ensure_telemetry_table(conn)
+        zai_proxy._log_provider_telemetry(
+            conn=conn,
+            provider="zai_ours",
+            response_received=True,
+            response_valid=True,
+            latency_ms=120,
+            error_type="none",
+            billed_tokens=100,
+            actual_tokens=100,
+            token_mismatch=False,
+            model="glm-5.2",
+        )
+        rows = _fetch_rows(conn)
+        assert len(rows) == 1
+        assert rows[0]["model"] == "glm-5.2"
+
+    def test_model_defaults_to_null(self, conn):
+        """Omitting model leaves the column NULL (backward compatible)."""
+        zai_proxy._ensure_telemetry_table(conn)
+        zai_proxy._log_provider_telemetry(
+            conn=conn,
+            provider="zai_ours",
+            response_received=True,
+            response_valid=True,
+            latency_ms=120,
+            error_type="none",
+            billed_tokens=100,
+            actual_tokens=100,
+            token_mismatch=False,
+        )
+        rows = _fetch_rows(conn)
+        assert len(rows) == 1
+        assert rows[0]["model"] is None
+
+    def test_ensure_table_self_heals_legacy_db(self, conn):
+        """_ensure_telemetry_table ALTER-adds model to a legacy (model-less)
+        table — mirrors production, where the live DB predates the column."""
+        # Build a legacy table WITHOUT the model column.
+        conn.execute(
+            "CREATE TABLE provider_telemetry ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, "
+            "provider TEXT NOT NULL, response_received INTEGER, "
+            "response_valid INTEGER, latency_ms INTEGER, error_type TEXT, "
+            "billed_tokens INTEGER, actual_tokens INTEGER, "
+            "token_mismatch INTEGER)"
+        )
+        before = {
+            r[1]
+            for r in conn.execute(
+                "PRAGMA table_info(provider_telemetry)"
+            ).fetchall()
+        }
+        assert "model" not in before
+        # Self-heal (and confirm it is idempotent).
+        zai_proxy._ensure_telemetry_table(conn)
+        zai_proxy._ensure_telemetry_table(conn)
+        after = {
+            r[1]
+            for r in conn.execute(
+                "PRAGMA table_info(provider_telemetry)"
+            ).fetchall()
+        }
+        assert "model" in after
+        # Logging still works on the healed table.
+        zai_proxy._log_provider_telemetry(
+            conn=conn,
+            provider="zai_friend",
+            response_received=True,
+            response_valid=True,
+            latency_ms=10,
+            error_type="none",
+            billed_tokens=1,
+            actual_tokens=1,
+            token_mismatch=False,
+            model="glm-4.5-flash",
+        )
+        rows = _fetch_rows(conn)
+        assert len(rows) == 1
+        assert rows[0]["model"] == "glm-4.5-flash"

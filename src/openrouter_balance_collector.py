@@ -69,6 +69,7 @@ __all__ = [
     "store_openrouter_balance",
     "get_latest_openrouter_balance",
     "collect_and_store_openrouter",
+    "openrouter_quota_entry",
     "default_db_path",
     "main",
     "OPENROUTER_KEY_ENDPOINT",
@@ -404,6 +405,61 @@ def collect_and_store_openrouter(
     if balance is not None:
         store_openrouter_balance(db_path, balance)
     return balance
+
+
+# ── Bridge to quota_state['openrouter'] (mirrors ppq_quota_entry) ─────────────
+# Until this is wired into _snapshot_quota, OpenRouter credit depletion is
+# invisible to the pricing engine (the proxy hardcodes snap['openrouter'] as
+# {used_pct:0.0, remaining:inf}). openrouter_quota_entry turns the newest
+# 'openrouter' row in the shared provider_balances table into the entry the
+# proxy consumes. Cold-start contract matches ppq_quota_entry: no/stale row →
+# {} so the proxy falls back to the optimistic {used_pct:0.0, remaining:inf}.
+_OPENROUTER_BALANCE_MAX_AGE = 1200.0  # 20 min — 2× the 5-min cadence (slack)
+
+
+def openrouter_quota_entry(
+    db_path: Optional[str] = None,
+    *,
+    max_age: Optional[float] = _OPENROUTER_BALANCE_MAX_AGE,
+) -> dict:
+    """Build the ``quota_state['openrouter']`` entry from the latest stored row.
+
+    The bridge from the collector (``provider_balances`` table) to the
+    ``quota_state['openrouter']`` dict that the production proxy's
+    ``_snapshot_quota`` reads. Mirrors ``ppq_balance_collector.ppq_quota_entry``.
+
+    Cold-start contract (matches the proxy's current hardcoded fallback):
+      * no stored row, OR the row is older than ``max_age`` (default 20 min,
+        2× the 5-min cadence) → return ``{}`` (no ``used_pct`` key). The proxy
+        then falls back to ``{used_pct:0.0, remaining:inf}`` (current behavior).
+      * fresh row → ``{'used_pct','remaining','usage','limit','is_unlimited',
+        'is_exhausted','is_free_tier','collected_at'}`` with ``used_pct`` in
+        0–100. For an unlimited key, ``remaining`` is ``+inf`` and ``used_pct``
+        is 0.0 (identical to the current hardcode).
+
+    Pass ``max_age=None`` to use the newest row regardless of age. Never
+    raises — any DB/parse error yields the cold-start ``{}`` entry.
+    """
+    db_path = db_path or default_db_path()
+    bal = get_latest_openrouter_balance(db_path)
+    if bal is None:
+        return {}
+    if max_age is not None and (time.time() - bal.collected_at) > max_age:
+        return {}
+    if bal.is_unlimited or bal.limit_remaining is None:
+        remaining = float("inf") if bal.is_unlimited else 0.0
+    else:
+        remaining = float(bal.limit_remaining)
+    return {
+        "used_pct": float(bal.used_pct),
+        "remaining": remaining,
+        "usage": float(bal.usage) if bal.usage is not None else None,
+        "limit": float(bal.limit) if bal.limit is not None else None,
+        "is_unlimited": bool(bal.is_unlimited),
+        "is_exhausted": bool(bal.is_exhausted),
+        "is_free_tier": bal.is_free_tier,
+        "collected_at": float(bal.collected_at),
+    }
 
 
 # ── Cron entrypoint ──────────────────────────────────────────────────────────

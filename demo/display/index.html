@@ -523,6 +523,9 @@ function initMiniCharts(){
     grid.appendChild(wrap);
     miniCharts[k]=document.getElementById('mc-'+k);
     const h=state.priceHist[k];
+    const _allY=[...h.map(p=>p.cost_basis),...h.map(p=>p.your_price)].filter(v=>v>0);
+    const _maxV=_allY.length?Math.max(..._allY):1;
+    const _yLogR=[Math.log10(_maxV*0.001),Math.log10(_maxV*2)];
     Plotly.newPlot('mc-'+k,[
       {x:h.map(p=>p.t*1000),y:h.map(p=>p.cost_basis),name:'Cost basis',mode:'lines',line:{color:'#58a6ff',width:2},yaxis:'y'},
       {x:h.map(p=>p.t*1000),y:h.map(p=>p.your_price),name:'Your price',mode:'lines',line:{color:'#39d2c0',width:2,dash:'dash'},yaxis:'y'},
@@ -531,7 +534,7 @@ function initMiniCharts(){
       paper_bgcolor:PLOT_BG,plot_bgcolor:PLOT_BG,margin:{l:38,r:38,t:4,b:20},
       showlegend:false,
       xaxis:{...axisBase(''),type:'date',gridcolor:PLOT_GRID,tickfont:{size:8,color:'#6e7681'},tickformat:'%H:%M'},
-      yaxis:{...axisBase('$/M','left'),type:'log',tickformat:'.3f'},
+      yaxis:{...axisBase('$/M','left'),type:'log',tickformat:'.3f',range:_yLogR},
       yaxis2:{...axisBase('%','right'),side:'right',overlaying:'y',showgrid:false,tickformat:'d',range:[0,60]},
       font:{family:'ui-monospace,monospace',size:9},
     },{displayModeBar:false,staticPlot:false,responsive:true});
@@ -541,11 +544,16 @@ function updateMiniCharts(){
   for(const k of KEYS){
     const h=state.priceHist[k]; if(!h.length) continue;
     const last=h[h.length-1];
+    const _allY=[...h.map(p=>p.cost_basis),...h.map(p=>p.your_price)].filter(v=>v>0);
+    const _maxV=_allY.length?Math.max(..._allY):1;
+    const _yLogR=[Math.log10(_maxV*0.001),Math.log10(_maxV*2)];
+    const _el=document.getElementById('mc-'+k);
+    const _lay=_el?{..._el.layout,yaxis:{..._el.layout.yaxis,range:_yLogR}}:undefined;
     Plotly.react('mc-'+k,[
       {x:h.map(p=>p.t*1000),y:h.map(p=>p.cost_basis),mode:'lines',line:{color:'#58a6ff',width:2}},
       {x:h.map(p=>p.t*1000),y:h.map(p=>p.your_price),mode:'lines',line:{color:'#39d2c0',width:2,dash:'dash'}},
       {x:h.map(p=>p.t*1000),y:h.map(p=>p.margin_pct),mode:'lines',line:{color:'rgba(188,140,255,.5)',width:1},fill:'tozeroy',fillcolor:'rgba(188,140,255,.10)'},
-    ],document.getElementById('mc-'+k).layout,{displayModeBar:false,responsive:true});
+    ],_lay||{},{displayModeBar:false,responsive:true});
     const el=document.getElementById('mc-price-'+k);
     if(el) el.textContent=fmt$(last.your_price,3)+'/M · MARGIN '+last.margin_pct.toFixed(0)+'%';
   }
