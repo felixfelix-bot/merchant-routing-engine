@@ -6,7 +6,6 @@
 <title>Sovereign Routing Engine — Display</title>
 <!-- Offline-bundled vendor libs (no CDN) -->
 <script src="vendor/plotly-2.35.2.min.js"></script>
-<script src="vendor/qrcode.min.js"></script>
 <script src="vendor/nostr-tools.min.js"></script>
 <style>
 /* ════════════════════════════════════════════════════════════════════════
@@ -73,10 +72,9 @@ body{
   color:var(--cyan);
 }
 /* spans */
-.col-qr    {grid-column:span 3}
-.col-diag  {grid-column:span 5}
 .col-cost  {grid-column:span 4}
 .col-charts{grid-column:span 7}
+.col-econ  {grid-column:span 5}
 .col-quota {grid-column:span 4}
 .col-flow  {grid-column:span 5}
 .col-gate  {grid-column:span 3}
@@ -104,63 +102,14 @@ body{
 
 /* ── phone / tablet ── */
 @media(max-width:1100px){
-  .col-qr,.col-diag,.col-cost,.col-charts,.col-quota,.col-flow,.col-gate,.col-rates{grid-column:span 6}
+  .col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate,.col-rates{grid-column:span 6}
 }
 @media(max-width:700px){
   .grid{grid-template-columns:1fr;padding:10px}
-  .col-qr,.col-diag,.col-cost,.col-charts,.col-quota,.col-flow,.col-gate,.col-rates,.full{grid-column:span 1}
+  .col-cost,.col-charts,.col-econ,.col-quota,.col-flow,.col-gate,.col-rates,.full{grid-column:span 1}
   .topbar{padding:10px 12px}
   .topbar h1{font-size:14px}
 }
-
-/* ═══ PANEL 1: QR CODE ═══ */
-.qr-wrap{display:flex;flex-direction:column;align-items:center;gap:10px;flex:1;justify-content:center}
-.qr-box{
-  background:#fff;padding:12px;border-radius:10px;
-  display:flex;align-items:center;justify-content:center;
-}
-.qr-box svg{display:block}
-.qr-label{font-size:11px;color:var(--txt-dim);text-align:center;word-break:break-all;line-height:1.4}
-.qr-label .url{font-family:var(--mono);color:var(--cyan);font-size:10px}
-
-/* ═══ PANEL 2: SYSTEM DIAGRAM ═══ */
-.diagram{display:flex;flex-direction:column;gap:0;flex:1;justify-content:center;position:relative;padding:4px 0}
-.diag-row{display:flex;justify-content:center;gap:14px;flex-wrap:wrap;position:relative;z-index:2}
-.diag-node{
-  background:var(--bg2);border:1px solid var(--border2);border-radius:9px;
-  padding:10px 14px;text-align:center;min-width:80px;position:relative;
-  transition:border-color .3s,box-shadow .3s;
-}
-.diag-node .dn-icon{font-size:20px;line-height:1}
-.diag-node .dn-label{font-size:10px;font-weight:600;color:var(--txt-bright);margin-top:4px;letter-spacing:.3px}
-.diag-node .dn-sub{font-size:9px;color:var(--txt-dim);font-family:var(--mono)}
-.diag-node.active{border-color:var(--green);box-shadow:0 0 16px rgba(63,185,80,.25)}
-.diag-node.relay{border-color:var(--blue)}
-.diag-node.relay.active{border-color:var(--blue);box-shadow:0 0 16px rgba(88,166,255,.25)}
-.diag-node.phone{border-color:var(--purple)}
-.diag-node.phone.active{border-color:var(--purple);box-shadow:0 0 12px rgba(188,140,255,.25)}
-.diag-node.dq05{border-color:var(--cyan)}
-.diag-node.dq05.active{border-color:var(--cyan);box-shadow:0 0 18px rgba(57,210,192,.3)}
-.diag-spacer{height:28px;position:relative;z-index:1}
-.diag-line{
-  position:absolute;left:50%;top:0;bottom:0;width:2px;transform:translateX(-50%);
-  background:linear-gradient(180deg,var(--border2),var(--border2));
-}
-.diag-line .flow-dot{
-  position:absolute;left:50%;width:6px;height:6px;border-radius:50%;
-  background:var(--green);box-shadow:0 0 8px var(--green);
-  transform:translateX(-50%);animation:flowdown 1.5s linear infinite;
-}
-@keyframes flowdown{0%{top:0;opacity:1}90%{opacity:1}100%{top:100%;opacity:0}}
-.diag-h-line{
-  height:2px;background:var(--border2);position:relative;flex:1;min-width:20px;align-self:center;
-}
-.diag-h-line .flow-dot-r{
-  position:absolute;top:50%;width:6px;height:6px;border-radius:50%;
-  background:var(--blue);box-shadow:0 0 8px var(--blue);
-  transform:translateY(-50%);animation:flowright 1.8s linear infinite;
-}
-@keyframes flowright{0%{left:0;opacity:1}90%{opacity:1}100%{left:100%;opacity:0}}
 
 /* ═══ PANEL 3: PER-KEY PRICE CHARTS ═══ */
 .charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -246,6 +195,26 @@ body{
 .gate-stats .gs .gs-l{color:var(--txt-dim);text-transform:uppercase;letter-spacing:.3px;font-size:8px}
 .gate-stats .gs .gs-v{font-family:var(--mono);color:var(--txt-bright);font-size:12px}
 
+/* ═══ PANEL 8: TOKEN ECONOMY SUMMARY ═══ */
+.econ-stats{display:grid;grid-template-columns:1fr 1fr;gap:10px;flex:1;align-content:start}
+.econ-stat{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+.econ-stat .es-l{font-size:9px;color:var(--txt-dim);text-transform:uppercase;letter-spacing:.4px}
+.econ-stat .es-v{font-family:var(--mono);font-size:20px;font-weight:600;color:var(--txt-bright);margin-top:2px}
+.econ-stat .es-v.cyan{color:var(--cyan)} .es-stat .es-v.green{color:var(--green)} .es-stat .es-v.orange{color:var(--orange)}
+.econ-stat .es-sub{font-size:10px;color:var(--txt-dim);font-family:var(--mono);margin-top:1px}
+.scarcity-bar{margin-top:10px}
+.scarcity-bar .sb-top{display:flex;justify-content:space-between;font-size:10px;color:var(--txt-dim);margin-bottom:4px}
+.scarcity-track{height:10px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;overflow:hidden;display:flex}
+.scarcity-seg{height:100%;transition:opacity .5s}
+.scarcity-seg.s1{background:#1a7f37} .scarcity-seg.s2{background:#9e6a03}
+.scarcity-seg.s3{background:#d29922} .scarcity-seg.s4{background:#f0883e} .scarcity-seg.s5{background:#da3633}
+.leaderboard-mini{margin-top:10px;max-height:100px;overflow-y:auto;border:1px solid var(--border);border-radius:6px}
+.lb-row{display:grid;grid-template-columns:1fr auto auto;gap:8px;align-items:center;padding:5px 10px;border-bottom:1px solid var(--border);font-size:11px}
+.lb-row:last-child{border-bottom:none}
+.lb-row .who{font-family:var(--mono);color:var(--txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lb-row .spent{font-family:var(--mono);color:var(--orange);font-size:10px}
+.lb-row .prompts{font-family:var(--mono);color:var(--txt-dim);font-size:10px}
+.lb-empty{padding:14px;text-align:center;color:var(--txt-dim);font-size:11px}
 </style>
 </head>
 <body>
@@ -260,40 +229,6 @@ body{
 
 <div class="grid">
 
-  <!-- ═══ PANEL 1: QR CODE ═══ -->
-  <div class="card col-qr">
-    <h2><span class="num">1</span> Join the Demo — scan to participate</h2>
-    <div class="qr-wrap">
-      <div class="qr-box" id="qr-box"></div>
-      <div class="qr-label">Scan with your phone<br><span class="url" id="qr-url">—</span></div>
-    </div>
-  </div>
-
-  <!-- ═══ PANEL 2: SYSTEM DIAGRAM ═══ -->
-  <div class="card col-diag">
-    <h2><span class="num">2</span> System Diagram — live infrastructure</h2>
-    <div class="diagram" id="diagram">
-      <div class="diag-row">
-        <div class="diag-node dq05 active" id="node-dq05">
-          <div class="dn-icon">🖥️</div>
-          <div class="dn-label">DQ05</div>
-          <div class="dn-sub">Kalman · CVM</div>
-        </div>
-        <div class="diag-h-line"><div class="flow-dot-r"></div></div>
-        <div class="diag-node relay active" id="node-relays">
-          <div class="dn-icon">📡</div>
-          <div class="dn-label">RELAYS</div>
-          <div class="dn-sub" id="relay-sub">3 connected</div>
-        </div>
-      </div>
-      <div class="diag-spacer"><div class="diag-line"><div class="flow-dot"></div></div></div>
-      <div class="diag-row" id="phone-row">
-        <div class="diag-node phone" id="node-phone-0"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>
-        <div class="diag-node phone" id="node-phone-1"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>
-        <div class="diag-node phone" id="node-phone-2"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>
-      </div>
-    </div>
-  </div>
 
   <!-- ═══ PANEL 5: COST METER ═══ -->
   <div class="card col-cost">
@@ -316,6 +251,7 @@ body{
       <span class="lg"><span class="swatch sw-margin"></span> MARGIN % (right axis)</span>
     </div>
   </div>
+
 
   <!-- ═══ PANEL 4: QUOTA BARS ═══ -->
   <div class="card col-quota">
@@ -372,12 +308,10 @@ const CVM_RELAYS = param('relays')
   ? param('relays').split(',').map(s => s.trim()).filter(Boolean)
   : ['wss://relay.primal.net','wss://nos.lol','wss://nostr.mom'];
 const USE_NOSTR = !param('api');   // ?api=<url> forces the local HTTP-testing path
-// Participant nsite URL for the QR code
-const DEFAULT_PARTICIPANT_URL = 'https://npub13h0eushvdzdrygm545zr5zxr3qvk7zaqhrzyyepprflcjdu3u0yskxz53m.nsite.lol';
 
-const KEYS = ['ours','friend','ollama','ppq'];
-const KEY_LABEL = {ours:'OURS',friend:'FRIEND',ollama:'OLLAMA',ppq:'PPQ'};
-const KEY_COLOR = {ours:'#58a6ff',friend:'#bc8cff',ollama:'#39d2c0',ppq:'#f0883e'};
+const KEYS = ['ours','friend','ollama'];
+const KEY_LABEL = {ours:'OURS',friend:'FRIEND',ollama:'OLLAMA'};
+const KEY_COLOR = {ours:'#58a6ff',friend:'#bc8cff',ollama:'#39d2c0'};
 const POLL_MS = 5000;
 const POLL_MIN = 5000;                  // base poll interval; reset to this on recovery
 const POLL_MAX = 30000;                 // hard cap during extended outages
@@ -398,9 +332,6 @@ KEYS.forEach(k => state.priceHist[k] = []);
    ════════════════════════════════════════════════════════════════════════ */
 function param(name) {
   return new URLSearchParams(location.search).get(name);
-}
-function resolveParticipantUrl() {
-  return param('participant') || localStorage.getItem('participant_url') || DEFAULT_PARTICIPANT_URL;
 }
 
 /* ════════════════════════════════════════════════════════════════════════
@@ -516,61 +447,6 @@ function updateMiniCharts(){
   }
 }
 
-/* ── PANEL 1: QR CODE ── */
-function renderQR(){
-  const url = resolveParticipantUrl();
-  document.getElementById('qr-url').textContent = url.length > 42 ? url.slice(0,42)+'…' : url;
-  try {
-    if (typeof window.qrcode !== 'function') throw new Error('qrcode lib not loaded');
-    const qr = window.qrcode(0, 'M');
-    qr.addData(url);
-    qr.make();
-    const count = qr.getModuleCount();
-    const sz = count + 4;
-    let cells = '';
-    for (let r = 0; r < count; r++) {
-      for (let c = 0; c < count; c++) {
-        if (qr.isDark(r, c)) cells += `<rect x="${c+2}" y="${r+2}" width="1" height="1"/>`;
-      }
-    }
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${sz} ${sz}" width="160" height="160" shape-rendering="crispEdges"><rect width="${sz}" height="${sz}" fill="#fff"/><g fill="#0a0e14">${cells}</g></svg>`;
-    document.getElementById('qr-box').innerHTML = svg;
-  } catch (e) {
-    console.warn('QR render failed:', e);
-    document.getElementById('qr-box').innerHTML = '<div style="color:#888;font-size:11px;padding:20px">QR unavailable</div>';
-  }
-}
-
-/* ── PANEL 2: SYSTEM DIAGRAM ── */
-function updateDiagram(snap){
-  // Show infrastructure topology — active when real requests are flowing
-  const reqs = (snap && snap.requests) || [];
-  const active = reqs.length > 0;
-  const dq05 = document.getElementById('node-dq05');
-  const relays = document.getElementById('node-relays');
-  dq05.classList.toggle('active', true);   // DQ05 is always running
-  relays.classList.toggle('active', true);  // Relays always connected
-  // Update relay count subtitle
-  const relaySub = document.getElementById('relay-sub');
-  if (relaySub) relaySub.textContent = active ? `${reqs.length} recent reqs` : '3 connected';
-  // Phone nodes — pulse based on real participant count
-  const parts = (snap && snap.participants) || {};
-  const phoneCount = parts.count || 0;
-  const phoneRow = document.getElementById('phone-row');
-  if (phoneCount === 0) {
-    // No real participants — show placeholder
-    phoneRow.innerHTML = '<div class="diag-node phone"><div class="dn-icon">📱</div><div class="dn-label">Waiting…</div></div>';
-  } else {
-    const n = Math.min(phoneCount, 6);
-    if (phoneRow.children.length !== n) {
-      phoneRow.innerHTML = '';
-      for (let i = 0; i < n; i++) {
-        phoneRow.innerHTML += `<div class="diag-node phone active"><div class="dn-icon">📱</div><div class="dn-label">Participant</div></div>`;
-      }
-    }
-  }
-}
-
 /* ── PANEL 4: QUOTA BARS ── */
 function updateQuota(snap){
   const q=(snap && snap.quota)||{};
@@ -622,6 +498,9 @@ function updateGate(snap){
   document.getElementById('gate-margin').textContent=(g.safety_margin||2)+'×';
 }
 
+/* ── PANEL 8: TOKEN ECONOMY — REMOVED (not used in demo) ── */
+function updateEcon(snap){ /* no-op — panel removed */ }
+
 /* ── PANEL 9: MEASURED RATES (RP-5a) ── */
 /* Renders the Python source-of-truth measured rates from
    real_price_tracker.get_rate_with_fallback(), surfaced by the CVM server as
@@ -644,7 +523,6 @@ function updateMeasuredRates(snap){
     {key:'ours',         label:'Ours (z.ai)'},
     {key:'friend',       label:'Friend (z.ai)'},
     {key:'ollama_cloud', label:'Ollama Cloud'},
-    {key:'ppq',          label:'PPQ'},
   ];
 
   let rowsHtml = '';
@@ -705,11 +583,11 @@ function renderAll(){
     }
   }
   updateMiniCharts();
-  updateDiagram(snap);
   updateQuota(snap);
   updateCost(snap);
   updateFlow(snap);
   updateGate(snap);
+  updateEcon(snap);
   updateMeasuredRates(snap);
 }
 
@@ -857,7 +735,6 @@ function tickClock(){document.getElementById('time-text').textContent=new Date()
    INIT
    ════════════════════════════════════════════════════════════════════════ */
 async function init(){
-  renderQR();                     // Panel 1
   initMiniCharts();               // Panel 3 charts
   tickClock(); setInterval(tickClock,1000);
   setConn('connecting');
