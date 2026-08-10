@@ -977,10 +977,12 @@ function renderQuotaBars(snap){
 
 function renderRequestFlow(snap){
   const list = document.getElementById('req-flow-list');
-  const reqs = snap.requests || [];
+  const allReqs = snap.requests || [];
+  // Only show actual routed requests (tokens > 0), not disabled-key probes
+  const reqs = allReqs.filter(r => r.tokens != null && Number(r.tokens) > 0);
   
   if(!reqs.length){
-    list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--txt-dim)">No routing decisions yet</div>';
+    list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--txt-dim)">No routed requests yet</div>';
     return;
   }
   
