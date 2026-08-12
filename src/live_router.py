@@ -65,6 +65,9 @@ from src.pricing_engine import (
     DEEPINFRA_CREDIT_PRESSURE_ONSET,
     DEEPINFRA_CREDIT_PRESSURE_ASYMPTOTE,
     DEEPINFRA_STARTING_BALANCE,
+    TELNYX_CREDIT_PRESSURE_ONSET,
+    TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+    TELNYX_STARTING_BALANCE,
 )
 from src.quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
 from src.cpvo_calculator import CPVOCalculator
@@ -121,6 +124,7 @@ _QUOTA_PRESSURE_ENABLED: bool = (
 # PPQ:         credit-depletion fraction (from /credits/balance).
 # OpenRouter:  credit-depletion (self-tracked from SUM(cost_usd) in DB).
 # DeepInfra:   credit-depletion (self-tracked from SUM(cost_usd) in DB).
+# Telnyx:      credit-depletion (self-tracked from SUM(cost_usd) in DB).
 #
 # FELIX FINAL DECISION (Aug 5 19:00): asymptote=1.5 on ALL endpoints (squeeze
 # cheap keys as long as possible). Onsets stagger: z.ai=0.60, ollama=0.70,
@@ -136,6 +140,9 @@ _OPENROUTER_CREDIT_PRESSURE_ENABLED: bool = (
 )
 _DEEPINFRA_CREDIT_PRESSURE_ENABLED: bool = (
     os.environ.get("DEEPINFRA_CREDIT_PRESSURE_ENABLED", "false").lower() in ("1", "true", "yes")
+)
+_TELNYX_CREDIT_PRESSURE_ENABLED: bool = (
+    os.environ.get("TELNYX_CREDIT_PRESSURE_ENABLED", "false").lower() in ("1", "true", "yes")
 )
 
 # ── RP-5: Proactive GLM-5.2 throttling ──────────────────────────────────────
@@ -383,6 +390,7 @@ _QUOTA_TOTALS: dict[str, float] = {
     "ppq":          float("inf"),  # pay-per-token, no hard quota
     "openrouter":   float("inf"),
     "deepinfra":    float("inf"),  # pay-per-token, no hard quota
+    "telnyx":       float("inf"),  # credit-based, no hard quota
 }
 
 # z.ai peak hours (UTC) — Ollama/PPQ/OpenRouter/DeepInfra have no peak
@@ -634,7 +642,7 @@ def _compute_credit_pressure(
 
 
 # All providers that are NOT z.ai — these are the failover candidates
-_EXTERNAL_PROVIDERS = ("ollama_cloud", "ppq", "openrouter", "deepinfra")
+_EXTERNAL_PROVIDERS = ("ollama_cloud", "ppq", "openrouter", "deepinfra", "telnyx")
 
 # ── CPVO cache (Phase 2.5.4) ─────────────────────────────────────────────────
 # Effective-rate lookups query the telemetry DB; cache them so a hot failover
@@ -1435,6 +1443,23 @@ class LiveRouter:
                 elif di_pressure != 1.0:
                     base_rate = base_rate * di_pressure
 
+            # ── Universal pressure: Telnyx (self-tracked, credit-based) ────
+            # Same credit-depletion curve as OpenRouter/DeepInfra.
+            # onset=0.80, asymptote=1.5, hard_limit=True. At exhausted
+            # balance → +inf → breaker tripped (no credits = no service).
+            if name == "telnyx" and _TELNYX_CREDIT_PRESSURE_ENABLED:
+                tx_pressure = _compute_credit_pressure(
+                    self._db_path, "telnyx",
+                    TELNYX_STARTING_BALANCE,
+                    TELNYX_CREDIT_PRESSURE_ONSET,
+                    TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+                )
+                self._last_credit_pressures[name] = tx_pressure
+                if math.isinf(tx_pressure):
+                    healthy = False
+                elif tx_pressure != 1.0:
+                    base_rate = base_rate * tx_pressure
+
             # ── RP-5: Proactive throttle / block (legacy — pressure OFF only) ─
             # When continuous pressure is ON this block is skipped entirely:
             # the pressure factor already raises the price smoothly.
@@ -1455,6 +1480,7 @@ class LiveRouter:
                 or (name == "ppq" and _PPQ_QUOTA_PRESSURE_ENABLED)
                 or (name == "openrouter" and _OPENROUTER_CREDIT_PRESSURE_ENABLED)
                 or (name == "deepinfra" and _DEEPINFRA_CREDIT_PRESSURE_ENABLED)
+                or (name == "telnyx" and _TELNYX_CREDIT_PRESSURE_ENABLED)
             )
             prov_quota_total = (
                 None if prov_has_pressure

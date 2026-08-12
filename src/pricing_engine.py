@@ -193,10 +193,10 @@ ZAI_QUOTA_PRESSURE_ASYMPTOTE: float = float(
     os.environ.get("ZAI_QUOTA_PRESSURE_ASYMPTOTE", "1.5")
 )
 
-# ── Credit-based providers (PPQ, OpenRouter, DeepInfra) ─────────────────────
+# ── Credit-based providers (PPQ, OpenRouter, DeepInfra, Telnyx) ──────────────
 # These have no time windows — their usage fraction is derived from remaining
 # credit balance: u = 1 - (remaining / starting_balance).
-#   Onset 0.80 for all three (credits deplete slowly).
+#   Onset 0.80 for all (credits deplete slowly).
 #   hard_limit=True (exhausted balance = no service → +inf).
 
 # PPQ: credits tracked via /credits/balance API (negative = exhausted).
@@ -230,6 +230,21 @@ DEEPINFRA_CREDIT_PRESSURE_ASYMPTOTE: float = float(
 )
 DEEPINFRA_STARTING_BALANCE: float = float(
     os.environ.get("DEEPINFRA_STARTING_BALANCE", "5.0")
+)
+
+# Telnyx: credit-based (no balance API — self-tracked via SUM(cost_usd) in
+# api_calls WHERE key_name='telnyx'). Same pattern as OpenRouter/DeepInfra.
+#   Onset 0.80, asymptote 1.5, hard_limit=True (no extra-usage path).
+#   remaining = TELNYX_STARTING_BALANCE - cumulative_spend.
+#   u = 1 - (remaining / TELNYX_STARTING_BALANCE).
+TELNYX_CREDIT_PRESSURE_ONSET: float = float(
+    os.environ.get("TELNYX_CREDIT_PRESSURE_ONSET", "0.80")
+)
+TELNYX_CREDIT_PRESSURE_ASYMPTOTE: float = float(
+    os.environ.get("TELNYX_CREDIT_PRESSURE_ASYMPTOTE", "1.5")
+)
+TELNYX_STARTING_BALANCE: float = float(
+    os.environ.get("TELNYX_STARTING_BALANCE", "10.0")
 )
 
 

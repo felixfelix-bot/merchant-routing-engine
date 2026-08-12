@@ -877,3 +877,370 @@ class TestComputePpqPressure:
             p = _compute_ppq_pressure(garbage)
             assert math.isfinite(p)
             assert p > 1.0
+
+
+# ── Telnyx credit-depletion pressure ─────────────────────────────────────────
+
+
+class TestTelnyxPressureParams:
+    """Verify Telnyx credit-pressure constants match the spec.
+
+    Telnyx is credit-based (no balance API — self-tracked from SUM(cost_usd)).
+    Same pattern as OpenRouter/DeepInfra: onset=0.80, asymptote=1.5,
+    hard_limit=True.
+    """
+
+    def test_telnyx_params(self):
+        from src.pricing_engine import (
+            TELNYX_CREDIT_PRESSURE_ONSET,
+            TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+            TELNYX_STARTING_BALANCE,
+        )
+        assert TELNYX_CREDIT_PRESSURE_ONSET == pytest.approx(0.80)
+        assert TELNYX_CREDIT_PRESSURE_ASYMPTOTE == pytest.approx(1.5)
+        assert TELNYX_STARTING_BALANCE == pytest.approx(10.0)
+
+    def test_telnyx_onset_matches_credit_provider_pattern(self):
+        """Telnyx onset must match the other credit-based providers (0.80)."""
+        from src.pricing_engine import (
+            TELNYX_CREDIT_PRESSURE_ONSET,
+            OPENROUTER_CREDIT_PRESSURE_ONSET,
+            DEEPINFRA_CREDIT_PRESSURE_ONSET,
+            PPQ_QUOTA_PRESSURE_ONSET,
+        )
+        assert TELNYX_CREDIT_PRESSURE_ONSET == pytest.approx(
+            OPENROUTER_CREDIT_PRESSURE_ONSET
+        )
+        assert TELNYX_CREDIT_PRESSURE_ONSET == pytest.approx(
+            DEEPINFRA_CREDIT_PRESSURE_ONSET
+        )
+        assert TELNYX_CREDIT_PRESSURE_ONSET == pytest.approx(
+            PPQ_QUOTA_PRESSURE_ONSET
+        )
+
+    def test_telnyx_asymptote_matches_credit_provider_pattern(self):
+        """Telnyx asymptote must match the uniform 1.5 across all endpoints."""
+        from src.pricing_engine import (
+            TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+            OPENROUTER_CREDIT_PRESSURE_ASYMPTOTE,
+            DEEPINFRA_CREDIT_PRESSURE_ASYMPTOTE,
+            PPQ_QUOTA_PRESSURE_ASYMPTOTE,
+        )
+        assert TELNYX_CREDIT_PRESSURE_ASYMPTOTE == pytest.approx(
+            OPENROUTER_CREDIT_PRESSURE_ASYMPTOTE
+        )
+        assert TELNYX_CREDIT_PRESSURE_ASYMPTOTE == pytest.approx(1.5)
+
+
+class TestTelnyxPressureGate:
+    """GATE (TELNYX-4.1): quota_pressure_factor with Telnyx params at u=0.9.
+
+    This is the acceptance gate for the Telnyx quota pressure curve.
+    At u=0.9 (90% credit depletion), onset=0.80, asymptote=1.5, hard_limit=True,
+    the factor must be > 1.0 (pressure active) and finite (not yet exhausted).
+    """
+
+    def test_gate_quota_pressure_factor_0_9_telnyx(self):
+        """GATE: quota_pressure_factor(0.9, provider='telnyx') returns correct multiplier.
+
+        With Telnyx parameters (onset=0.80, asymptote=1.5, hard_limit=True):
+        - u=0.9 is above onset (0.80) so pressure is active → factor > 1.0
+        - u=0.9 < 1.0 so hard_limit hasn't triggered → factor is finite
+        - The factor must match _single_window_factor(0.9, 0.80, 1.5)
+        """
+        from src.pricing_engine import (
+            quota_pressure_factor,
+            TELNYX_CREDIT_PRESSURE_ONSET,
+            TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+            _single_window_factor,
+        )
+
+        u = 0.9
+        factor = quota_pressure_factor(
+            u,
+            onset=TELNYX_CREDIT_PRESSURE_ONSET,
+            asymptote=TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+            hard_limit=True,
+        )
+        expected = _single_window_factor(
+            u, TELNYX_CREDIT_PRESSURE_ONSET, TELNYX_CREDIT_PRESSURE_ASYMPTOTE
+        )
+        assert factor > 1.0, f"pressure must be active at u={u}, got {factor}"
+        assert math.isfinite(factor), f"factor must be finite at u={u}, got {factor}"
+        assert factor == pytest.approx(expected, rel=1e-9)
+
+    def test_below_onset_no_pressure(self):
+        """u=0.5 (below onset 0.80) → factor = 1.0 (no penalty)."""
+        from src.pricing_engine import (
+            quota_pressure_factor,
+            TELNYX_CREDIT_PRESSURE_ONSET,
+            TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+        )
+        factor = quota_pressure_factor(
+            0.5,
+            onset=TELNYX_CREDIT_PRESSURE_ONSET,
+            asymptote=TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+            hard_limit=True,
+        )
+        assert factor == pytest.approx(1.0)
+
+    def test_at_onset_is_one(self):
+        """u=0.80 (exactly at onset) → factor = 1.0 (pressure just begins)."""
+        from src.pricing_engine import (
+            quota_pressure_factor,
+            TELNYX_CREDIT_PRESSURE_ONSET,
+            TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+        )
+        factor = quota_pressure_factor(
+            TELNYX_CREDIT_PRESSURE_ONSET,
+            onset=TELNYX_CREDIT_PRESSURE_ONSET,
+            asymptote=TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+            hard_limit=True,
+        )
+        assert factor == pytest.approx(1.0)
+
+    def test_exhausted_is_inf(self):
+        """u=1.0 (balance exhausted) → hard_limit=True → +inf."""
+        from src.pricing_engine import (
+            quota_pressure_factor,
+            TELNYX_CREDIT_PRESSURE_ONSET,
+            TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+        )
+        factor = quota_pressure_factor(
+            1.0,
+            onset=TELNYX_CREDIT_PRESSURE_ONSET,
+            asymptote=TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+            hard_limit=True,
+        )
+        assert factor == math.inf
+
+    def test_monotonic_from_onset_to_full(self):
+        """Factor must be strictly monotonically increasing from onset to 1.0."""
+        from src.pricing_engine import (
+            quota_pressure_factor,
+            TELNYX_CREDIT_PRESSURE_ONSET,
+            TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+        )
+        usages = [0.80, 0.85, 0.90, 0.95, 0.99]
+        factors = [
+            quota_pressure_factor(
+                u,
+                onset=TELNYX_CREDIT_PRESSURE_ONSET,
+                asymptote=TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
+                hard_limit=True,
+            )
+            for u in usages
+        ]
+        for i in range(1, len(factors)):
+            assert factors[i] > factors[i - 1], (
+                f"not monotonic: u={usages[i]} factor={factors[i]} "
+                f"<= u={usages[i-1]} factor={factors[i-1]}"
+            )
+
+
+class TestTelnyxComputeCreditPressure:
+    """Test _compute_credit_pressure with Telnyx parameters.
+
+    Uses the same _compute_credit_pressure helper as OpenRouter/DeepInfra
+    but with Telnyx-specific starting_balance, onset, and asymptote.
+    """
+
+    def test_cold_start_conservative(self):
+        """No spend rows → cold start → pressure > 1.0 (conservative)."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        db = _make_usage_db()
+        try:
+            p = _compute_credit_pressure(
+                db, "telnyx", 10.0,
+                onset=0.80, asymptote=1.5,
+            )
+            assert p > 1.0, f"cold start must be conservative, got {p}"
+            assert p == pytest.approx(1.5)
+        finally:
+            os.unlink(db)
+
+    def test_fresh_balance_no_pressure(self):
+        """Rows exist, spend=0 → u=0 → pressure = 1.0."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        db = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'telnyx', 'glm-5.2', 0.0)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+            p = _compute_credit_pressure(
+                db, "telnyx", 10.0,
+                onset=0.80, asymptote=1.5,
+            )
+            assert p == pytest.approx(1.0)
+        finally:
+            os.unlink(db)
+
+    def test_high_spend_raises_pressure(self):
+        """$9 spent of $10 → u=0.9 → pressure > 1.0 (above onset 0.80)."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        db = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'telnyx', 'kimi-k3', 9.0)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+            p = _compute_credit_pressure(
+                db, "telnyx", 10.0,
+                onset=0.80, asymptote=1.5,
+            )
+            assert p > 1.0, f"pressure must be active at 90% spend, got {p}"
+            assert math.isfinite(p)
+        finally:
+            os.unlink(db)
+
+    def test_exhausted_balance_is_inf(self):
+        """$10 spent of $10 → u=1.0 → hard_limit → +inf."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        db = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'telnyx', 'kimi-k3', 10.0)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+            p = _compute_credit_pressure(
+                db, "telnyx", 10.0,
+                onset=0.80, asymptote=1.5,
+            )
+            assert p == math.inf
+        finally:
+            os.unlink(db)
+
+    def test_over_spend_is_inf(self):
+        """$11 spent of $10 → remaining < 0 → +inf."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        db = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'telnyx', 'kimi-k3', 11.0)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+            p = _compute_credit_pressure(
+                db, "telnyx", 10.0,
+                onset=0.80, asymptote=1.5,
+            )
+            assert p == math.inf
+        finally:
+            os.unlink(db)
+
+    def test_never_raises(self):
+        """Garbage DB path → conservative pressure, never raises."""
+        from src.live_router import _compute_credit_pressure, _credit_spend_cache
+        _credit_spend_cache.clear()
+        p = _compute_credit_pressure(
+            None, "telnyx", 10.0,
+            onset=0.80, asymptote=1.5,
+        )
+        assert math.isfinite(p)
+        assert p > 1.0  # cold start (no DB → no data → conservative)
+
+
+class TestTelnyxPressureIntegration:
+    """End-to-end: LiveRouter applies Telnyx pressure to its base rate.
+
+    Requires TELNYX_CREDIT_PRESSURE_ENABLED=true to activate.
+    """
+
+    @pytest.fixture
+    def rates(self):
+        return {
+            "ours": 0.001,
+            "friend": 0.001,
+            "ollama_cloud": 0.024,
+            "ppq": 0.14,
+            "openrouter": 0.135,
+            "deepinfra": 0.12,
+            "telnyx": 5.40,
+        }
+
+    def _enable_telnyx_pressure(self, monkeypatch):
+        """Enable the Telnyx credit-pressure kill switch."""
+        import src.live_router as lr
+        monkeypatch.setattr(lr, "_TELNYX_CREDIT_PRESSURE_ENABLED", True)
+
+    def test_telnyx_pressure_rises_with_spend(self, rates, monkeypatch):
+        """With 90% spend, Telnyx pressure > 1.0 and base rate is multiplied."""
+        from src.live_router import LiveRouter, _credit_spend_cache
+
+        _credit_spend_cache.clear()
+        self._enable_telnyx_pressure(monkeypatch)
+
+        db = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'telnyx', 'kimi-k3', 9.0)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+
+            LiveRouter.reset_instance()
+            router = LiveRouter(db_path=db, converged_rates=rates)
+            router.select_failover(
+                quota_state={},
+                health_state={},
+                peak=False,
+            )
+            tx_pressure = router._last_credit_pressures.get("telnyx", 1.0)
+            assert tx_pressure > 1.0, f"expected pressure > 1.0, got {tx_pressure}"
+            assert math.isfinite(tx_pressure)
+        finally:
+            os.unlink(db)
+
+    def test_telnyx_exhausted_is_inf(self, rates, monkeypatch):
+        """Exhausted Telnyx balance → +inf → breaker tripped (healthy=False)."""
+        from src.live_router import LiveRouter, _credit_spend_cache
+
+        _credit_spend_cache.clear()
+        self._enable_telnyx_pressure(monkeypatch)
+
+        db = _make_usage_db()
+        try:
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO api_calls (ts, key_name, model, cost_usd) "
+                "VALUES (?, 'telnyx', 'kimi-k3', 10.0)",
+                (time.time(),),
+            )
+            conn.commit()
+            conn.close()
+
+            LiveRouter.reset_instance()
+            router = LiveRouter(db_path=db, converged_rates=rates)
+            router.select_failover(
+                quota_state={},
+                health_state={},
+                peak=False,
+            )
+            tx_pressure = router._last_credit_pressures.get("telnyx", 1.0)
+            assert tx_pressure == math.inf
+        finally:
+            os.unlink(db)
