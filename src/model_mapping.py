@@ -51,7 +51,7 @@ _ZAI_ALIASES: frozenset[str] = frozenset({
 
 #: Known external / flat-rate providers (pass-through, no aliasing).
 _KNOWN_PROVIDERS: frozenset[str] = frozenset({
-    "zai", "ollama_cloud", "ppq", "openrouter", "deepinfra",
+    "zai", "ollama_cloud", "ppq", "openrouter", "deepinfra", "telnyx",
 })
 
 
@@ -126,6 +126,12 @@ MODEL_MAP: dict[tuple[str, str], str] = {
     ("ollama_cloud", "reasoning"): "glm-5.2",
     ("ollama_cloud", "chat"):      "glm-4.5-flash",
     ("ollama_cloud", "simple"):    "glm-4.5-flash",
+
+    # ── Telnyx ───────────────────────────────────────────────────────────
+    ("telnyx", "coding"):    "kimi-k3",
+    ("telnyx", "reasoning"): "kimi-k3",
+    ("telnyx", "chat"):      "kimi-k2.5",
+    ("telnyx", "simple"):    "kimi-k2.5",
 }
 
 #: Per-provider default model (used for unknown task types within a
@@ -137,6 +143,7 @@ _PROVIDER_DEFAULTS: dict[str, str] = {
     "ppq":          "deepseek-v4-flash",
     "openrouter":   "deepseek-v4-flash",
     "ollama_cloud": "glm-4.5-flash",
+    "telnyx":       "kimi-k3",
 }
 
 #: Path to the providers config, relative to this file.

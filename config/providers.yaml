@@ -107,30 +107,6 @@ external:
         cost_per_1m_input: 0.15
         cost_per_1m_output: 0.60
 
-  telnyx:
-    base_url: "https://api.telnyx.com/v2/ai"
-    key_env: "TELNYX_API_KEY"
-    starting_balance_env: "TELNYX_STARTING_BALANCE"
-    pricing_model: per_token
-    quota_pressure:
-      onset: 0.80
-      asymptote: 1.5
-      hard_limit: true
-    models:
-      kimi-k3:
-        cost_per_1m_input: 2.70    # LEGACY: tracker is source of truth (RP-4)
-        cost_per_1m_cached: 0.27   # LEGACY: tracker is source of truth (RP-4)
-        cost_per_1m_output: 13.50  # LEGACY: tracker is source of truth (RP-4)
-      kimi-k2.5:
-        cost_per_1m_input: 0.665   # LEGACY: tracker is source of truth (RP-4)
-        cost_per_1m_output: 4.00   # LEGACY: tracker is source of truth (RP-4)
-      glm-5.2:
-        cost_per_1m_input: 1.00    # LEGACY: tracker is source of truth (RP-4)
-        cost_per_1m_output: 4.00   # LEGACY: tracker is source of truth (RP-4)
-      minimax-m3:
-        cost_per_1m_input: 0.27    # LEGACY: tracker is source of truth (RP-4)
-        cost_per_1m_output: 1.10   # LEGACY: tracker is source of truth (RP-4)
-
 # ── Strategy configuration ─────────────────────────────────────────────────
 strategy:
   # Minimum effective price — never zero, even for free providers (ADR-004)
@@ -183,6 +159,11 @@ strategy:
       reasoning: "glm-5.2"
       chat: "glm-4.5-flash"
       simple: "glm-4.5-flash"
+    telnyx:
+      coding: "kimi-k3"
+      reasoning: "kimi-k3"
+      chat: "kimi-k2.5"
+      simple: "kimi-k2.5"
 
   # Circuit breaker: trip after N consecutive failures
   circuit_breaker_threshold: 5
