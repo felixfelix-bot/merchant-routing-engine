@@ -1,0 +1,82 @@
+# nomail.name
+
+> Email for humans and machines. Your npub1...@nomail.name address is free. Receiving is free. Sending costs 100 sats via Cashu or Lightning. Agents deserve freedom of speech, but like a postage stamp, it ain't free.
+
+nomail.name gives you an email address derived from your Nostr public key. No SMTP, no OAuth, no API keys. Just Nostr keys and HTTP. Custom aliases like alice@nomail.name available for a one-time Cashu payment.
+
+## Quick Start for Agents
+
+Generate a Nostr keypair → POST /api/auth/challenge → sign a NIP-01 event with tags [["challenge", nonce]] → POST /api/auth/verify → GET /api/messages to poll inbox.
+
+Your email address: npub1...@nomail.name (auto-created on first login)
+
+To send email: POST /api/send with Cashu token or Lightning invoice (100 sats).
+
+## Key Points
+
+- Receiving email is FREE (freedom of speech includes freedom to listen)
+- Sending email costs 100 sats (freedom of speech costs money — like a stamp)
+- Every user gets npub1...@nomail.name for free
+- Custom aliases (alice@nomail.name) cost 1,000-1,000,000 sats based on length
+- All messages encrypted at rest (NIP-44 v2 + AES-GCM)
+- No SMTP, no OAuth — just Nostr keys and HTTP
+- Daily limit: 100 emails per user
+- Test mint: testnut.cashu.space (auto-pays Lightning invoices)
+- The server answers on nomail.name and cashu.email (same API, same worker); examples below use nomail.name
+- Installable as a PWA (offline support, service worker)
+- staging.nomail.name available for testing
+- Lightning payments show QR codes (scannable by Lightning and Cashu wallets)
+- Error responses carry X-Reason (concise why) and X-Hint (one-line actionable fix) headers
+
+## Key Endpoints
+
+POST /api/auth/challenge — Get auth nonce
+POST /api/auth/verify — Verify Nostr event, get session cookie
+GET /api/messages — List inbox messages
+POST /api/send — Send email with Cashu or Lightning payment
+GET /api/addresses — List your email addresses
+POST /api/addresses — Claim custom alias with Cashu token
+DELETE /api/addresses/:id — Release custom alias
+GET /api/proofs — View held Cashu proofs
+GET /api/pricing — Alias pricing tiers
+/.well-known/nostr.json?name=X — NIP-05 verification lookup
+
+## Full Documentation
+
+/llms-full.txt — Complete API reference with curl examples, JavaScript, Python, and authentication flow.
+
+## Nostr Resources (required for authentication)
+
+Authentication requires creating and signing Nostr events. You need a secp256k1 keypair.
+
+- NIP-01 (Basic Protocol — event format, signing): https://github.com/nostr-protocol/nips/blob/master/01.md
+- NIP-19 (bech32-encoded entities — npub/nsec): https://github.com/nostr-protocol/nips/blob/master/19.md
+- nostr-tools (JavaScript): https://github.com/nbdwtf/nostr-tools
+- pynostr (Python): https://github.com/hvgokbudak/python-nostr-fork
+
+## Cashu Resources (for payments)
+
+Sending email and claiming aliases requires Cashu tokens. Any mint accepted.
+
+- Cashu protocol specs (NUTs): https://github.com/cashubtc/nuts
+- cashu-ts (JavaScript): https://github.com/cashubtc/cashu-ts
+- Test mint: https://testnut.cashu.space
+
+## Client gotchas
+
+Common pitfalls when building a Cashu/Nostr client for nomail:
+
+1. **IPv6 connectivity** — Some Cashu mints do not support IPv6. If your runtime only has IPv6 (e.g. certain serverless platforms), you may get ECONNREFUSED. Route through an IPv4 proxy or use a dual-stack mint.
+
+2. **cashu-ts v4 API drift** — In cashu-ts v4, use `Wallet` (not `CashuMint` or `CashuWallet`). Pin to `@cashu/cashu-ts@^4.5.1`. The `wallet.ops.receive(token).run()` pattern replaces v3's `wallet.receive(token)`.
+
+3. **Proof amounts are Amount value objects, not BigInt** — In cashu-ts v4.5.1, `proof.amount` is an `Amount` instance with `.toNumber()`. `Number(proof.amount)` returns NaN. `JSON.stringify(Amount)` produces a bare string (`"8"`) via `Amount.toJSON()`. To sum proof amounts, call `p.amount.toNumber()` on each proof and reduce; defensively handle legacy shapes (`valueOf`, plain number, bigint, numeric string) so the same helper works with re-hydrated `proofs_json` from D1.
+
+4. **Lightning quote state** — `checkMintQuoteBolt11()` returns `{ state }`. Do not check `.paid` (undefined even after payment). Check `state === 'PAID'` or `state === 'ISSUED'` instead.
+
+5. **Read X-Reason and X-Hint on every 4xx/5xx** — Error responses include two machine-readable headers. `X-Reason` is the concise cause; `X-Hint` is the one-line actionable fix. For example, a 401 carries `X-Hint: authenticate: POST /api/auth/challenge ...`. Always read both before retrying.
+
+## See also
+
+- https://blossom.psbt.me/llms.txt — Blossom file storage (same Nostr+Cashu ecosystem)
+- https://nodns.shop/llms.txt — Nostr-to-DNS bridge (same ecosystem)
