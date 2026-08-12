@@ -77,6 +77,60 @@ external:
         cost_per_1m_input: 0.09    # LEGACY: tracker is source of truth (RP-4)
         cost_per_1m_output: 0.19   # LEGACY: tracker is source of truth (RP-4)
 
+  telnyx:
+    base_url: "https://api.telnyx.com/v2/ai/openai"
+    key_env: "TELNYX_API_KEY"
+    pricing_model: per_token
+    # Telnyx AI inference — OpenAI-compatible API
+    # Direct endpoint: https://api.telnyx.com/v2/ai/chat/completions
+    # Auth: Bearer token (KEY0... prefix, not OpenAI format)
+    # Balance: https://api.telnyx.com/v2/balance (data.balance, data.available_credit)
+    # Prompt caching: usage.prompt_tokens_details.cached_tokens
+    # Reasoning models (e.g. Kimi K3) report usage.reasoning_tokens
+    models:
+      moonshotai/Kimi-K3:
+        cost_per_1m_input: 0.60    # LEGACY: tracker is source of truth (RP-4)
+        cost_per_1m_output: 2.50   # LEGACY: tracker is source of truth (RP-4)
+      moonshotai/Kimi-K2.6:
+        cost_per_1m_input: 0.60
+        cost_per_1m_output: 2.50
+      zai-org/GLM-5.2:
+        cost_per_1m_input: 0.20
+        cost_per_1m_output: 0.80
+      openai/gpt-5:
+        cost_per_1m_input: 2.50
+        cost_per_1m_output: 10.00
+      anthropic/claude-haiku-4-5:
+        cost_per_1m_input: 0.80
+        cost_per_1m_output: 4.00
+      google/gemini-2.5-flash:
+        cost_per_1m_input: 0.15
+        cost_per_1m_output: 0.60
+
+  telnyx:
+    base_url: "https://api.telnyx.com/v2/ai"
+    key_env: "TELNYX_API_KEY"
+    starting_balance_env: "TELNYX_STARTING_BALANCE"
+    pricing_model: per_token
+    quota_pressure:
+      onset: 0.80
+      asymptote: 1.5
+      hard_limit: true
+    models:
+      kimi-k3:
+        cost_per_1m_input: 2.70    # LEGACY: tracker is source of truth (RP-4)
+        cost_per_1m_cached: 0.27   # LEGACY: tracker is source of truth (RP-4)
+        cost_per_1m_output: 13.50  # LEGACY: tracker is source of truth (RP-4)
+      kimi-k2.5:
+        cost_per_1m_input: 0.665   # LEGACY: tracker is source of truth (RP-4)
+        cost_per_1m_output: 4.00   # LEGACY: tracker is source of truth (RP-4)
+      glm-5.2:
+        cost_per_1m_input: 1.00    # LEGACY: tracker is source of truth (RP-4)
+        cost_per_1m_output: 4.00   # LEGACY: tracker is source of truth (RP-4)
+      minimax-m3:
+        cost_per_1m_input: 0.27    # LEGACY: tracker is source of truth (RP-4)
+        cost_per_1m_output: 1.10   # LEGACY: tracker is source of truth (RP-4)
+
 # ── Strategy configuration ─────────────────────────────────────────────────
 strategy:
   # Minimum effective price — never zero, even for free providers (ADR-004)
