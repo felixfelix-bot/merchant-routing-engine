@@ -148,6 +148,7 @@ __all__ = [
     "get_zai_per_model_rates",
     # ── Tunables / constants ────────────────────────────────────────────────────
     "LAST_RESORT_RATES",
+    "LAST_RESORT_RATES_PER_MODEL",
     "DEFAULT_DB_PATH",
     "DEFAULT_BURN_DB_PATH",
     "BALANCE_DELTA_PROVIDERS",
@@ -174,7 +175,7 @@ DEFAULT_BURN_DB_PATH: str = os.path.expanduser("~/.hermes/bot/api_burn.db")
 #: Providers whose real $/M is measured from credit-balance depletion rather
 #: than per-call ``cost_usd``. PPQ and OpenRouter APIs don't return per-call
 #: cost, so we measure from how much credit was consumed vs tokens routed.
-BALANCE_DELTA_PROVIDERS: tuple[str, ...] = ("ppq", "openrouter")
+BALANCE_DELTA_PROVIDERS: tuple[str, ...] = ("ppq", "openrouter", "telnyx")
 
 #: Cache TTL. Prices do not change per-second; recompute at most every 5 minutes.
 CACHE_TTL_SECONDS: float = 300.0
@@ -214,6 +215,22 @@ LAST_RESORT_RATES: dict[str, float] = {
     "telnyx":             5.40,     # seed: blended kimi-k3 cost (2.70*3 + 13.50*1) / 4
     "openrouter":         0.135,    # known list price
     "deepinfra":          1.30,     # known list price
+}
+
+#: Per-model last-resort estimates. When ``model`` is given and the provider has
+#: a nested entry here, the per-model rate is used instead of the provider-level
+#: :data:`LAST_RESORT_RATES` value. This lets the router see the real cost spread
+#: between cheap models (kimi-k3 at $2.70/M) and expensive ones (glm-5.2 at
+#: $13.50/M) on the same provider, instead of a single blended number.
+#: The blended provider-level rate in :data:`LAST_RESORT_RATES` is the
+#: token-volume-weighted average of these per-model rates.
+LAST_RESORT_RATES_PER_MODEL: dict[str, dict[str, float]] = {
+    "telnyx": {
+        "kimi-k3":      2.70,    # Moonshot Kimi K3 — cheap tier
+        "kimi-k2.5":    2.70,    # Moonshot Kimi K2.5 — cheap tier
+        "minimax-m3":   2.70,    # MiniMax M3 — cheap tier
+        "glm-5.2":      13.50,   # z.ai GLM-5.2 — premium tier
+    },
 }
 
 # ── Trailing-rate configuration (T6) ─────────────────────────────────────────
@@ -1431,7 +1448,9 @@ def get_rate_with_fallback(
     1. :func:`get_real_rate` (the measured rate from ``api_calls.cost_usd``).
     2. For ``ollama_cloud`` only: the Ollama billing API
        (:func:`src.ollama_extra_usage.fetch_ollama_usage`).
-    3. :data:`LAST_RESORT_RATES` (clearly-marked estimates).
+    3a. :data:`LAST_RESORT_RATES_PER_MODEL` (per-model estimates, when the
+       provider has a nested per-model entry and ``model`` is given).
+    3b. :data:`LAST_RESORT_RATES` (provider-level estimates).
     4. :data:`UNKNOWN_PROVIDER_FALLBACK` (a conservative rate for a provider with
        no entry anywhere — logged at WARNING).
 
@@ -1469,6 +1488,21 @@ def get_rate_with_fallback(
             return api_rate
 
     # 3. Last-resort hardcoded estimates.
+    # 3a. Per-model last-resort (finer granularity than provider-level).
+    if model is not None:
+        per_model = LAST_RESORT_RATES_PER_MODEL.get(provider, {})
+        model_estimate = per_model.get(model)
+        if model_estimate is not None:
+            _log.warning(
+                "real_price_tracker: no real data for %s/%s — using per-model "
+                "last-resort ESTIMATE $%.6g/M (this is not a measurement)",
+                provider,
+                model,
+                model_estimate,
+            )
+            return model_estimate
+
+    # 3b. Provider-level last-resort.
     estimate = LAST_RESORT_RATES.get(provider)
     if estimate is not None:
         _log.warning(

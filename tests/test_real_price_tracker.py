@@ -33,6 +33,7 @@ from src.real_price_tracker import (
     CHANGE_RECENT_HOURS,
     CHANGE_THRESHOLD,
     LAST_RESORT_RATES,
+    LAST_RESORT_RATES_PER_MODEL,
     MIN_CALLS_FOR_RATE,
     PROVIDER_WINDOW_HOURS,
     REQUIRED_RATE_PROVIDERS,
@@ -349,6 +350,44 @@ class TestGetRateWithFallback:
         for provider, expected in LAST_RESORT_RATES.items():
             rate = get_rate_with_fallback(provider, db_path=db, _now=_now_utc())
             assert rate == pytest.approx(expected, rel=1e-12), provider
+
+    def test_telnyx_per_model_last_resort(self, db):
+        """Telnyx has per-model last-resort rates: kimi-k3=2.70, glm-5.2=13.50.
+
+        Gate test for TELNYX-4.2: get_rate_with_fallback('telnyx', 'kimi-k3')
+        must return 2.70 (the per-model rate, not the blended 5.40).
+        """
+        clear_cache()
+        # kimi-k3 — cheap tier
+        rate = get_rate_with_fallback("telnyx", "kimi-k3",
+                                      db_path=db, _now=_now_utc())
+        assert rate == pytest.approx(2.70, rel=1e-12)
+
+    def test_telnyx_per_model_last_resort_all_models(self, db):
+        """All 4 Telnyx models get their per-model rate, not the blend."""
+        clear_cache()
+        expected = LAST_RESORT_RATES_PER_MODEL["telnyx"]
+        for model, exp_rate in expected.items():
+            clear_cache()
+            rate = get_rate_with_fallback("telnyx", model,
+                                          db_path=db, _now=_now_utc())
+            assert rate == pytest.approx(exp_rate, rel=1e-12), model
+
+    def test_telnyx_no_model_uses_blended_last_resort(self, db):
+        """Without a model, telnyx falls back to the blended provider-level rate."""
+        clear_cache()
+        rate = get_rate_with_fallback("telnyx", db_path=db, _now=_now_utc())
+        assert rate == pytest.approx(LAST_RESORT_RATES["telnyx"], rel=1e-12)
+
+    def test_telnyx_per_model_takes_priority_over_provider_level(self, db):
+        """Per-model rate should be returned when model is specified, even if
+        it differs from the provider-level blend."""
+        clear_cache()
+        # kimi-k3 per-model = 2.70, but provider-level blend = 5.40
+        rate = get_rate_with_fallback("telnyx", "kimi-k3",
+                                      db_path=db, _now=_now_utc())
+        assert rate != LAST_RESORT_RATES["telnyx"]  # 2.70 != 5.40
+        assert rate == pytest.approx(2.70, rel=1e-12)
 
     def test_unknown_provider_returns_conservative_fallback(self, db):
         rate = get_rate_with_fallback("totally_new_provider", db_path=db, _now=_now_utc())
