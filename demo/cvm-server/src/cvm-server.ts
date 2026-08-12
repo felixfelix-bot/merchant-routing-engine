@@ -1083,6 +1083,7 @@ const TOOLS: Record<string, ToolHandler> = {
     // separate /price-history HTTP fetch). Trimmed to the same 24h/1h-bucket
     // shape the dedicated tool returns.
     let priceHistory = (TOOLS.get_price_history({ hours: 4000 })?.points) || [];
+    const estimatedVsMeasured = computeEstimatedVsMeasured(pricing, realRates);
     return {
       ts: Math.floor(Date.now() / 1000),
       quota: await computeQuota(),
@@ -1091,11 +1092,14 @@ const TOOLS: Record<string, ToolHandler> = {
         friend: pricing.friend,
         ollama: pricing.ollama,
         ppq: pricing.ppq,
+        real_rates: realRates,
+        estimated_vs_measured: estimatedVsMeasured,
       },
       pricing_meta: pricing._meta,
+      // Backward-compat top-level aliases (dashboard + external consumers)
       real_rates: realRates,
       real_rates_tracker: proxyCache.trackerRates || null,
-      estimated_vs_measured: computeEstimatedVsMeasured(pricing, realRates),
+      estimated_vs_measured: estimatedVsMeasured,
       cost_today: computeCostToday(),
       cost_hour: round(computeCostToday() / Math.max(1, new Date().getHours() + new Date().getMinutes() / 60), 4),
       btc_price_usd: CFG.btcPriceUsd,

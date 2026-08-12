@@ -112,6 +112,7 @@
     .source-badge{font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;letter-spacing:.5px}
     .source-badge.measured{background:rgba(63,185,80,.15);color:var(--green)}
     .source-badge.fallback{background:rgba(210,153,34,.15);color:var(--yellow)}
+    .source-badge.estimated{background:rgba(210,153,34,.15);color:var(--yellow)}
   </style>
 </head>
 <body>
@@ -213,6 +214,21 @@
           <tr><th>Provider</th><th>Model</th><th id="rates-header-unit">Rate (sats/M)</th><th>Source</th><th>Window</th></tr>
         </thead>
         <tbody id="rates-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+  <!-- e2) Estimated vs Measured -->
+  <div class="dash-section" id="est-vs-meas-section">
+    <div class="dash-header">
+      <span class="dash-header-title">⚖️ Estimated vs Measured</span>
+      <span class="provider-rate">Deviation %</span>
+    </div>
+    <div class="dash-body" style="padding:0">
+      <table class="rates-table" id="est-vs-meas-table">
+        <thead>
+          <tr><th>Provider</th><th>Estimated</th><th>Measured</th><th>Deviation</th><th>Source</th></tr>
+        </thead>
+        <tbody id="est-vs-meas-tbody"></tbody>
       </table>
     </div>
   </div>
@@ -394,7 +410,8 @@ function normalizeSnapshot(raw){
     cost_hour:raw.cost_hour??0,
     btc_price_usd:raw.btc_price_usd||100000,
     real_rates_tracker:raw.real_rates_tracker||null,
-    real_rates:raw.real_rates||{},
+    real_rates:raw.real_rates||(raw.pricing?raw.pricing.real_rates:null)||{},
+    estimated_vs_measured:raw.estimated_vs_measured||(raw.pricing?raw.pricing.estimated_vs_measured:null)||{},
     dispatch_gate:raw.dispatch_gate||null,
   };
 }
@@ -1079,7 +1096,7 @@ function renderMeasuredRates(snap){
       const color = PROV_COLOR[provKey] || '#8b949e';
       const rate = p.rate_per_m || 0;
       const source = (p.source || p.measured || '').toLowerCase().includes('measur') ? 'measured' : 'fallback';
-      const sourceLabel = source === 'measured' ? 'MEASURED' : 'FALLBACK';
+      const sourceLabel = source === 'measured' ? 'MEASURED' : 'ESTIMATED';
       const windowH = p.window_hours || '—';
       html += `<tr>
         <td style="color:${color};font-weight:700">${p.provider || p.key || '—'}</td>
@@ -1095,13 +1112,45 @@ function renderMeasuredRates(snap){
 
   let html = '';
   for(const r of rows){
-    const sourceLabel = r.source === 'measured' ? 'MEASURED' : 'FALLBACK';
+    const sourceLabel = r.source === 'measured' ? 'MEASURED' : 'ESTIMATED';
     html += `<tr>
       <td style="color:${r.color};font-weight:700">${r.provider}</td>
       <td>${r.model === '_default' ? '<i style="color:#8b949e">default</i>' : r.model}</td>
       <td>${fmtRate(r.rate)}</td>
       <td><span class="source-badge ${r.source}">${sourceLabel}</span></td>
       <td>${r.window}</td>
+    </tr>`;
+  }
+  tbody.innerHTML = html;
+}
+
+function renderEstimatedVsMeasured(snap){
+  const tbody = document.getElementById('est-vs-meas-tbody');
+  if(!tbody) return;
+  const evm = snap.estimated_vs_measured || {};
+  const keys = Object.keys(evm);
+  if(!keys.length){
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--txt-dim);padding:16px">No comparison data yet</td></tr>';
+    return;
+  }
+  let html = '';
+  for(const [provKey, d] of Object.entries(evm)){
+    const provDisplay = keyToProvider(provKey) || provKey;
+    const color = PROV_COLOR[provDisplay] || '#8b949e';
+    const dev = d.deviation_pct || 0;
+    const devColor = Math.abs(dev) > 10 ? (dev > 0 ? 'var(--red)' : 'var(--green)') : 'var(--txt)';
+    const devSign = dev > 0 ? '+' : '';
+    const alertBadge = d.price_change_alert ? ' <span style="color:var(--red);font-size:9px">⚠</span>' : '';
+    const est = fmtRate(d.estimated_rate);
+    const meas = fmtRate(d.measured_rate);
+    const src = (d.source || '').toLowerCase().includes('measur') ? 'measured' : 'estimated';
+    const srcLabel = src === 'measured' ? 'MEASURED' : 'ESTIMATED';
+    html += `<tr>
+      <td style="color:${color};font-weight:700">${provDisplay}</td>
+      <td>${est}</td>
+      <td>${meas}</td>
+      <td style="color:${devColor};font-weight:700">${devSign}${dev.toFixed(1)}%${alertBadge}</td>
+      <td><span class="source-badge ${src}">${srcLabel}</span></td>
     </tr>`;
   }
   tbody.innerHTML = html;
@@ -1120,6 +1169,7 @@ function renderAll(){
   renderRequestFlow(snap);
   renderDispatchGate(snap);
   renderMeasuredRates(snap);
+  renderEstimatedVsMeasured(snap);
 }
 
 /* ════════════════════════════════════════════════════════════════════════
