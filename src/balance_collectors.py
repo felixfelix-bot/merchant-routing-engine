@@ -157,6 +157,16 @@ __all__ = [
     "OPENROUTER_KEY_ENDPOINT",
     "OPENROUTER_DEFAULT_TIMEOUT",
     "OPENROUTER_KEY_ENV",
+    # ── Telnyx ──
+    "TelnyxBalance",
+    "collect_telnyx_balance",
+    "store_telnyx_balance",
+    "get_latest_telnyx_balance",
+    "collect_and_store_telnyx",
+    "telnyx_quota_entry",
+    "TELNYX_DEFAULT_STARTING_BALANCE",
+    "TELNYX_KEY_ENV",
+    "TELNYX_STARTING_ENV",
     # ── CLI ──
     "main",
 ]
@@ -1173,6 +1183,325 @@ def openrouter_quota_entry(
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# TELNYX COLLECTOR (self-tracking — no balance API; pitfall #47)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Telnyx does not expose a billing/balance API.  We self-track spend by
+# summing ``cost_usd`` from the ``api_calls`` table in the same api_burn.db
+# where the proxy logs every request:
+#
+#   1) SELECT SUM(cost_usd) FROM api_calls WHERE key_name='telnyx'
+#   2) remaining          = TELNYX_STARTING_BALANCE - sum_spent
+#   3) usage_fraction     = 1 - (remaining / TELNYX_STARTING_BALANCE)
+#   4) Write to provider_balances table (provider='telnyx')
+#
+# This mirrors the DeepInfra self-tracking pattern: when there is no external
+# balance endpoint, the local usage DB *is* the source of truth.
+
+TELNYX_DEFAULT_STARTING_BALANCE = 10.0  # USD — matches zai_proxy default
+TELNYX_KEY_ENV = "TELNYX_API_KEY"
+TELNYX_STARTING_ENV = "TELNYX_STARTING_BALANCE"
+
+
+def _resolve_telnyx_starting(explicit: Optional[float]) -> float:
+    """Resolve starting balance: explicit arg → TELNYX_STARTING_BALANCE env → 10.0."""
+    if explicit is not None:
+        return float(explicit)
+    raw = os.environ.get(TELNYX_STARTING_ENV)
+    if raw is None or raw.strip() == "":
+        return TELNYX_DEFAULT_STARTING_BALANCE
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return TELNYX_DEFAULT_STARTING_BALANCE
+
+
+@dataclass
+class TelnyxBalance:
+    """Self-tracked Telnyx spend & remaining balance.
+
+    total_spent_usd  SUM(cost_usd) from api_calls WHERE key_name='telnyx'
+    starting         funded budget (USD) from env or default
+    remaining_usd    starting - total_spent_usd (may go negative on overrun)
+    usage_fraction   1 - (remaining / starting), clamped to [0, 1]
+    is_exhausted     True when remaining <= 0
+    collected_at     time.time() when collected
+    error            short human string on failure, None on success
+    """
+
+    total_spent_usd: Optional[float] = None
+    starting: float = TELNYX_DEFAULT_STARTING_BALANCE
+    remaining_usd: Optional[float] = None
+    usage_fraction: float = 0.0
+    is_exhausted: bool = False
+    collected_at: float = field(default_factory=time.time)
+    error: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        """True when spend was retrieved successfully."""
+        return self.error is None and self.total_spent_usd is not None
+
+    @property
+    def used_pct(self) -> float:
+        """Usage as 0–100 % — what live_router reads as ``quota_entry['used_pct']``."""
+        return self.usage_fraction * 100.0
+
+
+# ── Telnyx self-tracking helpers ──────────────────────────────────────────────
+
+def _telnyx_usage_fraction(remaining: Optional[float], starting: float) -> float:
+    """Derive a [0,1] usage fraction.
+
+    * starting <= 0 (misconfig) → 0.0 (cold-start path handles conservatism)
+    * remaining unknown → 0.0
+    * remaining <= 0 → exhausted → 1.0
+    * else 1 - remaining/starting, clamped to [0,1]
+    """
+    if starting <= 0.0:
+        return 0.0
+    if remaining is None:
+        return 0.0
+    if remaining <= 0.0:
+        return 1.0
+    return max(0.0, min(1.0, 1.0 - (remaining / starting)))
+
+
+def _query_telnyx_spent(db_path: str) -> tuple[Optional[float], Optional[str]]:
+    """Query SUM(cost_usd) FROM api_calls WHERE key_name='telnyx'.
+
+    Returns (sum_spent_usd, error_str). Never raises — on any DB error returns
+    (None, "<error description>").
+    """
+    try:
+        conn = _connect_db(db_path)
+        try:
+            # Ensure the api_calls table exists (it should, since the proxy
+            # creates it; but be defensive in case this runs on a fresh DB).
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS api_calls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    key_name TEXT,
+                    cost_usd REAL
+                )"""
+            )
+            row = conn.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0.0) FROM api_calls "
+                "WHERE key_name = 'telnyx'"
+            ).fetchone()
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError) as exc:
+        return None, "db error: %s" % exc
+    except Exception as exc:
+        return None, "unexpected error: %s" % exc
+
+    if not row or row[0] is None:
+        # COALESCE guarantees 0.0, but guard defensively
+        return 0.0, None
+    spent = _as_float(row[0])
+    if spent is None:
+        return None, "SUM(cost_usd) returned non-numeric value"
+    return round(spent, 6), None
+
+
+# ── Telnyx public collector ───────────────────────────────────────────────────
+
+def collect_telnyx_balance(
+    starting: Optional[float] = None,
+    *,
+    db_path: Optional[str] = None,
+) -> TelnyxBalance:
+    """Self-track Telnyx spend from the local api_calls table.
+
+    Parameters
+    ----------
+    starting
+        Funded budget in USD. If None, resolves from
+        ``TELNYX_STARTING_BALANCE`` env (default 10.0).
+    db_path
+        Path to the api_burn.db. If None, uses ``default_db_path()``.
+
+    Returns
+    -------
+    TelnyxBalance
+        Spend, remaining, and usage_fraction. On any failure the ``error``
+        field names the problem and numeric fields are None. Never raises.
+    """
+    result = TelnyxBalance()
+    result.starting = _resolve_telnyx_starting(starting)
+    db = db_path or default_db_path()
+
+    spent, err = _query_telnyx_spent(db)
+    if err is not None or spent is None:
+        result.error = err or "unknown error"
+        return result
+
+    result.total_spent_usd = spent
+    result.remaining_usd = round(result.starting - spent, 6)
+    result.usage_fraction = _telnyx_usage_fraction(
+        result.remaining_usd, result.starting
+    )
+    result.is_exhausted = (
+        result.remaining_usd is not None and result.remaining_usd <= 0.0
+    )
+    result.collected_at = time.time()
+    return result
+
+
+# ── Telnyx persistence ───────────────────────────────────────────────────────
+
+def store_telnyx_balance(
+    db_path: str, balance: Optional[TelnyxBalance]
+) -> bool:
+    """Append one Telnyx snapshot to the shared table. True on success,
+    False (never raises) on DB error or None balance.
+
+    Maps to shared schema:
+    usage = total_spent_usd, limit_credits = starting,
+    limit_remaining = remaining_usd, is_unlimited = 0 (always finite).
+    """
+    if balance is None:
+        return False
+    try:
+        conn = _connect_db(db_path)
+        try:
+            _ensure_table(conn)
+            conn.execute(
+                f"""
+                INSERT INTO {PROVIDER_BALANCES_TABLE}
+                    (provider, collected_at, usage, limit_credits,
+                     limit_remaining, usage_fraction, is_unlimited,
+                     is_free_tier, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "telnyx",
+                    balance.collected_at,
+                    balance.total_spent_usd,
+                    float(balance.starting),
+                    balance.remaining_usd,
+                    float(balance.usage_fraction),
+                    0,  # Telnyx is always finite (credit top-up)
+                    None,
+                    json.dumps({
+                        "total_spent_usd": balance.total_spent_usd,
+                        "starting": balance.starting,
+                        "remaining_usd": balance.remaining_usd,
+                        "method": "self-tracking",
+                    }, default=str),
+                ),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        return False
+
+
+def get_latest_telnyx_balance(db_path: str) -> Optional[TelnyxBalance]:
+    """Most recent stored Telnyx balance, or None (never raises) if none.
+
+    Starting balance is recovered from the stored limit_credits column.
+    """
+    try:
+        conn = _connect_db(db_path)
+        try:
+            _ensure_table(conn)
+            row = conn.execute(
+                f"""
+                SELECT usage, limit_credits, limit_remaining, usage_fraction,
+                       is_unlimited, collected_at, raw_json
+                FROM {PROVIDER_BALANCES_TABLE}
+                WHERE provider = 'telnyx'
+                ORDER BY collected_at DESC LIMIT 1
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        return None
+
+    if not row:
+        return None
+    (usage, limit_credits, limit_remaining, usage_fraction,
+     is_unlimited, collected_at, raw_json) = row
+    starting_f = float(limit_credits) if limit_credits is not None else TELNYX_DEFAULT_STARTING_BALANCE
+    try:
+        raw = json.loads(raw_json) if isinstance(raw_json, str) else {}
+    except (ValueError, TypeError):
+        raw = {}
+    return TelnyxBalance(
+        total_spent_usd=usage,
+        starting=starting_f,
+        remaining_usd=limit_remaining,
+        usage_fraction=float(usage_fraction) if usage_fraction is not None else 0.0,
+        is_exhausted=(limit_remaining is not None and limit_remaining <= 0.0),
+        collected_at=float(collected_at) if collected_at is not None else time.time(),
+        error=None,
+    )
+
+
+def collect_and_store_telnyx(
+    db_path: Optional[str] = None,
+    starting: Optional[float] = None,
+) -> Optional[TelnyxBalance]:
+    """Cron-friendly: collect once, persist, return balance (None on failure).
+
+    Never raises.
+    """
+    db_path = db_path or default_db_path()
+    balance = collect_telnyx_balance(starting=starting, db_path=db_path)
+    if balance.ok:
+        store_telnyx_balance(db_path, balance)
+        return balance
+    return None
+
+
+# ── Telnyx bridge to quota_state['telnyx'] ───────────────────────────────────
+
+_TELNYX_BALANCE_MAX_AGE = 1200.0  # 20 min — 2× the 5-min cadence (slack)
+
+
+def telnyx_quota_entry(
+    db_path: Optional[str] = None,
+    *,
+    max_age: Optional[float] = _TELNYX_BALANCE_MAX_AGE,
+) -> dict:
+    """Build the ``quota_state['telnyx']`` entry from the latest stored row.
+
+    The bridge from the collector (``provider_balances`` table) to the
+    ``quota_state['telnyx']`` dict that the proxy's ``_snapshot_quota`` reads.
+    Mirrors ``ppq_quota_entry`` and ``openrouter_quota_entry``.
+
+    Cold-start contract (matches the proxy's current hardcoded fallback):
+      * no stored row, OR the row is older than ``max_age`` (default 20 min,
+        2× the 5-min cadence) → return ``{}`` (no ``used_pct`` key). The proxy
+        then falls back to ``{used_pct:0.0, remaining:inf}`` (current behavior).
+      * fresh row → ``{'used_pct','remaining','starting','is_exhausted',
+        'collected_at'}`` with ``used_pct`` in 0–100.
+
+    Pass ``max_age=None`` to use the newest row regardless of age. Never
+    raises — any DB/parse error yields the cold-start ``{}`` entry.
+    """
+    db_path = db_path or default_db_path()
+    bal = get_latest_telnyx_balance(db_path)
+    if bal is None:
+        return {}
+    if max_age is not None and (time.time() - bal.collected_at) > max_age:
+        return {}
+    return {
+        "used_pct": float(bal.used_pct),
+        "remaining": float(bal.remaining_usd) if bal.remaining_usd is not None else 0.0,
+        "starting": float(bal.starting),
+        "is_exhausted": bool(bal.is_exhausted),
+        "collected_at": float(bal.collected_at),
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # CLI DISPATCHER
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -1233,10 +1562,40 @@ def _openrouter_main(argv: list[str]) -> int:
     return 0
 
 
+def _telnyx_main(argv: list[str]) -> int:
+    """Telnyx cron entrypoint: self-track once, print JSON status, exit 0/1."""
+    db_override = None
+    if "--db" in argv:
+        db_override = argv[argv.index("--db") + 1]
+    db_path = db_override or default_db_path()
+    starting_bal = _resolve_telnyx_starting(None)
+    balance = collect_and_store_telnyx(db_path=db_path, starting=starting_bal)
+    if balance is None:
+        starting_env = os.environ.get(TELNYX_STARTING_ENV, "").strip()
+        reason = ("TELNYX_STARTING_BALANCE not set"
+                  if not starting_env
+                  else "self-tracking query failed (see logs)")
+        print(json.dumps({"provider": "telnyx", "ok": False, "error": reason}))
+        return 1
+    print(json.dumps({
+        "provider": "telnyx",
+        "ok": True,
+        "total_spent_usd": balance.total_spent_usd,
+        "starting": balance.starting,
+        "remaining_usd": balance.remaining_usd,
+        "usage_fraction": balance.usage_fraction,
+        "used_pct": balance.used_pct,
+        "is_exhausted": balance.is_exhausted,
+        "collected_at": balance.collected_at,
+        "db_path": db_path,
+    }, default=str))
+    return 0
+
+
 def main(argv: Optional[list] = None) -> int:
     """Unified cron entrypoint.
 
-    Usage: python3 -m src.balance_collectors --provider <ppq|openrouter> [--db PATH]
+    Usage: python3 -m src.balance_collectors --provider <ppq|openrouter|deepinfra|telnyx> [--db PATH]
 
     Dispatches to the per-provider collector, prints one JSON status line,
     exits 0 on success / 1 on failure.
@@ -1253,11 +1612,13 @@ def main(argv: Optional[list] = None) -> int:
         return _ppq_main(argv)
     elif provider == "openrouter":
         return _openrouter_main(argv)
+    elif provider == "telnyx":
+        return _telnyx_main(argv)
     else:
         print(json.dumps({
             "ok": False,
             "error": f"unknown or missing --provider (got {provider!r}); "
-                     f"use --provider ppq|openrouter",
+                     f"use --provider ppq|openrouter|deepinfra|telnyx",
         }))
         return 1
 
