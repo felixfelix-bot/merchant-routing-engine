@@ -138,7 +138,7 @@ class TestLiveRouterInit:
         names = router.provider_names
         assert "ours" in names
         assert "ollama_cloud" in names
-        assert len(names) == 6
+        assert len(names) == 7
 
 
 # ── select_failover ─────────────────────────────────────────────────────────

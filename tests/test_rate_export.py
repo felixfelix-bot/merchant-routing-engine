@@ -144,10 +144,10 @@ class TestExportRates:
         for p, entry in out.items():
             assert entry["window_hours"] == PROVIDER_WINDOW_HOURS[p]
 
-    def test_all_includes_six_providers(self, db):
+    def test_all_includes_all_tracked_providers(self, db):
         out = export_rates(ALL_PROVIDERS, db_path=db)
         assert [e["provider"] for e in out] == list(ALL_PROVIDERS)
-        assert len(out) == 6
+        assert len(out) == len(ALL_PROVIDERS)
         assert "deepinfra" in [e["provider"] for e in out]
         assert "openrouter" in [e["provider"] for e in out]
 
@@ -198,7 +198,7 @@ class TestCLI:
             payload = json.load(f)
         names = [e["provider"] for e in payload["providers"]]
         assert names == list(ALL_PROVIDERS)
-        assert len(names) == 6
+        assert len(names) == len(ALL_PROVIDERS)
 
     def test_pretty_indents(self, db):
         buf = io.StringIO()

@@ -21,6 +21,7 @@ from src.cost_extraction import (
     PROVIDER_COST_PATHS,
     SOURCE_ESTIMATED,
     SOURCE_MEASURED,
+    SOURCE_RATE_DERIVED,
     extract_cost,
     extract_cost_from_obj,
 )
@@ -150,6 +151,84 @@ class TestPPQ:
         cost, source = extract_cost("ppq", sse)
         assert cost == pytest.approx(0.005, rel=1e-9)
         assert source == SOURCE_MEASURED
+
+
+# ── Telnyx ───────────────────────────────────────────────────────────────────
+
+
+class TestTelnyx:
+    def test_json_usage_cost(self):
+        """Telnyx may return usage.cost — same path as OpenRouter."""
+        body = json.dumps({
+            "id": "tx-789",
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+                "cost": 0.000081,
+            },
+        }).encode()
+        cost, source = extract_cost("telnyx", body)
+        assert cost == pytest.approx(0.000081, rel=1e-9)
+        assert source == SOURCE_MEASURED
+
+    def test_json_usage_estimated_cost(self):
+        """Telnyx may return usage.estimated_cost — same path as DeepInfra."""
+        body = json.dumps({
+            "choices": [{"message": {"content": "result"}}],
+            "usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 80,
+                "total_tokens": 280,
+                "estimated_cost": 0.0001512,
+            },
+        }).encode()
+        cost, source = extract_cost("telnyx", body)
+        assert cost == pytest.approx(0.0001512, rel=1e-9)
+        assert source == SOURCE_MEASURED
+
+    def test_json_top_level_cost(self):
+        """Telnyx may put cost at the top level."""
+        body = json.dumps({
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+            "cost": 0.0027,
+        }).encode()
+        cost, source = extract_cost("telnyx", body)
+        assert cost == pytest.approx(0.0027, rel=1e-9)
+        assert source == SOURCE_MEASURED
+
+    def test_json_usage_total_cost(self):
+        """Telnyx may return usage.total_cost."""
+        body = json.dumps({
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {"total_cost": 0.0099},
+        }).encode()
+        cost, source = extract_cost("telnyx", body)
+        assert cost == pytest.approx(0.0099, rel=1e-9)
+        assert source == SOURCE_MEASURED
+
+    def test_sse_cost(self):
+        """Streaming: cost rides the final data: chunk."""
+        sse = (
+            b'data: {"choices":[{"delta":{"content":"he"}}]}\n\n'
+            b'data: {"choices":[{"delta":{"content":"llo"}}]}\n\n'
+            b'data: {"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"cost":0.000099}}\n\n'
+            b'data: [DONE]\n\n'
+        )
+        cost, source = extract_cost("telnyx", sse)
+        assert cost == pytest.approx(0.000099, rel=1e-9)
+        assert source == SOURCE_MEASURED
+
+    def test_no_cost_anywhere(self):
+        """When Telnyx returns no cost field, the module returns (None, None);
+        the proxy wrapper then derives from token_count × published rate."""
+        body = json.dumps({
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+        }).encode()
+        assert extract_cost("telnyx", body) == (None, None)
 
 
 # ── Flat-rate / unknown providers ────────────────────────────────────────────
@@ -307,8 +386,8 @@ class TestExtractFromObj:
 
 class TestModuleStructure:
     def test_provider_paths_documented_for_paid_providers(self):
-        """All three external paid providers must have documented paths."""
-        for p in ("openrouter", "deepinfra", "ppq"):
+        """All external paid providers must have documented paths."""
+        for p in ("openrouter", "deepinfra", "ppq", "telnyx"):
             assert p in PROVIDER_COST_PATHS
             assert "paths" in PROVIDER_COST_PATHS[p]
             assert len(PROVIDER_COST_PATHS[p]["paths"]) >= 1
@@ -321,3 +400,5 @@ class TestModuleStructure:
 
     def test_source_constants_distinct(self):
         assert SOURCE_MEASURED != SOURCE_ESTIMATED
+        assert SOURCE_MEASURED != SOURCE_RATE_DERIVED
+        assert SOURCE_ESTIMATED != SOURCE_RATE_DERIVED

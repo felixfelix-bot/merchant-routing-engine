@@ -59,11 +59,13 @@ __all__ = [
     "PROVIDER_COST_PATHS",
     "SOURCE_MEASURED",
     "SOURCE_ESTIMATED",
+    "SOURCE_RATE_DERIVED",
 ]
 
 # ── cost_source vocabulary (matches RP-1 migration: scripts/add_cost_column.py) ──
 SOURCE_MEASURED = "measured"      # real $ parsed directly from the provider's response
 SOURCE_ESTIMATED = "estimated"   # computed from a model/rate, not directly returned
+SOURCE_RATE_DERIVED = "rate_derived"  # computed from token_count × published rate (no in-body cost)
 # 'flat_rate' and 'backfilled' are also in the vocabulary but produced by the
 # proxy wrapper / RP-1 migration respectively, not by this module.
 
@@ -84,6 +86,12 @@ PROVIDER_COST_PATHS: dict[str, dict[str, Any]] = {
     "ppq": {
         # PPQ's cost field location is not firmly documented; probe in priority
         # order and take the first numeric value found.
+        "paths": ["usage.cost", "cost", "usage.total_cost", "usage.estimated_cost"],
+        "source": SOURCE_MEASURED,
+    },
+    "telnyx": {
+        # Telnyx AI inference API — cost field location is not firmly documented.
+        # Probe the same plausible paths as PPQ; take the first numeric hit.
         "paths": ["usage.cost", "cost", "usage.total_cost", "usage.estimated_cost"],
         "source": SOURCE_MEASURED,
     },

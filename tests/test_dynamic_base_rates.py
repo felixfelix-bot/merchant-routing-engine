@@ -52,7 +52,7 @@ CREATE TABLE api_calls (
 )
 """
 
-_ALL_PROVIDERS = ("ours", "friend", "ollama_cloud", "ppq", "openrouter", "deepinfra")
+_ALL_PROVIDERS = ("ours", "friend", "ollama_cloud", "ppq", "openrouter", "deepinfra", "telnyx")
 
 
 @pytest.fixture
@@ -102,7 +102,7 @@ def _reset_singleton():
 
 
 class TestResolveDynamicBaseRates:
-    def test_returns_all_six_providers(self, db):
+    def test_returns_all_tracked_providers(self, db):
         rates = _resolve_dynamic_base_rates(db)
         assert set(rates.keys()) == set(_ALL_PROVIDERS)
         for v in rates.values():

@@ -583,7 +583,8 @@ class TestProviderWindowHours:
 
     def test_required_providers_are_the_paid_endpoints(self):
         assert set(REQUIRED_RATE_PROVIDERS) == {"ollama_cloud", "ppq",
-                                                "deepinfra", "openrouter"}
+                                                "deepinfra", "openrouter",
+                                                "telnyx"}
 
 
 class TestGetTrailingRate(_OllamaBillingNeutered):

@@ -211,6 +211,7 @@ LAST_RESORT_RATES: dict[str, float] = {
     "ollama_cloud":       0.0155,   # MEASURED included rate (pre-RP-3 observation)
     "ollama_cloud_extra": 0.15,     # above-quota rate (above PPQ $0.14/M so optimizer reroutes)
     "ppq":                0.14,     # known list price
+    "telnyx":             5.40,     # seed: blended kimi-k3 cost (2.70*3 + 13.50*1) / 4
     "openrouter":         0.135,    # known list price
     "deepinfra":          1.30,     # known list price
 }
@@ -229,6 +230,7 @@ PROVIDER_WINDOW_HOURS: dict[str, float] = {
     "ppq":          30 * 24,    # 720  — pay-per-token
     "deepinfra":    30 * 24,    # 720  — pay-per-token
     "openrouter":   30 * 24,    # 720  — pay-per-token
+    "telnyx":       30 * 24,    # 720  — pay-per-token
 }
 
 #: Cold-start seed $/M. Returned by :func:`get_trailing_rate_with_seed` only
@@ -245,6 +247,7 @@ SEED_RATES: dict[str, float] = {
     "ppq":          0.14,     # list price
     "openrouter":   0.135,    # list price
     "deepinfra":    1.30,     # all-time measured average (real)
+    "telnyx":       5.40,     # seed: blended kimi-k3 cost (2.70*3 + 13.50*1) / 4
 }
 
 #: Providers that must report a measured (non-seed) rate before the T6 gate
@@ -256,6 +259,7 @@ REQUIRED_RATE_PROVIDERS: tuple[str, ...] = (
     "ppq",
     "deepinfra",
     "openrouter",
+    "telnyx",
 )
 
 # ── z.ai amortized-rate model (Task T5) ──────────────────────────────────────
