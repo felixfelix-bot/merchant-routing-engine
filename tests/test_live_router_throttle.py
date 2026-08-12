@@ -3,7 +3,7 @@
 Tests that:
 1. GLM-5.2 is deprioritised (routes to external) when session_usage >= 0.85
 2. GLM-5.2 is excluded (not even a fallback) when session_usage >= 1.0
-3. Ollama-exclusive models (kimi-k3:cloud) always route to ollama regardless
+3. Ollama-exclusive models (kimi-k2.7-code, gpt-oss) always route to ollama regardless
 4. z.ai keys are preferred over ollama when available during throttle
 5. Kill switch OLLAMA_THROTTLE_ENABLED=false disables all throttling
 6. Normal routing (below threshold) is unaffected
@@ -507,7 +507,6 @@ class TestKimiAlwaysAllowed:
     """
 
     @pytest.mark.parametrize("model", [
-        "kimi-k3:cloud",
         "kimi-k2.7-code",
         "gpt-oss:120b",
         "gemma4:31b",
@@ -544,7 +543,6 @@ class TestKimiAlwaysAllowed:
             os.unlink(db_path)
 
     @pytest.mark.parametrize("model", [
-        "kimi-k3:cloud",
         "kimi-k2.7-code",
     ])
     def test_exclusive_model_routes_to_ollama_at_85pct(
@@ -575,7 +573,8 @@ class TestKimiAlwaysAllowed:
     def test_exclusive_model_returns_none_when_ollama_down(
         self, rates, quota_both_zai_exhausted, all_healthy, monkeypatch,
     ):
-        """When ollama is unhealthy, exclusive models have no alternative."""
+        """When ollama is unhealthy, exclusive models have no alternative.
+        (Uses kimi-k2.7-code — kimi-k3:cloud is no longer exclusive per TELNYX-2.4.)"""
         db_path = _make_usage_db([])
 
         import src.live_router as lr
@@ -592,7 +591,7 @@ class TestKimiAlwaysAllowed:
                 quota_state=quota_both_zai_exhausted,
                 health_state=health_ollama_down,
                 peak=False,
-                model="kimi-k3:cloud",
+                model="kimi-k2.7-code",
             )
             assert chosen is None
         finally:

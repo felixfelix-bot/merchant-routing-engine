@@ -163,8 +163,9 @@ _TELNYX_CREDIT_PRESSURE_ENABLED: bool = (
 #   >= _BLOCK_THRESHOLD (1.0):     BLOCK — ollama_cloud excluded entirely for
 #                                  non-exclusive models (breaker tripped)
 #
-# Exclusive models (kimi-*, gpt-oss, etc.) ALWAYS bypass throttling — they
-# short-circuit to ollama_cloud in _OLLAMA_EXCLUSIVE_MODELS above.
+# Exclusive models (kimi-k2.7-code, gpt-oss, etc.) ALWAYS bypass throttling —
+# they short-circuit to ollama_cloud in _OLLAMA_EXCLUSIVE_MODELS above.
+# (kimi-k3:cloud was removed — Telnyx now serves kimi-k3, so it failovers.)
 _THROTTLE_ENABLED: bool = (
     os.environ.get("OLLAMA_THROTTLE_ENABLED", "false").lower() in ("1", "true", "yes")
 )
@@ -185,9 +186,12 @@ _THROTTLE_PRICE_MULT: float = float(
 # These models are ONLY served by ollama_cloud — no other provider has them.
 # They MUST always route to ollama_cloud regardless of price or quota regime.
 # PPQ/OpenRouter/DeepInfra do not serve kimi or gpt-oss models.
+# NOTE: kimi-k3:cloud was removed from this set (TELNYX-2.4) because Telnyx
+# now serves kimi-k3 (confirmed by TELNYX-6.2 live integration test, bee55ce).
+# This allows the router to failover kimi-k3 requests to telnyx when Ollama
+# quota is exhausted, instead of returning (None, None).
 _OLLAMA_EXCLUSIVE_MODELS: frozenset[str] = frozenset({
     "kimi-k2.7-code",
-    "kimi-k3:cloud",
     "gpt-oss:120b",
     "gemma4:31b",
     "qwen3.5:397b",
@@ -977,9 +981,10 @@ class LiveRouter:
                 ``"coding"``, ``"reasoning"``, ``"chat"``, ``"simple"``.
                 Defaults to ``"coding"``.
             model: The model name being requested (EUv2-4). When this is
-                an Ollama-only model (kimi-k3:cloud, kimi-k2.7-code,
-                gpt-oss:120b, gemma4:31b, qwen3.5:397b), the router
+                an Ollama-only model (kimi-k2.7-code, gpt-oss:120b,
+                gemma4:31b, qwen3.5:397b), the router
                 always returns ollama_cloud regardless of quota regime.
+                kimi-k3:cloud is no longer exclusive — Telnyx serves it.
                 When it is a non-exclusive model (e.g. glm-5.2) and the
                 regime is "extra", the router reroutes to a cheaper
                 per-token provider.
@@ -1228,9 +1233,10 @@ class LiveRouter:
         self._last_quota_pressure = quota_pressure
 
         # ── RP-5: Ollama-exclusive model short-circuit ──────────────────
-        # If the requested model is Ollama-exclusive (kimi, gpt-oss, etc.),
-        # it MUST route to ollama_cloud regardless of regime. No other
-        # provider serves these models.
+        # If the requested model is Ollama-exclusive (kimi-k2.7-code,
+        # gpt-oss, etc.), it MUST route to ollama_cloud regardless of
+        # regime. No other provider serves these models.
+        # (kimi-k3:cloud removed — Telnyx now serves kimi-k3.)
         if model is not None and model in _OLLAMA_EXCLUSIVE_MODELS:
             # Check if ollama_cloud is healthy and has quota
             oc_healthy = health_state.get("ollama_cloud", True)
@@ -1402,8 +1408,9 @@ class LiveRouter:
                     # ollama_cloud as unreachable via the breaker (mirrors the
                     # exhausted-regime path) so the optimizer filters it cleanly
                     # instead of carrying +inf through the PriceKalman arithmetic.
-                    # Exclusive models (kimi-k3, …) already short-circuited to
-                    # ollama_cloud above and never reach this branch.
+                    # Exclusive models (kimi-k2.7-code, …) already
+                    # short-circuited to ollama_cloud above and never
+                    # reach this branch.
                     healthy = False
                 else:
                     base_rate = base_rate * quota_pressure

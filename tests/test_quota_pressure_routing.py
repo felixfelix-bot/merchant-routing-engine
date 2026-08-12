@@ -7,7 +7,8 @@ Scenarios:
   1. Low usage  → pressure=1.0 → ollama_cloud cheapest → chosen
   2. High usage → pressure>1.0 → ollama effective crosses z.ai → friend chosen
   3. Over-quota → ollama very expensive → external (openrouter) chosen
-  4. kimi-k3:cloud always routes to ollama regardless of pressure
+  4. kimi-k2.7-code always routes to ollama regardless of pressure
+     (kimi-k3:cloud removed in TELNYX-2.4 — Telnyx serves kimi-k3)
   5. last_quota_pressure property reflects the multiplier
   6. Kill switch OFF → no pressure applied (legacy path, pressure=1.0)
 """
@@ -283,7 +284,7 @@ class TestKimiAlwaysOllama:
     def test_kimi_routes_to_ollama_at_high_usage(
         self, rates, quota_zai_friend_available, health_ours_down, monkeypatch,
     ):
-        """kimi-k3:cloud routes to ollama even at 95% usage (no alternative)."""
+        """kimi-k2.7-code routes to ollama even at 95% usage (no alternative)."""
         db_path = _make_usage_db()
         import src.live_router as lr
         monkeypatch.setattr(
@@ -296,17 +297,17 @@ class TestKimiAlwaysOllama:
                 quota_state=quota_zai_friend_available,
                 health_state=health_ours_down,
                 peak=False,
-                model="kimi-k3:cloud",
+                model="kimi-k2.7-code",
             )
             assert chosen == "ollama_cloud"
-            assert chosen_model == "kimi-k3:cloud"
+            assert chosen_model == "kimi-k2.7-code"
         finally:
             os.unlink(db_path)
 
     def test_kimi_routes_to_ollama_at_100pct(
         self, rates, quota_zai_friend_available, health_ours_down, monkeypatch,
     ):
-        """kimi-k3:cloud routes to ollama even at 100% usage."""
+        """kimi-k2.7-code routes to ollama even at 100% usage."""
         db_path = _make_usage_db()
         import src.live_router as lr
         monkeypatch.setattr(
@@ -319,7 +320,7 @@ class TestKimiAlwaysOllama:
                 quota_state=quota_zai_friend_available,
                 health_state=health_ours_down,
                 peak=False,
-                model="kimi-k3:cloud",
+                model="kimi-k2.7-code",
             )
             assert chosen == "ollama_cloud"
         finally:

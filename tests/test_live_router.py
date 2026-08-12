@@ -851,6 +851,64 @@ class TestTelnyxFailover:
             "never failover to telnyx."
         )
 
+    def test_kimi_k3_cloud_removed_from_ollama_exclusive(self):
+        """GATE (TELNYX-2.4): 'kimi-k3:cloud' has been removed from
+        _OLLAMA_EXCLUSIVE_MODELS so it can failover to telnyx when
+        ollama_cloud is exhausted. Previously it was short-circuited
+        to ollama_cloud with no alternative.
+        """
+        from src.live_router import _OLLAMA_EXCLUSIVE_MODELS
+        assert "kimi-k3:cloud" not in _OLLAMA_EXCLUSIVE_MODELS, (
+            "kimi-k3:cloud must NOT be Ollama-exclusive — Telnyx serves "
+            "kimi-k3 (confirmed by TELNYX-6.2 live integration test), so "
+            "it should be able to failover to telnyx."
+        )
+
+    def test_kimi_k3_cloud_can_failover_to_telnyx(self, tmp_db):
+        """GATE (TELNYX-2.4): when ollama_cloud is exhausted/unhealthy,
+        kimi-k3:cloud failover includes telnyx as a candidate (it is no
+        longer short-circuited to ollama_cloud only).
+        """
+        rates = {
+            "ours":          0.001,
+            "friend":        0.029,
+            "ollama_cloud":  0.024,
+            "ppq":           0.14,
+            "openrouter":    0.135,
+            "deepinfra":     1.30,
+            "telnyx":        5.40,
+        }
+        router = LiveRouter(db_path=tmp_db, converged_rates=rates)
+
+        # All providers exhausted except telnyx.
+        quota = {
+            "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 500_000_000},
+            "ppq":          {"used_pct": 100.0, "remaining": 0, "total": float("inf")},
+            "openrouter":   {"used_pct": 100.0, "remaining": 0, "total": float("inf")},
+            "deepinfra":    {"used_pct": 100.0, "remaining": 0, "total": float("inf")},
+            "telnyx":       {"used_pct": 0.0, "remaining": float("inf")},
+        }
+        # Only telnyx is healthy.
+        health = {
+            "ours": False, "friend": False, "ollama_cloud": False,
+            "ppq": False, "openrouter": False, "deepinfra": False,
+            "telnyx": True,
+        }
+
+        (chosen, chosen_model), _ = router.select_failover(
+            quota_state=quota,
+            health_state=health,
+            peak=False,
+            model="kimi-k3:cloud",
+        )
+        # Telnyx should be chosen — kimi-k3:cloud is no longer
+        # short-circuited to ollama_cloud.
+        assert chosen == "telnyx", (
+            f"Expected telnyx as failover for kimi-k3:cloud, got {chosen}"
+        )
+
     def test_telnyx_serves_kimi_k3_via_last_resort(self):
         """GATE: the _model_served detection in _do_select_failover
         recognises telnyx as serving kimi-k3 via LAST_RESORT_RATES_PER_MODEL,

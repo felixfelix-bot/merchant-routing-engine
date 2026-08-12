@@ -2,8 +2,9 @@
 
 Tests that:
 1. _QUOTA_TOTALS['ollama_cloud'] is 500M (not 1M)
-2. Ollama-exclusive models (kimi-k3:cloud, kimi-k2.7-code, gpt-oss:120b, gemma4:31b,
+2. Ollama-exclusive models (kimi-k2.7-code, gpt-oss:120b, gemma4:31b,
    qwen3.5:397b) always route to ollama_cloud regardless of regime
+   (kimi-k3:cloud was removed in TELNYX-2.4 — Telnyx now serves kimi-k3)
 3. glm-5.2 reroutes away from ollama_cloud when regime is "extra" AND kill switch is ON
 4. glm-5.2 stays on ollama_cloud when regime is "included"
 5. ollama_cloud is filtered out when regime is "exhausted"
@@ -172,8 +173,10 @@ class TestQuotaTotalsUpdated:
 class TestOllamaExclusiveModels:
     """Verify the _OLLAMA_EXCLUSIVE_MODELS set contains the right models."""
 
-    def test_contains_kimi_k3_cloud(self):
-        assert "kimi-k3:cloud" in _OLLAMA_EXCLUSIVE_MODELS
+    def test_kimi_k3_cloud_not_in_set(self):
+        """GATE (TELNYX-2.4): kimi-k3:cloud was removed from
+        _OLLAMA_EXCLUSIVE_MODELS — Telnyx now serves kimi-k3."""
+        assert "kimi-k3:cloud" not in _OLLAMA_EXCLUSIVE_MODELS
 
     def test_contains_kimi_k2_7_code(self):
         assert "kimi-k2.7-code" in _OLLAMA_EXCLUSIVE_MODELS
@@ -374,7 +377,6 @@ class TestOllamaExclusiveModelsRouting:
     route to ollama_cloud regardless of quota regime — even in 'extra' regime."""
 
     @pytest.mark.parametrize("model", [
-        "kimi-k3:cloud",
         "kimi-k2.7-code",
         "gpt-oss:120b",
         "gemma4:31b",
@@ -384,7 +386,8 @@ class TestOllamaExclusiveModelsRouting:
         self, model, rates, quota_both_zai_exhausted, all_healthy
     ):
         """GATE: kimi/gpt-oss/gemma/qwen models stay on ollama_cloud even when
-        the regime is 'extra' — no other provider serves them."""
+        the regime is 'extra' — no other provider serves them.
+        (kimi-k3:cloud removed in TELNYX-2.4 — Telnyx serves kimi-k3.)"""
         now = time.time()
         rows = [(now - 100, "ollama_cloud", 500_000_000)]
         db_path = _make_usage_db(rows)
@@ -411,7 +414,6 @@ class TestOllamaExclusiveModelsRouting:
             os.unlink(config_path)
 
     @pytest.mark.parametrize("model", [
-        "kimi-k3:cloud",
         "kimi-k2.7-code",
         "gpt-oss:120b",
         "gemma4:31b",
@@ -446,7 +448,8 @@ class TestOllamaExclusiveModelsRouting:
         self, rates, quota_both_zai_exhausted, all_healthy
     ):
         """When ollama_cloud is unhealthy, Ollama-exclusive models have no
-        alternative — should return (None, None)."""
+        alternative — should return (None, None).
+        (Uses kimi-k2.7-code — kimi-k3:cloud is no longer exclusive per TELNYX-2.4.)"""
         db_path = _make_usage_db([])
         config_path = _make_config(500_000_000, 3_500_000_000)
 
@@ -461,7 +464,7 @@ class TestOllamaExclusiveModelsRouting:
                 quota_state=quota_both_zai_exhausted,
                 health_state=health_ollama_down,
                 peak=False,
-                model="kimi-k3:cloud",
+                model="kimi-k2.7-code",
             )
             assert chosen is None
         finally:
@@ -517,6 +520,7 @@ class TestExhaustedRegime:
     ):
         """In exhausted regime, ollama_cloud is forced unhealthy. Ollama-exclusive
         models have no alternative → return (None, None).
+        (Uses kimi-k2.7-code — kimi-k3:cloud is no longer exclusive per TELNYX-2.4.)
 
         Note: the short-circuit checks health_state, not the regime-forced
         healthy=False. Since the short-circuit happens before the regime
@@ -546,13 +550,13 @@ class TestExhaustedRegime:
                 quota_state=quota_both_zai_exhausted,
                 health_state=all_healthy,
                 peak=False,
-                model="kimi-k3:cloud",
+                model="kimi-k2.7-code",
             )
             # The short-circuit returns ollama_cloud if healthy + remaining > 0,
             # regardless of regime. This is by design: Ollama-exclusive models have
             # no alternative, so we always try ollama_cloud even in extra/exhausted.
             assert chosen == "ollama_cloud"
-            assert chosen_model == "kimi-k3:cloud"
+            assert chosen_model == "kimi-k2.7-code"
         finally:
             qt._CONFIG_PATH = orig_config
             os.unlink(db_path)
