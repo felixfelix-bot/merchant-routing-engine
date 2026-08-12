@@ -80,6 +80,7 @@ from src.real_price_tracker import (
     get_all_trailing_rates_per_model,
     SEED_RATES as _RPT_SEED_RATES,
     LAST_RESORT_RATES as _RPT_LAST_RESORT_RATES,
+    LAST_RESORT_RATES_PER_MODEL as _RPT_LAST_RESORT_RATES_PER_MODEL,
 )
 
 __all__ = ["LiveRouter"]
@@ -332,13 +333,18 @@ def _resolve_model_rate_source(
 
     Same strict fallback chain as :func:`_resolve_model_rate`, but also returns
     a *source* tag so the shadow logger (PM-T6) can record whether a provider's
-    price was a direct model measurement, the provider ``_default`` seed, or the
-    conservative floor. Chain (docs/plan-per-model-pricing.md §3.6 / §5.4):
+    price was a direct model measurement, the provider ``_default`` seed, a
+    per-model last-resort estimate, or the conservative floor. Chain
+    (docs/plan-per-model-pricing.md §3.6 / §5.4):
 
       1. **Per-model measured rate** — ``rates[provider][model]`` → ``"measured"``
-      2. **Provider-level ``_default``** — ``rates[provider]["_default"]``
+      2. **Per-model last-resort estimate** —
+         :data:`LAST_RESORT_RATES_PER_MODEL[provider][model]`
+         (positive) → ``"last_resort"`` (cold-start per-model estimate from
+         known list prices, e.g. telnyx/kimi-k3 at $2.70/M)
+      3. **Provider-level ``_default``** — ``rates[provider]["_default"]``
          (positive) → ``"seed"`` (the flat per-provider blend / cold-start seed)
-      3. **Conservative fallback** — :data:`_UNKNOWN_MODEL_FALLBACK` ($1.0/M)
+      4. **Conservative fallback** — :data:`_UNKNOWN_MODEL_FALLBACK` ($1.0/M)
          → ``"fallback"``
 
     Pure function: no I/O, no side effects. Wired into the failover path by T3
@@ -347,6 +353,18 @@ def _resolve_model_rate_source(
     prov_rates = rates.get(provider, {})
     if model and model in prov_rates:
         return float(prov_rates[model]), "measured"
+    # ── TELNYX-4.3: per-model last-resort estimates ──────────────────────
+    # When the provider has no measured per-model data yet (cold-start) but
+    # we have a hardcoded per-model last-resort rate (e.g. telnyx/kimi-k3 at
+    # $2.70/M from TELNYX-4.2), use it before falling back to the blended
+    # _default. This ensures kimi-k3 on telnyx is priced at $2.70/M (real
+    # per-model cost) instead of $5.40/M (blended), so the optimizer can
+    # correctly compare it against other providers' kimi-k3 rates.
+    if model:
+        lr_per_model = _RPT_LAST_RESORT_RATES_PER_MODEL.get(provider, {})
+        lr_model_rate = lr_per_model.get(model)
+        if lr_model_rate is not None and lr_model_rate > 0:
+            return float(lr_model_rate), "last_resort"
     default = prov_rates.get("_default")
     if default is not None and default > 0:
         return float(default), "seed"
@@ -363,16 +381,20 @@ def _resolve_model_rate(
     Chain (docs/plan-per-model-pricing.md §3.6 / §5.4):
 
       1. **Per-model measured rate** — ``rates[provider][model]``
-      2. **Provider-level ``_default``** — ``rates[provider]["_default"]``
+      2. **Per-model last-resort estimate** —
+         :data:`LAST_RESORT_RATES_PER_MODEL[provider][model]`
+         (cold-start per-model estimate, e.g. telnyx/kimi-k3 at $2.70/M)
+      3. **Provider-level ``_default``** — ``rates[provider]["_default"]``
          (the current flat per-provider behavior, just less precise)
-      3. **Conservative fallback** — :data:`_UNKNOWN_MODEL_FALLBACK` ($1.0/M)
+      4. **Conservative fallback** — :data:`_UNKNOWN_MODEL_FALLBACK` ($1.0/M)
 
-    Step 3 fires when the provider is unknown (absent from ``rates``) or its
+    Step 4 fires when the provider is unknown (absent from ``rates``) or its
     ``_default`` is missing/non-positive. The expensive floor means the
     optimizer never under-prices an unmeasured model — the exact failure that
     caused the kimi-k3 485× cost blindspot (an expensive model priced at the
-    cheap provider blend). When ``model`` is ``None`` step 1 is skipped and the
-    provider ``_default`` is returned, preserving the legacy per-provider path.
+    cheap provider blend). When ``model`` is ``None`` step 1-2 are skipped and
+    the provider ``_default`` is returned, preserving the legacy per-provider
+    path.
 
     Pure function: no I/O, no side effects — trivially unit-testable (the T2
     gate). Wired into the failover path by T3; delegates to
@@ -1348,9 +1370,16 @@ class LiveRouter:
             if model and _PER_MODEL_PRICING_ENABLED:
                 _prov_rates = self._base_rates_per_model.get(name, {})
                 _prov_default = _prov_rates.get("_default")
+                # ── TELNYX-4.3: also check per-model last-resort estimates ──
+                # A provider is "served" if it has a measured per-model rate,
+                # a positive _default, OR a per-model last-resort entry
+                # (e.g. telnyx serves kimi-k3 at $2.70/M even before we have
+                # measured data).
+                _lr_per_model = _RPT_LAST_RESORT_RATES_PER_MODEL.get(name, {})
                 _model_served = (
                     model in _prov_rates
                     or (_prov_default is not None and _prov_default > 0)
+                    or (model in _lr_per_model and _lr_per_model[model] > 0)
                 )
                 if not _model_served:
                     # Provider can't serve this model → unreachable for it.

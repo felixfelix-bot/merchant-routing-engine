@@ -769,3 +769,144 @@ class TestLastPaceMults:
         snapshot["__injected__"] = 999.0
         # Re-read — the injected key must not persist internally.
         assert "__injected__" not in router.last_pace_mults
+
+
+# ── TELNYX-4.3: Telnyx in LiveRouter failover ────────────────────────────────
+
+
+class TestTelnyxFailover:
+    """TELNYX-4.3 gate tests: LiveRouter includes telnyx in failover candidates.
+
+    Verifies that:
+    - telnyx is in the default provider list (provider_names).
+    - _resolve_model_rate resolves kimi-k3 on telnyx to the per-model
+      last-resort rate ($2.70/M) from LAST_RESORT_RATES_PER_MODEL (added in 4.2),
+      not the blended $5.40/M from LAST_RESORT_RATES.
+    - kimi-k3 requests can failover to telnyx (kimi-k3 is NOT in
+      _OLLAMA_EXCLUSIVE_MODELS, so it is not short-circuited to ollama_cloud).
+    """
+
+    def test_telnyx_in_default_provider_names(self, tmp_db):
+        """GATE: telnyx is in the default provider list."""
+        router = LiveRouter(db_path=tmp_db)
+        names = router.provider_names
+        assert "telnyx" in names, (
+            f"telnyx must be in provider_names, got {names}"
+        )
+
+    def test_telnyx_in_external_providers(self):
+        """GATE: telnyx is in the _EXTERNAL_PROVIDERS tuple."""
+        from src.live_router import _EXTERNAL_PROVIDERS
+        assert "telnyx" in _EXTERNAL_PROVIDERS
+
+    def test_resolve_model_rate_telnyx_kimi_k3_last_resort(self):
+        """GATE: _resolve_model_rate('telnyx', 'kimi-k3') returns 2.70
+        (per-model last-resort) when no measured data is available.
+        """
+        from src.live_router import _resolve_model_rate
+        # Empty rates dict → no measured data, should fall to last-resort.
+        rate = _resolve_model_rate({}, "telnyx", "kimi-k3")
+        assert rate == pytest.approx(2.70), (
+            f"Expected 2.70 (per-model last-resort), got {rate}"
+        )
+
+    def test_resolve_model_rate_source_telnyx_kimi_k3(self):
+        """GATE: _resolve_model_rate_source returns ('last_resort', 2.70)
+        for telnyx/kimi-k3 when no measured data exists.
+        """
+        from src.live_router import _resolve_model_rate_source
+        rate, source = _resolve_model_rate_source({}, "telnyx", "kimi-k3")
+        assert rate == pytest.approx(2.70)
+        assert source == "last_resort", f"Expected 'last_resort', got {source}"
+
+    def test_resolve_model_rate_telnyx_glm_5_2_last_resort(self):
+        """GATE: _resolve_model_rate('telnyx', 'glm-5.2') returns 13.50
+        (premium-tier per-model last-resort).
+        """
+        from src.live_router import _resolve_model_rate
+        rate = _resolve_model_rate({}, "telnyx", "glm-5.2")
+        assert rate == pytest.approx(13.50), (
+            f"Expected 13.50 (premium per-model last-resort), got {rate}"
+        )
+
+    def test_measured_rate_takes_precedence_over_last_resort(self):
+        """GATE: when measured data exists, it takes precedence over
+        the per-model last-resort estimate.
+        """
+        from src.live_router import _resolve_model_rate_source
+        rates = {"telnyx": {"kimi-k3": 3.50, "_default": 5.40}}
+        rate, source = _resolve_model_rate_source(rates, "telnyx", "kimi-k3")
+        assert rate == pytest.approx(3.50)
+        assert source == "measured"
+
+    def test_kimi_k3_not_ollama_exclusive(self):
+        """GATE: 'kimi-k3' (without :cloud suffix) is NOT in
+        _OLLAMA_EXCLUSIVE_MODELS, so it can failover to telnyx.
+        (Only 'kimi-k3:cloud' is exclusive to ollama_cloud.)
+        """
+        from src.live_router import _OLLAMA_EXCLUSIVE_MODELS
+        assert "kimi-k3" not in _OLLAMA_EXCLUSIVE_MODELS, (
+            "kimi-k3 (without :cloud) must NOT be Ollama-exclusive — "
+            "otherwise it would be short-circuited to ollama_cloud and "
+            "never failover to telnyx."
+        )
+
+    def test_telnyx_serves_kimi_k3_via_last_resort(self):
+        """GATE: the _model_served detection in _do_select_failover
+        recognises telnyx as serving kimi-k3 via LAST_RESORT_RATES_PER_MODEL,
+        so it is NOT marked unreachable when per-model pricing is on.
+        """
+        from src.real_price_tracker import LAST_RESORT_RATES_PER_MODEL
+        lr_per_model = LAST_RESORT_RATES_PER_MODEL.get("telnyx", {})
+        assert "kimi-k3" in lr_per_model, (
+            "telnyx must have a kimi-k3 entry in LAST_RESORT_RATES_PER_MODEL"
+        )
+        assert lr_per_model["kimi-k3"] > 0
+
+    def test_kimi_k3_can_failover_to_telnyx(self, tmp_db):
+        """GATE: with per-model pricing on, when all cheaper providers are
+        exhausted/unhealthy, kimi-k3 failover includes telnyx as a candidate.
+
+        We verify by constructing a LiveRouter with telnyx as the only healthy
+        provider and checking that select_failover(model='kimi-k3') does not
+        return (None, None) — telnyx is a viable failover target.
+        """
+        # Construct with rates that include telnyx.
+        rates = {
+            "ours":          0.001,
+            "friend":        0.029,
+            "ollama_cloud":  0.024,
+            "ppq":           0.14,
+            "openrouter":    0.135,
+            "deepinfra":     1.30,
+            "telnyx":        5.40,
+        }
+        router = LiveRouter(db_path=tmp_db, converged_rates=rates)
+
+        # All providers exhausted except telnyx.
+        quota = {
+            "ours":         {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "friend":       {"used_pct": 100.0, "remaining": 0, "total": 2_000_000},
+            "ollama_cloud": {"used_pct": 100.0, "remaining": 0, "total": 500_000_000},
+            "ppq":          {"used_pct": 100.0, "remaining": 0, "total": float("inf")},
+            "openrouter":   {"used_pct": 100.0, "remaining": 0, "total": float("inf")},
+            "deepinfra":    {"used_pct": 100.0, "remaining": 0, "total": float("inf")},
+            "telnyx":       {"used_pct": 0.0, "remaining": float("inf")},
+        }
+        # Only telnyx is healthy.
+        health = {
+            "ours": False, "friend": False, "ollama_cloud": False,
+            "ppq": False, "openrouter": False, "deepinfra": False,
+            "telnyx": True,
+        }
+
+        (chosen, chosen_model), _ = router.select_failover(
+            quota_state=quota,
+            health_state=health,
+            peak=False,
+            model="kimi-k3",
+        )
+        # Telnyx should be chosen as the only viable provider.
+        assert chosen == "telnyx", (
+            f"Expected telnyx as failover for kimi-k3, got {chosen}"
+        )
