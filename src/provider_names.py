@@ -6,7 +6,7 @@ sources (proxy, DB, API) should normalize via :func:`normalize_provider_name`
 before using the name as a dict key, logging it, or comparing it.
 
 Canonical names:
-    ours, friend, ollama_cloud, ppq, openrouter, deepinfra, unknown
+    ours, friend, ollama_cloud, ppq, openrouter, deepinfra, telnyx, unknown
 
 Legacy/alias names that map to canonical:
     zai_ours  → ours
@@ -22,7 +22,7 @@ __all__ = ["normalize_provider_name", "CANONICAL_PROVIDERS"]
 #: The set of canonical provider names recognised across the codebase.
 CANONICAL_PROVIDERS: frozenset[str] = frozenset({
     "ours", "friend", "ollama_cloud", "ppq", "openrouter", "deepinfra",
-    "unknown",
+    "telnyx", "unknown",
 })
 
 # Legacy / alias → canonical mapping.  Names not in this dict pass through
