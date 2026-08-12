@@ -62,6 +62,9 @@ class TestCanonicalPassthrough:
     def test_deepinfra_passes_through(self):
         assert normalize_provider_name("deepinfra") == "deepinfra"
 
+    def test_telnyx_passes_through(self):
+        assert normalize_provider_name("telnyx") == "telnyx"
+
 
 # ── Unrecognised names pass through ─────────────────────────────────────────
 
@@ -99,7 +102,7 @@ class TestIdempotency:
 
     @pytest.mark.parametrize("name", [
         "ours", "friend", "ollama_cloud", "ppq", "openrouter",
-        "deepinfra", "unknown",
+        "deepinfra", "telnyx", "unknown",
         "zai_ours", "zai_friend", "manager", "worker",
     ])
     def test_double_normalize_is_stable(self, name):
