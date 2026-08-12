@@ -94,6 +94,22 @@ def default_db_path() -> str:
     )
 
 
+def _connect_db(db_path: str) -> sqlite3.Connection:
+    """Open a WAL-mode connection with busy_timeout for concurrent access.
+
+    The production proxy (zai_proxy.py) opens the same api_burn.db in WAL mode.
+    A plain ``sqlite3.connect()`` with no journal_mode pragma can hit a stale
+    ``-shm`` file left by the proxy and fail with ``disk I/O error``.  Setting
+    WAL + busy_timeout on every connection makes the collectors coexist with
+    the proxy's long-lived reader.
+    """
+    conn = sqlite3.connect(db_path, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    return conn
+
+
 def _resolve_starting(explicit: Optional[float]) -> float:
     """Resolve starting balance: explicit arg → ``PPQ_STARTING_BALANCE`` env → 20."""
     if explicit is not None:
@@ -276,7 +292,7 @@ def store_ppq_balance(db_path: str, balance: Optional[PPQBalance]) -> bool:
     if balance.starting > 0 and balance.balance is not None:
         consumed = balance.starting - balance.balance
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _connect_db(db_path)
         try:
             _ensure_table(conn)
             conn.execute(
@@ -313,7 +329,7 @@ def get_latest_ppq_balance(db_path: str) -> Optional[PPQBalance]:
     Starting balance is recovered from the stored limit_credits column.
     """
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _connect_db(db_path)
         try:
             _ensure_table(conn)
             row = conn.execute(

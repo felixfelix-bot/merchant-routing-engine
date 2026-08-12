@@ -105,6 +105,22 @@ def default_db_path() -> str:
     )
 
 
+def _connect_db(db_path: str) -> sqlite3.Connection:
+    """Open a WAL-mode connection with busy_timeout for concurrent access.
+
+    The production proxy (zai_proxy.py) opens the same api_burn.db in WAL mode.
+    A plain ``sqlite3.connect()`` with no journal_mode pragma can hit a stale
+    ``-shm`` file left by the proxy and fail with ``disk I/O error``.  Setting
+    WAL + busy_timeout on every connection makes the collectors coexist with
+    the proxy's long-lived reader.
+    """
+    conn = sqlite3.connect(db_path, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    return conn
+
+
 def _as_float(v: Any) -> Optional[float]:
     """Coerce to a finite float. ``None`` on None/bool/NaN/inf/non-numeric.
 
@@ -320,7 +336,7 @@ def store_openrouter_balance(
     if balance is None:
         return False
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _connect_db(db_path)
         try:
             _ensure_table(conn)
             conn.execute(
@@ -356,7 +372,7 @@ def store_openrouter_balance(
 def get_latest_openrouter_balance(db_path: str) -> Optional[OpenRouterBalance]:
     """Most recent stored OpenRouter balance, or None (never raises) if none."""
     try:
-        conn = sqlite3.connect(db_path)
+        conn = _connect_db(db_path)
         try:
             _ensure_table(conn)
             row = conn.execute(
