@@ -27,7 +27,7 @@ fi
 
 cd "$REPO" || { echo "⚠️ PPQ collector: cannot cd to $REPO"; exit 0; }
 
-out=$(python3 -m src.ppq_balance_collector 2>/dev/null)
+out=$(python3 -m src.balance_collectors --provider ppq 2>/dev/null)
 rc=$?
 
 if [ $rc -ne 0 ]; then

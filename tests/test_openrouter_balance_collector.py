@@ -27,7 +27,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.openrouter_balance_collector import (
+from src.balance_collectors import (
     OPENROUTER_DEFAULT_TIMEOUT,
     OPENROUTER_KEY_ENDPOINT,
     OpenRouterBalance,
@@ -263,7 +263,7 @@ class TestCollectHttp:
             raise AssertionError("must not call network without a key")
 
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen", boom
+            "src.balance_collectors.urllib.request.urlopen", boom
         )
         assert collect_openrouter_balance() is None
         assert called == []
@@ -272,7 +272,7 @@ class TestCollectHttp:
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         envelope = _resp(usage=3.0, limit=10.0, limit_remaining=7.0)
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen",
+            "src.balance_collectors.urllib.request.urlopen",
             lambda req, timeout=None: _FakeResponse(json.dumps(envelope)),
         )
         b = collect_openrouter_balance(api_key="sk-test")
@@ -289,7 +289,7 @@ class TestCollectHttp:
             return _FakeResponse(json.dumps(_resp()))
 
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen", fake_urlopen
+            "src.balance_collectors.urllib.request.urlopen", fake_urlopen
         )
         b = collect_openrouter_balance()
         assert b is not None
@@ -300,7 +300,7 @@ class TestCollectHttp:
 
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-bad")
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen",
+            "src.balance_collectors.urllib.request.urlopen",
             lambda req, timeout=None: (_ for _ in ()).throw(
                 urllib.error.HTTPError(
                     OPENROUTER_KEY_ENDPOINT, 401, "Unauthorized",
@@ -316,7 +316,7 @@ class TestCollectHttp:
 
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-x")
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen",
+            "src.balance_collectors.urllib.request.urlopen",
             lambda req, timeout=None: (_ for _ in ()).throw(
                 urllib.error.URLError("connection refused")
             ),
@@ -326,7 +326,7 @@ class TestCollectHttp:
     def test_non_200_returns_none(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-x")
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen",
+            "src.balance_collectors.urllib.request.urlopen",
             lambda req, timeout=None: _FakeResponse(b"{}", status=500),
         )
         assert collect_openrouter_balance() is None
@@ -334,7 +334,7 @@ class TestCollectHttp:
     def test_bad_json_returns_none(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-x")
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen",
+            "src.balance_collectors.urllib.request.urlopen",
             lambda req, timeout=None: _FakeResponse(b"<<<not json>>>"),
         )
         assert collect_openrouter_balance() is None
@@ -343,7 +343,7 @@ class TestCollectHttp:
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         envelope = _resp(usage=123.0, limit=None, limit_remaining=None)
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen",
+            "src.balance_collectors.urllib.request.urlopen",
             lambda req, timeout=None: _FakeResponse(json.dumps(envelope)),
         )
         b = collect_openrouter_balance(api_key="sk-u")
@@ -420,7 +420,7 @@ class TestCollectAndStore:
         db = str(tmp_path / "bal.db")
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen",
+            "src.balance_collectors.urllib.request.urlopen",
             lambda req, timeout=None: _FakeResponse(
                 json.dumps(_resp(usage=4.0, limit=10.0, limit_remaining=6.0))
             ),
@@ -442,7 +442,7 @@ class TestCollectAndStore:
     def test_collect_without_db_still_returns(self, tmp_path, monkeypatch):
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen",
+            "src.balance_collectors.urllib.request.urlopen",
             lambda req, timeout=None: _FakeResponse(
                 json.dumps(_resp(usage=0.0, limit=10.0, limit_remaining=10.0))
             ),
@@ -467,7 +467,7 @@ class TestDefaultDbPath:
 class TestMain:
     def test_no_key_returns_1(self, monkeypatch, capsys):
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-        rc = main([])
+        rc = main(["--provider", "openrouter"])
         assert rc == 1
         out = json.loads(capsys.readouterr().out)
         assert out["ok"] is False
@@ -479,12 +479,12 @@ class TestMain:
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-m")
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen",
+            "src.balance_collectors.urllib.request.urlopen",
             lambda req, timeout=None: _FakeResponse(
                 json.dumps(_resp(usage=1.0, limit=10.0, limit_remaining=9.0))
             ),
         )
-        rc = main(["--db", db])
+        rc = main(["--provider", "openrouter", "--db", db])
         assert rc == 0
         out = json.loads(capsys.readouterr().out)
         assert out["ok"] is True
@@ -497,12 +497,12 @@ class TestMain:
         db = str(tmp_path / "bal.db")
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-m")
         monkeypatch.setattr(
-            "src.openrouter_balance_collector.urllib.request.urlopen",
+            "src.balance_collectors.urllib.request.urlopen",
             lambda req, timeout=None: (_ for _ in ()).throw(
                 __import__("urllib.error", fromlist=["URLError"]).URLError("down")
             ),
         )
-        rc = main(["--db", db])
+        rc = main(["--provider", "openrouter", "--db", db])
         assert rc == 1
         out = json.loads(capsys.readouterr().out)
         assert out["ok"] is False

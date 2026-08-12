@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src import ppq_balance_collector as pc
+from src import balance_collectors as pc
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -263,7 +263,7 @@ class TestCLI:
     def test_success_exit0(self, monkeypatch, db_path, clean_env, capsys):
         _mock_urlopen(monkeypatch, json.dumps({"balance": 9.0}).encode())
         monkeypatch.setenv("PPQ_API_KEY", "k")
-        rc = pc.main(["--db", db_path])
+        rc = pc.main(["--provider", "ppq", "--db", db_path])
         assert rc == 0
         out = json.loads(capsys.readouterr().out)
         assert out["ok"] is True
@@ -271,7 +271,7 @@ class TestCLI:
         assert out["provider"] == "ppq"
 
     def test_failure_exit1(self, monkeypatch, db_path, clean_env, capsys):
-        rc = pc.main(["--db", db_path])  # no key
+        rc = pc.main(["--provider", "ppq", "--db", db_path])  # no key
         assert rc == 1
         out = json.loads(capsys.readouterr().out)
         assert out["ok"] is False
