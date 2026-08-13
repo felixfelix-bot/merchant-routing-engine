@@ -11,8 +11,12 @@ import json
 import urllib.request
 import urllib.error
 
-from .provider_funding_tracker import is_provider_funded, mark_unfunded, mark_funded
-from .reasoning_handler import is_content_empty
+try:
+    from .provider_funding_tracker import is_provider_funded, mark_unfunded, mark_funded
+    from .reasoning_handler import is_content_empty
+except ImportError:
+    from provider_funding_tracker import is_provider_funded, mark_unfunded, mark_funded
+    from reasoning_handler import is_content_empty
 
 
 FALLBACK_MODEL = "deepseek/deepseek-v4-flash"
