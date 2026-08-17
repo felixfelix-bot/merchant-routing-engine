@@ -104,9 +104,10 @@ class TestCompare:
 class TestAgreement:
     def test_agreement_when_same_provider(self, hook, sample_quota, all_healthy):
         """If both live and shadow choose same provider, agreement=1."""
-        # Off-peak: ours is cheapest (~$0.001/M marginal cost)
-        # optimizer should pick ours, matching the live choice
-        hook.compare("ours", "glm-5.2", 5000, sample_quota, all_healthy, peak=False)
+        # Off-peak: friend is cheapest (~$0.001/M marginal cost)
+        # optimizer should pick friend, matching the live choice
+        # (S3b: 'ours' retired — friend is the only flat-rate z.ai candidate)
+        hook.compare("friend", "glm-5.2", 5000, sample_quota, all_healthy, peak=False)
         assert hook.get_stats()["agreement_rate"] == 1.0
 
     def test_disagreement_during_peak(self, hook, all_healthy):
@@ -153,13 +154,61 @@ class TestModelMapping:
 class TestBurnRateTracking:
     def test_burn_rate_updates(self, hook, sample_quota, all_healthy):
         """Multiple calls should update consumption Kalman for serving provider."""
+        # S3b: 'ours' retired — friend is the flat-rate z.ai provider
         for i in range(5):
-            hook.compare("ours", "glm-5.2", 10000, sample_quota, all_healthy, False)
-        ck = hook._consumption_kalmans["ours"]
+            hook.compare("friend", "glm-5.2", 10000, sample_quota, all_healthy, False)
+        ck = hook._consumption_kalmans["friend"]
         assert ck.tokens_used == 50000  # 5 × 10000
 
     def test_burn_rate_not_updated_for_unserved(self, hook, sample_quota, all_healthy):
         """Tokens only attributed to the provider that served the request."""
-        hook.compare("ours", "glm-5.2", 10000, sample_quota, all_healthy, False)
-        friend_ck = hook._consumption_kalmans["friend"]
-        assert friend_ck.tokens_used == 0
+        hook.compare("friend", "glm-5.2", 10000, sample_quota, all_healthy, False)
+        ollama_ck = hook._consumption_kalmans["ollama_cloud"]
+        assert ollama_ck.tokens_used == 0
+
+
+class TestS3bOursRemoved:
+    """S3b (t_872743b5): the retired 'ours' z.ai key must NOT be a shadow
+    routing candidate.
+
+    The 'ours' key was disabled on 2026-08-15 and permanently retired per
+    Felix (friend-only policy, never re-add). The proxy-side shadow tap had
+    no health gating, so a dead 'ours' kept winning the price-first shadow
+    comparison and polluted routing_shadow_decisions with un-actionable
+    disagreements (~4.8k rows/24h). Live key handling is intentionally
+    untouched (live path is health-gated by design).
+    """
+
+    def test_ours_not_in_seed_sets(self):
+        from src import shadow_hook
+        assert "ours" not in shadow_hook._SEED_COSTS, (
+            "retired 'ours' key must not be a shadow candidate (S3b)"
+        )
+        assert "ours" not in shadow_hook._QUOTA_TOTALS
+
+    def test_hook_has_no_ours_provider(self, tmp_db):
+        hook = ShadowHook(db_path=tmp_db)
+        assert "ours" not in hook._price_kalmans
+        assert "ours" not in hook._consumption_kalmans
+        assert "ours" not in hook._burn_history
+
+    def test_shadow_never_proposes_ours(self, hook, sample_quota, all_healthy):
+        """Behavioral: no logged shadow decision may propose 'ours'."""
+        import sqlite3
+        hook.compare("friend", "glm-5.2", 5000, sample_quota, all_healthy, False)
+        hook.compare("friend", "glm-5.2", 5000, sample_quota, all_healthy, True)
+        conn = sqlite3.connect(hook._logger.db_path)
+        rows = conn.execute(
+            "SELECT DISTINCT shadow_provider FROM routing_shadow_decisions"
+        ).fetchall()
+        conn.close()
+        assert rows, "expected at least one shadow decision row"
+        assert all(r[0] != "ours" for r in rows), (
+            f"shadow proposed retired 'ours': {[r[0] for r in rows]}"
+        )
+
+    def test_legacy_live_ours_still_logs(self, hook, sample_quota, all_healthy):
+        """A legacy live='ours' report (dead key) must still log gracefully —
+        compare() NEVER raises and the decision row is still recorded."""
+        hook.compare("ours", "glm-5.2", 5000, sample_quota, all_healthy, False)
+        assert hook.get_stats()["total_decisions"] == 1

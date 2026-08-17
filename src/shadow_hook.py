@@ -57,8 +57,13 @@ __all__ = ["ShadowHook"]
 # RP-4: Real rates are resolved from real_price_tracker at init time. These
 # values mirror LAST_RESORT_RATES in real_price_tracker.py and are used ONLY
 # when the tracker is unavailable or returns no data.
+# S3b (t_872743b5, 2026-08-17): "ours" REMOVED from the shadow provider set.
+# The 'ours' z.ai key was disabled 2026-08-15 and permanently retired per
+# Felix (friend-only policy, never re-add). Shadow taps are not health-gated,
+# so keeping the dead key here let it win price-first comparisons and pollute
+# routing_shadow_decisions with ~4.8k un-actionable disagreements/24h.
+# Live key handling (live_router.py, providers.yaml) is untouched.
 _SEED_COSTS = {
-    "ours":         0.001,    # z.ai flat-rate → marginal $0, floored
     "friend":       0.001,    # shared z.ai subscription → marginal $0
     "ollama_cloud": 0.0155,   # measured included rate (pre-RP-3)
     "ppq":          0.14,     # known list price
@@ -68,7 +73,6 @@ _SEED_COSTS = {
 
 # Quota totals (approximate, for scarcity factor)
 _QUOTA_TOTALS = {
-    "ours":         2_000_000,    # ~2M tokens per 5h window
     "friend":       2_000_000,
     "ollama_cloud": 500_000_000,  # 500M tokens per 5h session window
     "ppq":          float("inf"),  # pay-per-token, no hard quota

@@ -162,3 +162,13 @@
 **Rationale**: When buying from the Routster network, price alone is insufficient. A provider advertising $0.02/M might be serving a cheaper, lower-quality model. Near-term, a whitelist of trusted npubs provides safety. Long-term, statistical quality verification (response latency distribution, token count distribution, content quality scoring) detects providers systematically underperforming.
 
 **Trade-off**: Whitelist limits network liquidity early on. Quality verification requires calibration data and adds latency. Phased approach: whitelist first, verification later.
+
+---
+
+## 17. Retired 'ours' z.ai key removed from shadow provider set (S3b, 2026-08-17)
+
+**Decision**: The 'ours' z.ai key is no longer a candidate in any shadow-routing provider set — removed from `src/shadow_hook.py` `_SEED_COSTS`/`_QUOTA_TOTALS` (MRE) and from the proxy's `_shadow_optimizer` tap registration (`~/.hermes/bot/zai_proxy.py`). Live key handling (`src/live_router.py`, `config/providers.yaml`) is untouched: the live path is health-gated by design and already excludes the disabled key via `.key_disabled_ours`.
+
+**Rationale**: The 'ours' key was disabled 2026-08-15 and permanently retired (friend-only policy, per Felix — never re-add). Shadow taps are read-only and NOT health-gated, so the dead key kept winning price-first comparisons at its historical $0.068/M rate, producing ~4.8k disagreeing shadow decisions/24h that polluted divergence analytics with un-actionable 'ours' proposals. Legacy `live_provider="ours"` reports (historical rows) still log gracefully — all Kalman dict lookups are membership-guarded.
+
+**Trade-off**: Shadow analytics lose the counterfactual "what if ours existed" data point. Accepted: the key can never come back, so the counterfactual is meaningless by policy.
