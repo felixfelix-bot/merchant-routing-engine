@@ -19,8 +19,19 @@ this module — it is a pure function of its registered provider state.
 """
 from __future__ import annotations
 
+import os
+import sys
+
 import math
 from typing import Any
+
+# ── Path bootstrap ──────────────────────────────────────────────────────────
+_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 from price_kalman import (
     MIN_EFFECTIVE_PRICE,
