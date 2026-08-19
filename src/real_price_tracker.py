@@ -148,18 +148,13 @@ __all__ = [
     "get_zai_per_model_rates",
     # ── Tunables / constants ────────────────────────────────────────────────────
     "LAST_RESORT_RATES",
-    "LAST_RESORT_RATES_PER_MODEL",
     "DEFAULT_DB_PATH",
-    "DEFAULT_BURN_DB_PATH",
-    "BALANCE_DELTA_PROVIDERS",
     "CACHE_TTL_SECONDS",
     "MIN_CALLS_FOR_RATE",
     "CHANGE_THRESHOLD",
     "CHANGE_RECENT_HOURS",
     "CHANGE_BASELINE_HOURS",
     "UNKNOWN_PROVIDER_FALLBACK",
-    # ── Balance-delta measured rate (ppq/openrouter) ───────────────────────────
-    "get_balance_delta_rate",
 ]
 
 _log = logging.getLogger(__name__)
@@ -169,22 +164,12 @@ _log = logging.getLogger(__name__)
 #: Production usage DB (where ``api_calls.cost_usd`` lives after RP-1/RP-2).
 DEFAULT_DB_PATH: str = os.path.expanduser("~/.hermes/bot/zai_usage.db")
 
-#: Burn DB (where ``provider_balances`` lives — balance deltas for ppq/openrouter).
-DEFAULT_BURN_DB_PATH: str = os.path.expanduser("~/.hermes/bot/api_burn.db")
-
-#: Providers whose real $/M is measured from credit-balance depletion rather
-#: than per-call ``cost_usd``. PPQ and OpenRouter APIs don't return per-call
-#: cost, so we measure from how much credit was consumed vs tokens routed.
-BALANCE_DELTA_PROVIDERS: tuple[str, ...] = ("ppq", "openrouter", "telnyx")
-
 #: Cache TTL. Prices do not change per-second; recompute at most every 5 minutes.
 CACHE_TTL_SECONDS: float = 300.0
 
 #: Minimum number of costed calls in the window before we trust the rate.
 #: Below this we return ``None`` (insufficient data) rather than a noisy number.
-#: Lowered from 100 → 50 so providers like DeepInfra (81 real costed calls)
-#: register as measured instead of falling through to the seed.
-MIN_CALLS_FOR_RATE: int = 50
+MIN_CALLS_FOR_RATE: int = 100
 
 #: Window for the "recent" rate used in change detection (24 hours).
 CHANGE_RECENT_HOURS: float = 24.0
@@ -212,25 +197,8 @@ LAST_RESORT_RATES: dict[str, float] = {
     "ollama_cloud":       0.0155,   # MEASURED included rate (pre-RP-3 observation)
     "ollama_cloud_extra": 0.15,     # above-quota rate (above PPQ $0.14/M so optimizer reroutes)
     "ppq":                0.14,     # known list price
-    "telnyx":             5.40,     # seed: blended kimi-k3 cost (2.70*3 + 13.50*1) / 4
     "openrouter":         0.135,    # known list price
     "deepinfra":          1.30,     # known list price
-}
-
-#: Per-model last-resort estimates. When ``model`` is given and the provider has
-#: a nested entry here, the per-model rate is used instead of the provider-level
-#: :data:`LAST_RESORT_RATES` value. This lets the router see the real cost spread
-#: between cheap models (kimi-k3 at $2.70/M) and expensive ones (glm-5.2 at
-#: $13.50/M) on the same provider, instead of a single blended number.
-#: The blended provider-level rate in :data:`LAST_RESORT_RATES` is the
-#: token-volume-weighted average of these per-model rates.
-LAST_RESORT_RATES_PER_MODEL: dict[str, dict[str, float]] = {
-    "telnyx": {
-        "kimi-k3":      2.70,    # Moonshot Kimi K3 — cheap tier
-        "kimi-k2.5":    2.70,    # Moonshot Kimi K2.5 — cheap tier
-        "minimax-m3":   2.70,    # MiniMax M3 — cheap tier
-        "glm-5.2":      13.50,   # z.ai GLM-5.2 — premium tier
-    },
 }
 
 # ── Trailing-rate configuration (T6) ─────────────────────────────────────────
@@ -247,7 +215,6 @@ PROVIDER_WINDOW_HOURS: dict[str, float] = {
     "ppq":          30 * 24,    # 720  — pay-per-token
     "deepinfra":    30 * 24,    # 720  — pay-per-token
     "openrouter":   30 * 24,    # 720  — pay-per-token
-    "telnyx":       30 * 24,    # 720  — pay-per-token
 }
 
 #: Cold-start seed $/M. Returned by :func:`get_trailing_rate_with_seed` only
@@ -264,7 +231,6 @@ SEED_RATES: dict[str, float] = {
     "ppq":          0.14,     # list price
     "openrouter":   0.135,    # list price
     "deepinfra":    1.30,     # all-time measured average (real)
-    "telnyx":       5.40,     # seed: blended kimi-k3 cost (2.70*3 + 13.50*1) / 4
 }
 
 #: Providers that must report a measured (non-seed) rate before the T6 gate
@@ -276,7 +242,6 @@ REQUIRED_RATE_PROVIDERS: tuple[str, ...] = (
     "ppq",
     "deepinfra",
     "openrouter",
-    "telnyx",
 )
 
 # ── z.ai amortized-rate model (Task T5) ──────────────────────────────────────
@@ -340,10 +305,6 @@ _zai_cache: dict[tuple[str, str], tuple[float, float]] = {}
 # amortized rate; the metered-vs-subscription split moves slowly.
 _zai_pm_cache: dict[tuple[str, str | None, str], tuple[float | None, float]] = {}
 
-# Balance-delta rate cache. key: (provider, usage_db, burn_db) → (rate, ts).
-# Same 5-min TTL as the cost_usd cache.
-_balance_delta_cache: dict[tuple[str, str, str], tuple[float | None, float]] = {}
-
 
 def clear_cache() -> None:
     """Drop every cached rate. Tests call this between assertions; production
@@ -353,7 +314,6 @@ def clear_cache() -> None:
         _trailing_cache.clear()
         _zai_cache.clear()
         _zai_pm_cache.clear()
-        _balance_delta_cache.clear()
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
@@ -449,10 +409,10 @@ def _ollama_api_rate(model: str | None) -> float | None:
     """
     try:
         from src.ollama_extra_usage import fetch_ollama_usage
-    except ImportError:
-        from ollama_extra_usage import fetch_ollama_usage
 
-    data = fetch_ollama_usage()
+        data = fetch_ollama_usage()
+    except Exception:
+        return None
     if not isinstance(data, dict):
         return None
     activity = data.get("activity")
@@ -477,127 +437,6 @@ def _ollama_api_rate(model: str | None) -> float | None:
     if rate != rate or rate < 0:
         return None
     return rate
-
-
-# ── Balance-delta measured rate (ppq/openrouter) ──────────────────────────────
-
-
-def get_balance_delta_rate(
-    provider: str,
-    model: str | None = None,
-    *,
-    usage_db_path: str | None = None,
-    burn_db_path: str | None = None,
-    _now: float | None = None,
-) -> float | None:
-    """Measure $/M from credit-balance depletion.
-
-    For providers (PPQ, OpenRouter) whose APIs do not return per-call cost,
-    we compute the effective rate from how much credit was consumed vs tokens
-    routed through them::
-
-        rate = credits_consumed / total_tokens * 1e6   ($/M)
-
-    Reads the ``provider_balances`` table in api_burn.db (first & last rows)
-    for credit consumption, and ``api_calls.total_tokens`` for volume.
-
-    Returns ``None`` on any error, insufficient data, or when ``provider``
-    is not in :data:`BALANCE_DELTA_PROVIDERS`. Cached for 5 min.
-    """
-    if provider not in BALANCE_DELTA_PROVIDERS:
-        return None
-
-    now = _now if _now is not None else time.time()
-    usage_db = _resolve_db(usage_db_path)
-    burn_db = burn_db_path or DEFAULT_BURN_DB_PATH
-
-    cache_key = (provider, usage_db, burn_db)
-    with _cache_lock:
-        cached = _balance_delta_cache.get(cache_key)
-    if cached is not None:
-        value, computed_at = cached
-        if (now - computed_at) < CACHE_TTL_SECONDS:
-            return value
-
-    try:
-        bconn = sqlite3.connect(burn_db, timeout=2)
-        try:
-            first = bconn.execute(
-                "SELECT collected_at, limit_remaining, usage, limit_credits "
-                "FROM provider_balances WHERE provider=? "
-                "ORDER BY collected_at ASC LIMIT 1",
-                (provider,),
-            ).fetchone()
-            last = bconn.execute(
-                "SELECT collected_at, limit_remaining, usage, limit_credits "
-                "FROM provider_balances WHERE provider=? "
-                "ORDER BY collected_at DESC LIMIT 1",
-                (provider,),
-            ).fetchone()
-        finally:
-            bconn.close()
-
-        if not first or not last or first[0] == last[0]:
-            _balance_delta_cache[cache_key] = (None, now)
-            return None
-
-        # Total credits consumed. Use MAX(usage) across all snapshots —
-        # handles both monotonic depletion (PPQ: credits only go down) and
-        # periodic resets (OpenRouter: daily limit resets, usage column
-        # returns to 0). MAX captures the peak all-time spend.
-        max_row = bconn.execute(
-            "SELECT MAX(usage) FROM provider_balances WHERE provider=?",
-            (provider,),
-        ).fetchone()
-        credits_used = float(max_row[0] or 0) if max_row else 0.0
-        if credits_used <= 0:
-            # Fall back to limit_remaining delta
-            credits_used = abs(float(first[1] or 0) - float(last[1] or 0))
-        if credits_used <= 0:
-            _balance_delta_cache[cache_key] = (None, now)
-            return None
-
-        # Total tokens for this provider (all-time — balance delta covers
-        # entire account lifetime, not just since collector started)
-        uconn = sqlite3.connect(usage_db, timeout=2)
-        try:
-            if provider == "ppq":
-                row = uconn.execute(
-                    "SELECT COALESCE(SUM(total_tokens), 0) FROM api_calls "
-                    "WHERE ppq_hit=1",
-                ).fetchone()
-            else:
-                row = uconn.execute(
-                    "SELECT COALESCE(SUM(total_tokens), 0) FROM api_calls "
-                    "WHERE key_name=?",
-                    (provider,),
-                ).fetchone()
-        finally:
-            uconn.close()
-
-        total_tokens = float(row[0] or 0)
-        if total_tokens <= 0:
-            _balance_delta_cache[cache_key] = (None, now)
-            return None
-
-        rate_per_m = (credits_used / total_tokens) * 1e6
-        if rate_per_m != rate_per_m or rate_per_m < 0:
-            _balance_delta_cache[cache_key] = (None, now)
-            return None
-
-        with _cache_lock:
-            _balance_delta_cache[cache_key] = (rate_per_m, now)
-
-        _log.info(
-            "real_price_tracker: %s balance-delta rate $%.6g/M "
-            "(credits_used=$%.4f, tokens=%.1fM)",
-            provider, rate_per_m, credits_used, total_tokens / 1e6,
-        )
-        return rate_per_m
-    except Exception:
-        _log.debug("real_price_tracker: balance-delta query failed", exc_info=True)
-        _balance_delta_cache[cache_key] = (None, now)
-        return None
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -1448,30 +1287,16 @@ def get_rate_with_fallback(
     1. :func:`get_real_rate` (the measured rate from ``api_calls.cost_usd``).
     2. For ``ollama_cloud`` only: the Ollama billing API
        (:func:`src.ollama_extra_usage.fetch_ollama_usage`).
-    3a. :data:`LAST_RESORT_RATES_PER_MODEL` (per-model estimates, when the
-       provider has a nested per-model entry and ``model`` is given).
-    3b. :data:`LAST_RESORT_RATES` (provider-level estimates).
+    3. :data:`LAST_RESORT_RATES` (clearly-marked estimates).
     4. :data:`UNKNOWN_PROVIDER_FALLBACK` (a conservative rate for a provider with
        no entry anywhere — logged at WARNING).
 
     Every non-measured result is logged so operators can see where real data is
     missing. Never raises.
     """
-    # 1a. For balance-delta providers (PPQ, OpenRouter), try credit-depletion
-    #     rate FIRST — their APIs don't return per-call cost_usd, so the
-    #     trailing rate always falls through to the seed estimate.
-    if provider in BALANCE_DELTA_PROVIDERS:
-        delta_rate = get_balance_delta_rate(
-            provider, model, usage_db_path=db_path, _now=_now
-        )
-        if delta_rate is not None:
-            return delta_rate
-
-    # 1b. Real, measured data — use provider-specific trailing window (T6)
-    #    so PPQ/DeepInfra/OpenRouter use their 30-day window instead of the
-    #    7-day default, which would miss older but still-valid measurements.
-    rate = get_trailing_rate(provider, model, db_path=db_path, _now=_now)
-    if rate is not None and rate > 0:
+    # 1. Real, measured data.
+    rate = get_real_rate(provider, model, db_path=db_path, _now=_now)
+    if rate is not None:
         return rate
 
     # 2. Ollama billing API (ollama_cloud only — it has a real per-model cost
@@ -1488,21 +1313,6 @@ def get_rate_with_fallback(
             return api_rate
 
     # 3. Last-resort hardcoded estimates.
-    # 3a. Per-model last-resort (finer granularity than provider-level).
-    if model is not None:
-        per_model = LAST_RESORT_RATES_PER_MODEL.get(provider, {})
-        model_estimate = per_model.get(model)
-        if model_estimate is not None:
-            _log.warning(
-                "real_price_tracker: no real data for %s/%s — using per-model "
-                "last-resort ESTIMATE $%.6g/M (this is not a measurement)",
-                provider,
-                model,
-                model_estimate,
-            )
-            return model_estimate
-
-    # 3b. Provider-level last-resort.
     estimate = LAST_RESORT_RATES.get(provider)
     if estimate is not None:
         _log.warning(

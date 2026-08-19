@@ -1019,18 +1019,41 @@ class LiveRouter:
         peak: bool = False,
         failure_counts: dict[str, int] | None = None,
         pace_windows: dict[str, list[tuple[float, float, float, float, float]]] | None = None,
-    ) -> str | None:
-        """Choose the primary provider (Phase 4 — not yet active).
+    ) -> tuple[str | None, str | None]:
+        """Choose the primary provider using the LiveRouter pricing engine.
 
-        Currently a stub. Returns None (no decision). Will be implemented
-        in Phase 4 when the LiveRouter takes over primary routing from
-        the production proxy's key-rotation logic.
+        Delegates to the same :meth:`_do_select_failover` logic that powers
+        the failover path — the optimizer considers ALL providers (z.ai keys,
+        ollama_cloud, DeepInfra, PPQ, OpenRouter, Telnyx) and picks the
+        cheapest healthy one with up-to-date Kalman prices.
+
+        Unlike the failover path (which is only consulted when both z.ai keys
+        are 429-exhausted), :meth:`select_primary` can return a z.ai key, an
+        external provider, or None (no viable provider). When used as the
+        primary routing decision it replaces ``best_key()`` for the canary
+        percentage of requests.
+
+        Returns:
+            ``(chosen_provider, chosen_model)`` — a provider name and the
+            model that provider should serve, or ``(None, None)`` if no
+            provider is viable. ``chosen_provider`` is guaranteed ``str``
+            when not ``None`` (not a nested tuple — safe for direct use in
+            routing dispatch).
+
+        Never raises — wraps everything in try/except. Any error returns
+        ``(None, None)`` so the canary fallback (``best_key()``) takes over.
         """
         try:
-            # Phase 4 stub — not yet implemented
-            return None
+            with self._lock:
+                (pick, pick_model), _ = self._do_select_failover(
+                    quota_state, health_state, peak,
+                    failure_counts, pace_windows, "coding", model,
+                )
+                if pick:
+                    return (pick, pick_model)
+                return (None, None)
         except Exception:
-            return None
+            return (None, None)
 
     def record_request(
         self,
