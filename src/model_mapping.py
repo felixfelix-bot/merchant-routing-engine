@@ -98,8 +98,9 @@ DEFAULT_MODEL: str = "glm-4.5-flash"
 #: them at runtime (see :func:`load_model_map`).
 MODEL_MAP: dict[tuple[str, str], str] = {
     # ── z.ai (ours + friend keys share the same catalogue) ───────────────
+    # glm-5.3: premium reasoning model, z.ai-exclusive (substitutes to glm-5.2 on Ollama)
     ("zai", "coding"):    "glm-5.2",
-    ("zai", "reasoning"): "glm-4.5",
+    ("zai", "reasoning"): "glm-5.3",
     ("zai", "chat"):      "glm-4.5-air",
     ("zai", "simple"):    "glm-4.5-flash",
 

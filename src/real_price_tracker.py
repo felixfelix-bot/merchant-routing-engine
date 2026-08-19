@@ -148,6 +148,7 @@ __all__ = [
     "get_zai_per_model_rates",
     # ── Tunables / constants ────────────────────────────────────────────────────
     "LAST_RESORT_RATES",
+    "LAST_RESORT_RATES_PER_MODEL",
     "DEFAULT_DB_PATH",
     "CACHE_TTL_SECONDS",
     "MIN_CALLS_FOR_RATE",
@@ -199,6 +200,24 @@ LAST_RESORT_RATES: dict[str, float] = {
     "ppq":                0.14,     # known list price
     "openrouter":         0.135,    # known list price
     "deepinfra":          1.30,     # known list price
+}
+
+#: Per-model last-resort rates ($/M). Keyed by provider, then model name.
+#: Used when the router asks for a specific model's rate but the provider-level
+#: :data:`LAST_RESORT_RATES` entry is too coarse. For z.ai flat-rate keys, the
+#: per-model entries ARE PREFERENCE WEIGHTS, not real costs — the subscription
+#: makes marginal cost ~$0 for every model. Entries prevent the optimizer from
+#: zero-weighting z.ai for GLM-5.3 when comparing against other providers.
+LAST_RESORT_RATES_PER_MODEL: dict[str, dict[str, float]] = {
+    # z.ai flat-rate subscription: glm-5.3 uses same PREFERENCE WEIGHT as glm-5.2
+    # ($0.001/M floor) since both models share the same subscription pool.
+    # This is NOT a real cost — it's a routing preference to keep z.ai eligible.
+    "ours": {
+        "glm-5.3": 0.001,  # PREFERENCE WEIGHT — same subscription as glm-5.2
+    },
+    "friend": {
+        "glm-5.3": 0.001,  # PREFERENCE WEIGHT — same subscription as glm-5.2
+    },
 }
 
 # ── Trailing-rate configuration (T6) ─────────────────────────────────────────

@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import src.live_router as lr
 from src.live_router import LiveRouter
-from src.routing_optimizer import RoutingOptimizer
+
 
 
 # Per-model rate seeds shared across tests.
@@ -73,9 +73,15 @@ def tmp_db():
 def _spy_optimizer(monkeypatch) -> dict[str, tuple[float, bool]]:
     """Wrap ``RoutingOptimizer.add_provider`` to capture, per provider, the
     ``(base_rate, breaker_tripped)`` the optimizer is fed. Still calls through
-    so routing proceeds normally."""
+    so routing proceeds normally.
+
+    NOTE: We patch ``lr.RoutingOptimizer.add_provider`` (the reference held by
+    ``live_router``) rather than ``src.routing_optimizer.RoutingOptimizer``
+    because a double-import (``routing_optimizer`` vs ``src.routing_optimizer``)
+    creates distinct class objects. Patching the wrong one is a no-op.
+    """
     captured: dict[str, tuple[float, bool]] = {}
-    orig = RoutingOptimizer.add_provider
+    orig = lr.RoutingOptimizer.add_provider  # patch the live_router ref
 
     def _spy(self_opt, name, price_kalman, **kw):
         captured[name] = (
@@ -84,7 +90,7 @@ def _spy_optimizer(monkeypatch) -> dict[str, tuple[float, bool]]:
         )
         return orig(self_opt, name, price_kalman, **kw)
 
-    monkeypatch.setattr(RoutingOptimizer, "add_provider", _spy)
+    monkeypatch.setattr(lr.RoutingOptimizer, "add_provider", _spy)
     return captured
 
 
@@ -650,4 +656,236 @@ class TestT7KimiRoutingFixIntegration:
         assert captured["ours"][0] < captured["ppq"][0]
         # The not-served gate is per-model only: with the switch off, openrouter
         # serves kimi-k3 via the flat blend and stays reachable.
+        assert captured["openrouter"][1] is False
+
+
+class TestGLM53PreferenceWeights:
+    """GLM-5.3 preference-weight entries in LAST_RESORT_RATES_PER_MODEL.
+
+    GLM-5.3 is a z.ai-exclusive premium reasoning model. On z.ai flat-rate
+    keys (ours/friend), its per-model rate is a PREFERENCE WEIGHT ($0.001/M),
+    NOT a real cost — the subscription makes marginal cost $0 for every model.
+    The entry keeps z.ai eligible for GLM-5.3 requests by avoiding the
+    UNKNOWN_MODEL_FALLBACK ($1.0/M) that would otherwise kill eligibility.
+    """
+
+    @pytest.fixture
+    def lr_per_model(self) -> dict[str, dict[str, float]]:
+        from src.real_price_tracker import LAST_RESORT_RATES_PER_MODEL
+
+        return LAST_RESORT_RATES_PER_MODEL
+
+    # ── Import integrity ─────────────────────────────────────────────────
+
+    def test_dict_exported_from_real_price_tracker(self, lr_per_model):
+        """LAST_RESORT_RATES_PER_MODEL must be exported from
+        real_price_tracker — live_router.py imports it."""
+        assert isinstance(lr_per_model, dict), (
+            "LAST_RESORT_RATES_PER_MODEL must be a dict, "
+            f"got {type(lr_per_model)}"
+        )
+
+    def test_ours_has_glm5_3_entry(self, lr_per_model):
+        """ours key must have a glm-5.3 entry — the 'ours' z.ai key serves
+        GLM-5.3 requests."""
+        ours = lr_per_model.get("ours", {})
+        assert "glm-5.3" in ours, (
+            "LAST_RESORT_RATES_PER_MODEL['ours'] must have 'glm-5.3' entry"
+        )
+
+    def test_friend_has_glm5_3_entry(self, lr_per_model):
+        """friend key must have a glm-5.3 entry — the 'friend' z.ai key also
+        serves GLM-5.3 requests."""
+        friend = lr_per_model.get("friend", {})
+        assert "glm-5.3" in friend, (
+            "LAST_RESORT_RATES_PER_MODEL['friend'] must have 'glm-5.3' entry"
+        )
+
+    def test_glm5_3_rate_is_preference_weight(self, lr_per_model):
+        """GLM-5.3 rate on z.ai keys must be $0.001/M (the PREFERENCE WEIGHT
+        floor), NOT a real cost — marginal cost on flat-rate subscription is
+        $0, but the optimizer needs a non-zero entry to keep z.ai eligible."""
+        rate_ours = lr_per_model["ours"]["glm-5.3"]
+        rate_friend = lr_per_model["friend"]["glm-5.3"]
+        assert rate_ours == pytest.approx(0.001), (
+            f"ours glm-5.3 rate should be 0.001 (preference weight), got {rate_ours}"
+        )
+        assert rate_friend == pytest.approx(0.001), (
+            f"friend glm-5.3 rate should be 0.001 (preference weight), got {rate_friend}"
+        )
+
+    def test_glm5_3_same_weight_as_glm5_2(self, lr_per_model):
+        """GLM-5.3 must have the SAME rate as GLM-5.2 on z.ai keys — both
+        models draw from the same flat-rate subscription pool."""
+        ours = lr_per_model["ours"]
+        assert ours["glm-5.3"] == ours.get("glm-5.2", ours["glm-5.3"]), (
+            "glm-5.3 should have the same rate as glm-5.2 on the 'ours' key "
+            "(same subscription)"
+        )
+
+    # ── Rate resolution ──────────────────────────────────────────────────
+
+    def test_resolve_model_rate_finds_glm5_3(self, lr_per_model):
+        """_resolve_model_rate must find glm-5.3 in the per-model rates dict
+        for z.ai providers and return the preference weight."""
+        rate = lr._resolve_model_rate(lr_per_model, "ours", "glm-5.3")
+        assert rate == pytest.approx(0.001), (
+            f"ours glm-5.3 resolved rate should be 0.001, got {rate}"
+        )
+
+    def test_resolve_model_rate_friend_glm5_3(self, lr_per_model):
+        """Same as above but for the friend key."""
+        rate = lr._resolve_model_rate(lr_per_model, "friend", "glm-5.3")
+        assert rate == pytest.approx(0.001)
+
+    def test_unknown_provider_glm5_3_falls_back(self, lr_per_model):
+        """A provider not in LAST_RESORT_RATES_PER_MODEL should fall back to
+        _default or UNKNOWN_MODEL_FALLBACK for glm-5.3 — never crash."""
+        rate = lr._resolve_model_rate(
+            lr_per_model, "nonexistent_provider", "glm-5.3"
+        )
+        assert rate > 0, "Rate must be positive for any provider+model"
+
+    def test_rate_source_tagged_last_resort(self, lr_per_model):
+        """_resolve_model_rate_source must tag glm-5.3 on z.ai as
+        'last_resort' when the model is not in the passed rates dict but
+        IS in the global LAST_RESORT_RATES_PER_MODEL."""
+        # Pass a rates dict that has the provider with a _default but NOT
+        # glm-5.3, so resolution falls through to step 2 (global
+        # _RPT_LAST_RESORT_RATES_PER_MODEL).
+        rates_without_model = {"ours": {"_default": 0.014}}
+        _rate, source = lr._resolve_model_rate_source(
+            rates_without_model, "ours", "glm-5.3"
+        )
+        assert source == "last_resort", (
+            f"ours glm-5.3 should be tagged 'last_resort' when model not in "
+            f"passed rates dict, got '{source}'"
+        )
+
+    def test_rate_source_unknown_fallback(self, lr_per_model):
+        """An unknown provider gets the 'fallback' tag."""
+        _rate, source = lr._resolve_model_rate_source(
+            lr_per_model, "nonexistent", "glm-5.3"
+        )
+        assert source == "fallback", (
+            f"nonexistent provider should be tagged 'fallback', got '{source}'"
+        )
+
+
+# ── GLM-5.3 crossover integration ─────────────────────────────────────────
+#
+# Verify LiveRouter's routing decision when model="glm-5.3" is requested:
+#   - When z.ai has quota, glm-5.3 routes to a z.ai key (ours/friend)
+#   - When z.ai is exhausted, glm-5.3 routes to ollama_cloud with glm-5.2 model
+#   - The per-model rate for glm-5.3 on z.ai is the preference weight (0.001),
+#     and on ollama_cloud falls back to _default (0.024).
+
+_T7_GLM53_PER_MODEL: dict[str, dict[str, float]] = {
+    "ours":         {"glm-5.3": 0.001, "glm-5.2": 0.014, "_default": 0.024},
+    "friend":       {"glm-5.3": 0.001, "glm-5.2": 0.017, "_default": 0.029},
+    "ollama_cloud": {"glm-5.2": 0.0155, "_default": 0.024},
+    "ppq":          {"deepseek-v4-flash": 0.14, "_default": 0.14},
+    "deepinfra":    {"deepseek-v4-flash": 1.30, "_default": 1.30},
+    "openrouter":   {"some-other-model": 0.135},
+}
+
+
+def _quota_zai_exhausted() -> dict[str, object]:
+    """z.ai keys exhausted; ollama and externals have ample quota."""
+    return {
+        "ours":           {"remaining": 0, "total": 2_000_000},
+        "friend":         {"remaining": 0, "total": 2_000_000},
+        "ollama_cloud":   {"remaining": 400_000_000, "total": 500_000_000},
+        "ppq":            {"remaining": float("inf")},
+        "openrouter":     {"remaining": float("inf")},
+        "deepinfra":      {"remaining": float("inf")},
+    }
+
+
+def _t7_glm53_router(tmp_db, monkeypatch, *, switch: bool):
+    """Hermetic LiveRouter for GLM-5.3 crossover scenarios."""
+    monkeypatch.setattr(lr, "_PER_MODEL_PRICING_ENABLED", switch)
+    monkeypatch.setattr(
+        lr, "_resolve_dynamic_base_rates_per_model", lambda dbp=None: {}
+    )
+    # Use the same flat rates as T7 (compatible with per-model rates).
+    router = LiveRouter(db_path=tmp_db, converged_rates=_T7_FLAT)
+    router._base_rates_per_model = _T7_GLM53_PER_MODEL
+    return router
+
+
+class TestGLM53CrossoverIntegration:
+    """GLM-5.3 routing decisions: z.ai when healthy → ollama when exhausted."""
+
+    def test_glm53_routes_to_zai_when_healthy(self, tmp_db, monkeypatch):
+        """With per-model pricing ON and z.ai healthy, glm-5.3 routes to a
+        z.ai key (ours or friend) — the cheapest server for glm-5.3 at the
+        preference weight ($0.001/M)."""
+        captured = _spy_optimizer(monkeypatch)
+        router = _t7_glm53_router(tmp_db, monkeypatch, switch=True)
+
+        (chosen, chosen_model), _ = router.select_failover(
+            quota_state=_quota_available(),
+            health_state=_all_healthy(),
+            peak=False,
+            model="glm-5.3",
+        )
+        # Optimizer sees glm-5.3's preference weight on z.ai keys.
+        assert captured["ours"][0] == pytest.approx(0.001, rel=1e-3)
+        # Optimizer sees ollama_cloud's _default for glm-5.3 (no per-model entry).
+        assert captured["ollama_cloud"][0] == pytest.approx(0.024, rel=1e-3)
+        # z.ai is cheaper than ollama for glm-5.3 → should pick z.ai.
+        assert captured["ours"][0] < captured["ollama_cloud"][0]
+        assert chosen in ("ours", "friend"), (
+            f"glm-5.3 with z.ai healthy: chose {chosen!r}, expected 'ours' or 'friend'"
+        )
+
+    def test_glm53_routes_to_ollama_when_zai_exhausted(self, tmp_db, monkeypatch):
+        """With z.ai exhausted, glm-5.3 routes to ollama_cloud — the
+        cheapest viable fallback at $0.024/M (_default)."""
+        captured = _spy_optimizer(monkeypatch)
+        router = _t7_glm53_router(tmp_db, monkeypatch, switch=True)
+
+        # Mark z.ai keys as unhealthy (exhausted). The router uses the health
+        # gate to filter exhausted providers regardless of quota pressure
+        # kill switches.
+        health = _all_healthy()
+        health["ours"] = False
+        health["friend"] = False
+
+        (chosen, chosen_model), _ = router.select_failover(
+            quota_state=_quota_available(),
+            health_state=health,
+            peak=False,
+            model="glm-5.3",
+        )
+        # z.ai keys are unhealthy → breaker tripped → filtered by optimizer.
+        assert captured["ours"][1] is True, (
+            "ours should be marked unreachable (exhausted)"
+        )
+        # ollama_cloud stays reachable via _default.
+        assert captured["ollama_cloud"][1] is False
+        # Router picks ollama_cloud as the cheapest viable fallback.
+        assert chosen == "ollama_cloud", (
+            f"glm-5.3 with z.ai exhausted: chose {chosen!r}, expected 'ollama_cloud'"
+        )
+
+    def test_glm53_kill_switch_off_uses_flat_blend(self, tmp_db, monkeypatch):
+        """With the kill switch OFF, glm-5.3 is priced at the flat per-provider
+        blend — same as the legacy path. z.ai keys stay on the $0.024/M flat
+        rate (not the preference weight)."""
+        captured = _spy_optimizer(monkeypatch)
+        router = _t7_glm53_router(tmp_db, monkeypatch, switch=False)
+
+        (chosen, _), _ = router.select_failover(
+            quota_state=_quota_available(),
+            health_state=_all_healthy(),
+            peak=False,
+            model="glm-5.3",
+        )
+        # Flat blend: ours at $0.024/M, ollama at $0.024/M — tied.
+        assert captured["ours"][0] == pytest.approx(0.024, rel=1e-3)
+        assert captured["ollama_cloud"][0] == pytest.approx(0.024, rel=1e-3)
+        # With kill switch off, the not-served gate is inactive — openrouter
+        # stays reachable even though it has no glm-5.3 entry.
         assert captured["openrouter"][1] is False

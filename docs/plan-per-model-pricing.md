@@ -1110,3 +1110,98 @@ select_failover(model="kimi-k3")
        ▼
    ((chosen_provider, "kimi-k3"), (fallback, fallback_model))
 ```
+
+---
+
+## Appendix D: GLM-5.3 Integration — Z.ai Preference Weights
+
+### D1. Context
+
+GLM-5.3 is z.ai's premium reasoning model. Its per-model pricing differs
+from pay-per-token providers because z.ai is a flat-rate subscription:
+
+| Dimension | z.ai (ours/friend) | Ollama Cloud | PPQ / OpenRouter / DeepInfra |
+|-----------|-------------------|-------------|------------------------------|
+| Pricing model | Flat subscription ($300/yr) | Subscription with quota | Pay-per-token |
+| Marginal cost per model | **$0** (same pool) | Blended in quota | Varied per model |
+| Per-model rate | PREFERENCE WEIGHT (routing preference) | Real cost (measured) | Real cost (measured) |
+
+**Key insight:** Every model on a z.ai key costs the same marginal amount
+(nothing extra), but the optimizer needs **non-zero rates for every model**
+to compare providers fairly. Without an entry, GLM-5.3 on z.ai gets the
+conservative `UNKNOWN_MODEL_FALLBACK ($1.0/M)`, which kills z.ai eligibility
+despite being the cheapest option.
+
+### D2. Preference Weight Convention
+
+All z.ai per-model entries use **$0.001/M** — same as the provider-level
+`LAST_RESORT_RATES` foundation. This is **not a real cost**. It is a
+routing-preference weight that:
+
+1. Keeps z.ai eligible for GLM-5.3 requests (avoids `UNKNOWN_MODEL_FALLBACK`).
+2. Gives z.ai the *same* weight for GLM-5.3 as for GLM-5.2 (same subscription).
+3. Prevents the provider-level `_default` from being the *only* viable z.ai
+   entry (which would skew comparisons).
+
+### D3. Crossover Math: z.ai GLM-5.3 vs Ollama GLM-5.2
+
+The optimizer applies **quota pressure** to each candidate. The crossover
+determines when GLM-5.2 on Ollama ($0.0155/M) becomes cheaper than GLM-5.3
+on z.ai ($0.001/M + pressure).
+
+**Variables:**
+
+| Symbol | Meaning |
+|--------|---------|
+| `P_zai` | Quota pressure on z.ai key (1.0 = no pressure) |
+| `P_oll` | Quota pressure on Ollama (1.0 = no pressure) |
+| `R_zai` | z.ai GLM-5.3 rate ($0.001/M — preference weight) |
+| `R_oll` | Ollama GLM-5.2 rate ($0.0155/M — real measured) |
+| `E_zai` | GLM-5.3 effective price = R_zai × P_zai |
+| `E_oll` | GLM-5.2 effective price = R_oll × P_oll |
+
+**Crossover condition:** `E_zai < E_oll` → z.ai wins.
+
+Substituting values:
+
+    R_zai × P_zai < R_oll × P_oll
+    0.001 × P_zai < 0.0155 × P_oll
+    P_zai < 15.5 × P_oll
+
+**Meaning:** z.ai GLM-5.3 wins as long as its pressure is less than **15.5×**
+Ollama's pressure. Since both keys share similar pressure profiles (both
+start at ~1.0 and rise together as quota burns), z.ai GLM-5.3 is
+overwhelmingly preferred for premium work.
+
+**Extreme case (friend key saturated):**
+
+If `P_zai = 50.0` (friend heavily saturated) and `P_oll = 1.0` (Ollama quiet):
+
+    0.001 × 50.0 < 0.0155 × 1.0
+    0.05 < 0.0155 → **FALSE**
+
+At 50× pressure on z.ai, Ollama GLM-5.2 becomes cheaper. This is the
+intended behavior: when the friend key is under heavy load, defer standard
+work to Ollama's slower, cheaper pool.
+
+### D4. Crossover Diagram
+
+```
+Pressure on Ollama (P_oll)
+  10.0 │
+       │   z.ai GLM-5.3 WINS
+       │   (friend preferred)
+   5.0 │
+       │   ╲
+       │    ╲  Crossover: P_zai = 15.5 × P_oll
+   2.0 │     ╲
+       │      ╲
+   1.0 │       ╲────────────────────── Ollama GLM-5.2 WINS
+       │        ╲                    (defer to cheaper pool)
+       └────────────────────────────────── Pressure on z.ai (P_zai)
+       1.0   5.0   10.0   15.5   20.0
+```
+
+Note: This crossover only applies when BOTH keys have quota. If a provider
+has zero quota, it is excluded regardless of price (see `_select_failover`
+quota check).

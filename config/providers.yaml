@@ -136,7 +136,7 @@ strategy:
   model_map:
     zai:
       coding: "glm-5.2"
-      reasoning: "glm-4.5"
+      reasoning: "glm-5.3"  # premium — z.ai exclusive (substitutes to glm-5.2 on Ollama)
       chat: "glm-4.5-air"
       simple: "glm-4.5-flash"
     deepinfra:
