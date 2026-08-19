@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LiveRouter — Wired vs Unwired Paths</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'JetBrains Mono', monospace;
+      background: #020617;
+      min-height: 100vh;
+      padding: 2rem;
+      color: white;
+    }
+    .container { max-width: 1200px; margin: 0 auto; }
+    .header { margin-bottom: 2rem; }
+    .header-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.5rem; }
+    .pulse-dot {
+      width: 12px; height: 12px; background: #34d399;
+      border-radius: 50%; animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+    h1 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.025em; }
+    .subtitle { color: #94a3b8; font-size: 0.875rem; margin-left: 1.75rem; }
+    .diagram-container {
+      background: rgba(15, 23, 42, 0.5); border-radius: 1rem;
+      border: 1px solid #1e293b; padding: 1.5rem; overflow-x: auto;
+    }
+    svg { width: 100%; min-width: 1050px; display: block; }
+    .cards {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem; margin-top: 2rem;
+    }
+    .card {
+      background: rgba(15, 23, 42, 0.5); border-radius: 0.75rem;
+      border: 1px solid #1e293b; padding: 1.25rem;
+    }
+    .card-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .card-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .card-dot.cyan { background: #22d3ee; }
+    .card-dot.emerald { background: #34d399; }
+    .card-dot.violet { background: #a78bfa; }
+    .card-dot.amber { background: #fbbf24; }
+    .card-dot.rose { background: #fb7185; }
+    .card-dot.orange { background: #fb923c; }
+    .card h3 { font-size: 0.875rem; font-weight: 600; }
+    .card ul { list-style: none; color: #94a3b8; font-size: 0.75rem; }
+    .card li { margin-bottom: 0.375rem; }
+    .footer { text-align: center; margin-top: 1.5rem; color: #475569; font-size: 0.75rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-row">
+        <div class="pulse-dot"></div>
+        <h1>LiveRouter — Wired vs Unwired Paths (Phase 1 Shadow)</h1>
+      </div>
+      <p class="subtitle">zai_proxy.py · merchant-routing-engine · shadow-only deployment · 2026-08-19</p>
+    </div>
+
+    <div class="diagram-container">
+      <svg viewBox="0 0 1100 820">
+        <defs>
+          <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#64748b" />
+          </marker>
+          <marker id="arrowhead-emerald" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#34d399" />
+          </marker>
+          <marker id="arrowhead-cyan" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee" />
+          </marker>
+          <marker id="arrowhead-amber" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24" />
+          </marker>
+          <marker id="arrowhead-rose" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+            <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185" />
+          </marker>
+          <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+          </pattern>
+        </defs>
+
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- PROXY BOUNDARY -->
+        <rect x="20" y="30" width="550" height="770" rx="12" fill="rgba(251, 191, 36, 0.05)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="32" y="50" fill="#fbbf24" font-size="10" font-weight="600">zai_proxy.py (~/.hermes/bot/zai_proxy.py) — 4741 lines</text>
+
+        <!-- ====== REQUEST FLOW ====== -->
+
+        <!-- Incoming Request -->
+        <rect x="90" y="70" width="120" height="50" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+        <text x="150" y="92" fill="white" font-size="11" font-weight="600" text-anchor="middle">Incoming Request</text>
+        <text x="150" y="108" fill="#94a3b8" font-size="9" text-anchor="middle">chat/completions</text>
+
+        <!-- best_key() Primary Router -->
+        <rect x="90" y="160" width="160" height="50" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="170" y="182" fill="white" font-size="11" font-weight="600" text-anchor="middle">best_key() Primary</text>
+        <text x="170" y="198" fill="#94a3b8" font-size="9" text-anchor="middle">z.ai key selection</text>
+
+        <line x1="150" y1="120" x2="170" y2="158" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+        <text x="136" y="140" fill="#94a3b8" font-size="8">route request</text>
+
+        <!-- ====== 4 LIVE CALL SITES ====== -->
+
+        <!-- Path A: Peak-hour pre-check -->
+        <rect x="90" y="260" width="200" height="40" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="190" y="278" fill="white" font-size="10" font-weight="600" text-anchor="middle">Path A: Peak-Hour Pre-Check</text>
+        <text x="190" y="292" fill="#94a3b8" font-size="8" text-anchor="middle">line 3779 · peak=True</text>
+
+        <line x1="170" y1="210" x2="170" y2="258" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+        <text x="155" y="235" fill="#94a3b8" font-size="8">peak hour?</text>
+
+        <!-- Path B: chosen=None -->
+        <rect x="90" y="330" width="200" height="40" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="190" y="348" fill="white" font-size="10" font-weight="600" text-anchor="middle">Path B: chosen=None</text>
+        <text x="190" y="362" fill="#94a3b8" font-size="8" text-anchor="middle">line 3882 · best_key() returned None</text>
+
+        <line x1="170" y1="300" x2="170" y2="328" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+
+        <text x="155" y="318" fill="#94a3b8" font-size="8">both keys exhausted?</text>
+
+        <!-- Path C: Phase 5 Gate -->
+        <rect x="90" y="400" width="200" height="40" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="190" y="418" fill="white" font-size="10" font-weight="600" text-anchor="middle">Path C: Phase 5 Gate</text>
+        <text x="190" y="432" fill="#94a3b8" font-size="8" text-anchor="middle">line 3130 · both keys exhausted</text>
+
+        <line x1="170" y1="370" x2="170" y2="398" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+
+        <!-- Path D: Retry-Loop Terminal -->
+        <rect x="90" y="470" width="200" height="40" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="190" y="488" fill="white" font-size="10" font-weight="600" text-anchor="middle">Path D: Retry-Loop Terminal</text>
+        <text x="190" y="502" fill="#94a3b8" font-size="8" text-anchor="middle">line 4157 · 429 during retry</text>
+
+        <line x1="170" y1="440" x2="170" y2="468" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+
+        <!-- ====== KILL SWITCH ====== -->
+
+        <!-- Kill Switch Gate -->
+        <rect x="90" y="550" width="200" height="40" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5"/>
+        <text x="190" y="568" fill="white" font-size="10" font-weight="600" text-anchor="middle">Kill Switch Check</text>
+        <text x="190" y="582" fill="#94a3b8" font-size="8" text-anchor="middle">.enable_live_routing exists?</text>
+
+        <line x1="190" y1="510" x2="190" y2="548" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+
+        <!-- Kill switch status indicator -->
+        <rect x="310" y="550" width="160" height="40" rx="6" fill="rgba(136, 19, 55, 0.4)" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="4,4"/>
+        <text x="390" y="568" fill="#fb7185" font-size="10" font-weight="600" text-anchor="middle">⛔ KILL SWITCH</text>
+        <text x="390" y="582" fill="#fb7185" font-size="8" text-anchor="middle">BLOCKED — file does NOT exist</text>
+
+        <line x1="290" y1="570" x2="308" y2="570" stroke="#fb7185" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead-rose)"/>
+
+        <!-- ====== HARDCORE FALLBACK CHAIN ====== -->
+
+        <rect x="90" y="640" width="200" height="80" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="190" y="660" fill="white" font-size="10" font-weight="600" text-anchor="middle">Hardcoded Fallback Chain</text>
+        <text x="190" y="678" fill="#94a3b8" font-size="8" text-anchor="middle">1. _try_ollama_cloud()</text>
+        <text x="190" y="692" fill="#94a3b8" font-size="8" text-anchor="middle">2. _try_external_failover()</text>
+        <text x="190" y="706" fill="#94a3b8" font-size="8" text-anchor="middle">3. 503 Service Unavailable</text>
+
+        <line x1="190" y1="590" x2="190" y2="638" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead-amber)"/>
+        <text x="150" y="620" fill="#fb7185" font-size="8">FALLBACK (kill switch blocked)</text>
+
+        <!-- ====== LIVROUTER MODULE ====== -->
+
+        <rect x="640" y="30" width="420" height="770" rx="12" fill="rgba(251, 191, 36, 0.05)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="8,4"/>
+        <text x="652" y="50" fill="#fbbf24" font-size="10" font-weight="600">merchant-routing-engine/src/ — LiveRouter Module</text>
+
+        <!-- _consult_live_router() wrapper -->
+        <rect x="670" y="80" width="180" height="50" rx="6" fill="rgba(8, 51, 68, 0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+        <text x="760" y="102" fill="white" font-size="10" font-weight="600" text-anchor="middle">_consult_live_router()</text>
+        <text x="760" y="118" fill="#94a3b8" font-size="9" text-anchor="middle">wrapper · line 1721</text>
+
+        <!-- Arrow from kill switch to LiveRouter (if enabled) -->
+        <path d="M 290 570 L 640 570 L 640 105 L 668 105" fill="none" stroke="#34d399" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#arrowhead-emerald)"/>
+        <text x="460" y="560" fill="#64748b" font-size="8">(wired path — would activate if kill switch exists)</text>
+
+        <!-- LiveRouter core -->
+        <rect x="670" y="170" width="180" height="50" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="760" y="192" fill="white" font-size="10" font-weight="600" text-anchor="middle">select_failover()</text>
+        <text x="760" y="208" fill="#94a3b8" font-size="9" text-anchor="middle">LiveRouter line 958</text>
+
+        <line x1="760" y1="130" x2="760" y2="168" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arrowhead-cyan)"/>
+
+        <!-- Internal components -->
+        <rect x="670" y="260" width="180" height="40" rx="6" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1.5"/>
+        <text x="760" y="278" fill="white" font-size="10" font-weight="600" text-anchor="middle">RoutingOptimizer</text>
+        <text x="760" y="292" fill="#94a3b8" font-size="8" text-anchor="middle">deterministic cost-minimizer</text>
+
+        <line x1="760" y1="220" x2="760" y2="258" stroke="#34d399" stroke-width="1.5" marker-end="url(#arrowhead-emerald)"/>
+
+        <rect x="670" y="340" width="180" height="40" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="760" y="358" fill="white" font-size="10" font-weight="600" text-anchor="middle">PriceKalman</text>
+        <text x="760" y="372" fill="#94a3b8" font-size="8" text-anchor="middle">per-provider Kalman filters</text>
+
+        <line x1="760" y1="300" x2="760" y2="338" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <rect x="670" y="420" width="180" height="40" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="760" y="438" fill="white" font-size="10" font-weight="600" text-anchor="middle">ConsumptionKalman</text>
+        <text x="760" y="452" fill="#94a3b8" font-size="8" text-anchor="middle">per-provider consumption</text>
+
+        <line x1="760" y1="380" x2="760" y2="418" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <rect x="670" y="500" width="180" height="40" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="760" y="518" fill="white" font-size="10" font-weight="600" text-anchor="middle">pricing_engine</text>
+        <text x="760" y="532" fill="#94a3b8" font-size="8" text-anchor="middle">quota/pace/scarcity factors</text>
+
+        <line x1="670" y1="360" x2="668" y2="360" stroke="#fbbf24" stroke-width="1.5"/>
+
+        <rect x="670" y="580" width="180" height="40" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="760" y="598" fill="white" font-size="10" font-weight="600" text-anchor="middle">real_price_tracker</text>
+        <text x="760" y="612" fill="#94a3b8" font-size="8" text-anchor="middle">per-model real rates</text>
+
+        <line x1="760" y1="540" x2="760" y2="578" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrowhead-amber)"/>
+
+        <rect x="670" y="660" width="180" height="40" rx="6" fill="rgba(120, 53, 15, 0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+        <text x="760" y="678" fill="white" font-size="10" font-weight="600" text-anchor="middle">model_mapping</text>
+        <text x="760" y="692" fill="#94a3b8" font-size="8" text-anchor="middle">provider → model map</text>
+
+        <line x1="760" y1="620" x2="760" y2="658" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrowhead-amber)"/>
+
+        <!-- ====== SHADOW TAP ====== -->
+
+        <rect x="310" y="260" width="200" height="50" rx="6" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="410" y="282" fill="white" font-size="10" font-weight="600" text-anchor="middle">Shadow Tap (line 3830)</text>
+        <text x="410" y="298" fill="#94a3b8" font-size="8" text-anchor="middle">bypasses kill switch</text>
+
+        <path d="M 290 285 L 308 285" fill="none" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <text x="300" y="270" fill="#fb923c" font-size="8">SHADOW</text>
+
+        <!-- Shadow data flow -->
+        <rect x="310" y="350" width="200" height="50" rx="6" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1.5"/>
+        <text x="410" y="372" fill="white" font-size="10" font-weight="600" text-anchor="middle">ShadowLogger</text>
+        <text x="410" y="388" fill="#94a3b8" font-size="8" text-anchor="middle">routing_shadow_decisions</text>
+
+        <line x1="410" y1="310" x2="410" y2="348" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- DB -->
+        <rect x="310" y="440" width="200" height="50" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+        <text x="410" y="462" fill="white" font-size="10" font-weight="600" text-anchor="middle">zai_usage.db</text>
+        <text x="410" y="478" fill="#94a3b8" font-size="8" text-anchor="middle">routing_shadow_decisions</text>
+
+        <line x1="410" y1="400" x2="410" y2="438" stroke="#a78bfa" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+        <!-- Shadow data volume -->
+        <rect x="310" y="530" width="200" height="40" rx="6" fill="rgba(76, 29, 149, 0.4)" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="4,4"/>
+        <text x="410" y="548" fill="white" font-size="10" font-weight="600" text-anchor="middle">95,648 rows collected</text>
+        <text x="410" y="562" fill="#94a3b8" font-size="8" text-anchor="middle">actively growing</text>
+
+        <line x1="410" y1="490" x2="410" y2="528" stroke="#a78bfa" stroke-width="1.5" stroke-dasharray="4,4" marker-end="url(#arrowhead)"/>
+
+        <!-- ====== SHADOW TAP DATA FLOW TO LIVROUTER ====== -->
+
+        <path d="M 510 285 L 640 285 L 640 195 L 668 195" fill="none" stroke="#fb923c" stroke-width="1.5" stroke-dasharray="5,5" marker-end="url(#arrowhead)"/>
+        <text x="560" y="278" fill="#fb923c" font-size="8">shadow select_failover()</text>
+
+        <!-- ====== LEGEND ====== -->
+
+        <rect x="670" y="740" width="180" height="50" rx="6" fill="rgba(30, 41, 59, 0.5)" stroke="#94a3b8" stroke-width="1"/>
+        <text x="760" y="758" fill="white" font-size="10" font-weight="600" text-anchor="middle">Legend</text>
+
+        <rect x="680" y="765" width="12" height="8" rx="2" fill="rgba(6, 78, 59, 0.4)" stroke="#34d399" stroke-width="1"/>
+        <text x="696" y="773" fill="#94a3b8" font-size="8">Wired (live) path</text>
+
+        <rect x="800" y="765" width="12" height="8" rx="2" fill="rgba(251, 146, 60, 0.3)" stroke="#fb923c" stroke-width="1"/>
+        <text x="816" y="773" fill="#94a3b8" font-size="8">Shadow path</text>
+      </svg>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot emerald"></div>
+          <h3>Wired Paths (Live Failover)</h3>
+        </div>
+        <ul>
+          <li>• 4 call sites in zai_proxy.py wire LiveRouter into failover</li>
+          <li>• All gated by .enable_live_routing kill switch (BLOCKED)</li>
+          <li>• Path A: Peak-hour pre-check (line 3779)</li>
+          <li>• Path B: best_key() returned None (line 3882)</li>
+          <li>• Path C: Phase 5 health gate (line 3130)</li>
+          <li>• Path D: Retry-loop terminal fallback (line 4157)</li>
+          <li>• All 4 fall through to hardcoded chain when blocked</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot orange"></div>
+          <h3>Shadow Path (Unwired / Monitoring)</h3>
+        </div>
+        <ul>
+          <li>• Shadow tap at line 3830 bypasses kill switch</li>
+          <li>• Calls select_failover() with live quota/health state</li>
+          <li>• Logs to routing_shadow_decisions table</li>
+          <li>• 95,648 rows collected — actively growing</li>
+          <li>• Zero production impact (read-only advisory)</li>
+          <li>• 7-day soak: compare live vs shadow decisions</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-dot violet"></div>
+          <h3>Phase 1 Status</h3>
+        </div>
+        <ul>
+          <li>• src/ deployed: Aug 19 — fresh from mre/src/</li>
+          <li>• Imports patched: src. prefix for proxy context</li>
+          <li>• Proxy restart: ✅ 14:29 IST</li>
+          <li>• Kill switch: ⛔ REMOVED (shadow only)</li>
+          <li>• LiveRouter init: ✅ log confirmed</li>
+          <li>• /quota endpoint: ✅ 200</li>
+          <li>• Shadow data: 95,648 rows and growing</li>
+        </ul>
+      </div>
+    </div>
+
+    <p class="footer">
+      LiveRouter Wiring · Phase 1 Shadow-Soak · 2026-08-19 · merchant-routing-engine
+    </p>
+  </div>
+</body>
+</html>
