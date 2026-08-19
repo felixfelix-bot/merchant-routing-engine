@@ -37,8 +37,13 @@ from typing import Any, Callable, Optional, Protocol
 _PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PARENT not in sys.path:
     sys.path.insert(0, _PARENT)
+# Also expose src/ itself so bare sibling imports (from X import ...) resolve
+# when this module is imported as part of the src package (proxy context).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-from src.provider_names import normalize_provider_name
+from provider_names import normalize_provider_name
 
 __all__ = ["RoutingAdvisor", "AdvisorDecision", "KNOWN_PROVIDERS"]
 

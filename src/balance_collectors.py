@@ -160,6 +160,11 @@ __all__ = [
     # ── Telnyx ──
     "TelnyxBalance",
     "collect_telnyx_balance",
+    "fetch_routstr_balance_sats",
+    "collect_routstr_balance",
+    "store_routstr_balance",
+    "get_latest_routstr_balance",
+    "routstr_quota_entry",
     "store_telnyx_balance",
     "get_latest_telnyx_balance",
     "collect_and_store_telnyx",
@@ -1592,6 +1597,265 @@ def _telnyx_main(argv: list[str]) -> int:
     return 0
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# ROUTSTR (our VPS2 node) — sats balance via GET /v1/wallet/balance
+# ═════════════════════════════════════════════════════════════════════════════
+
+ROUTSTR_KEY_ENV = "ROUTSTR_API_KEY"
+ROUTSTR_BASE_ENV = "ROUTSTR_BASE"
+ROUTSTR_STARTING_ENV = "ROUTSTR_STARTING_BALANCE_SATS"
+ROUTSTR_DEFAULT_BASE = "http://23.182.128.51:8009"
+_ROUTSTR_BALANCE_MAX_AGE = 20 * 60.0  # 2x the 5-min cron cadence
+
+_btc_usd_cache: dict = {"rate": None, "ts": 0.0}
+
+
+def _btc_usd_rate() -> float:
+    """BTC/USD rate: env override → cached CoinGecko fetch → 100000 default.
+
+    Needed to convert the routstr sats balance into USD for the shared
+    provider_balances schema. Never raises.
+    """
+    env_rate = os.environ.get("BTC_USD_RATE", "").strip()
+    if env_rate:
+        try:
+            return float(env_rate)
+        except ValueError:
+            pass
+    if _btc_usd_cache["rate"] is not None and time.time() - _btc_usd_cache["ts"] < 600:
+        return _btc_usd_cache["rate"]
+    try:
+        req = urllib.request.Request(
+            "https://api.coingecko.com/api/v3/simple/price"
+            "?ids=bitcoin&vs_currencies=usd",
+            headers={"User-Agent": "hermes-balance-collector"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            rate = float(data["bitcoin"]["usd"])
+            _btc_usd_cache["rate"] = rate
+            _btc_usd_cache["ts"] = time.time()
+            return rate
+    except Exception:
+        return 100000.0
+
+
+def fetch_routstr_balance_sats() -> tuple[Optional[int], Optional[str]]:
+    """Query our Routstr node's wallet: GET /v1/wallet/balance.
+
+    Returns (balance_sats, error_str). Never raises.
+    """
+    key = os.environ.get(ROUTSTR_KEY_ENV, "").strip()
+    if not key:
+        return None, "ROUTSTR_API_KEY not set"
+    base = os.environ.get(ROUTSTR_BASE_ENV, "").strip() or ROUTSTR_DEFAULT_BASE
+    try:
+        req = urllib.request.Request(
+            base + "/v1/wallet/balance",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            bal = data.get("balance")
+            if bal is not None:
+                return int(bal), None
+            return None, "balance field missing in response"
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}: {e.read().decode()[:200]}"
+    except Exception as exc:
+        return None, f"error: {exc}"
+
+
+def collect_routstr_balance(
+    starting_sats: Optional[int] = None,
+    *,
+    db_path: Optional[str] = None,
+) -> dict:
+    """Collect our Routstr node wallet balance (sats) and convert to USD.
+
+    Returns a plain dict (mirrors the TelnyxBalance fields used downstream):
+    starting / remaining_usd / total_spent_usd / usage_fraction / used_pct /
+    is_exhausted / collected_at / balance_sats / btc_usd / error.
+    Never raises.
+    """
+    starting = starting_sats
+    if starting is None:
+        env = os.environ.get(ROUTSTR_STARTING_ENV, "").strip()
+        try:
+            starting = int(env) if env else 25000
+        except ValueError:
+            starting = 25000
+
+    result = {
+        "starting": float(starting),
+        "balance_sats": None,
+        "btc_usd": None,
+        "remaining_usd": None,
+        "total_spent_usd": None,
+        "usage_fraction": None,
+        "used_pct": None,
+        "is_exhausted": None,
+        "collected_at": None,
+        "error": None,
+    }
+
+    sats, err = fetch_routstr_balance_sats()
+    if err is not None or sats is None:
+        result["error"] = err or "unknown error"
+        return result
+
+    btc_usd = _btc_usd_rate()
+    remaining_usd = sats / 1e8 * btc_usd
+    spent_usd = max(0.0, result["starting"] - remaining_usd)
+    frac = 1.0 - (remaining_usd / result["starting"]) if result["starting"] > 0 else 1.0
+
+    result.update({
+        "balance_sats": sats,
+        "btc_usd": btc_usd,
+        "remaining_usd": round(remaining_usd, 6),
+        "total_spent_usd": round(spent_usd, 6),
+        "usage_fraction": round(frac, 6),
+        "used_pct": round(frac * 100.0, 4),
+        "is_exhausted": sats <= 0,
+        "collected_at": time.time(),
+    })
+    return result
+
+
+def store_routstr_balance(db_path: str, balance: Optional[dict]) -> bool:
+    """Append one routstr snapshot to provider_balances. True on success."""
+    if balance is None or balance.get("error") is not None:
+        return False
+    try:
+        conn = _connect_db(db_path)
+        try:
+            _ensure_table(conn)
+            conn.execute(
+                f"""
+                INSERT INTO {PROVIDER_BALANCES_TABLE}
+                    (provider, collected_at, usage, limit_credits,
+                     limit_remaining, usage_fraction, is_unlimited,
+                     is_free_tier, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "routstr",
+                    balance["collected_at"],
+                    balance["total_spent_usd"],
+                    balance["starting"],
+                    balance["remaining_usd"],
+                    float(balance["usage_fraction"]),
+                    0,
+                    0,
+                    json.dumps({
+                        "balance_sats": balance["balance_sats"],
+                        "btc_usd": balance["btc_usd"],
+                    }),
+                ),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def get_latest_routstr_balance(db_path: str) -> Optional[dict]:
+    """Newest routstr row from provider_balances as the collector dict, or None."""
+    try:
+        conn = _connect_db(db_path)
+        try:
+            _ensure_table(conn)
+            row = conn.execute(
+                f"SELECT collected_at, usage, limit_credits, limit_remaining, "
+                f"usage_fraction, raw_json FROM {PROVIDER_BALANCES_TABLE} "
+                f"WHERE provider = 'routstr' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            collected_at, usage, limit_credits, limit_remaining, frac, raw = row
+            starting = float(limit_credits) if limit_credits is not None else 25000.0
+            remaining = float(limit_remaining) if limit_remaining is not None else 0.0
+            try:
+                extra = json.loads(raw) if raw else {}
+            except Exception:
+                extra = {}
+            out = {
+                "starting": starting,
+                "balance_sats": extra.get("balance_sats"),
+                "btc_usd": extra.get("btc_usd"),
+                "remaining_usd": remaining,
+                "total_spent_usd": float(usage) if usage is not None else 0.0,
+                "usage_fraction": float(frac) if frac is not None else 1.0,
+                "used_pct": (float(frac) * 100.0) if frac is not None else 100.0,
+                "is_exhausted": remaining <= 0.0,
+                "collected_at": float(collected_at) if collected_at is not None else 0.0,
+                "error": None,
+            }
+            return out
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def routstr_quota_entry(
+    db_path: Optional[str] = None,
+    *,
+    max_age: Optional[float] = _ROUTSTR_BALANCE_MAX_AGE,
+) -> dict:
+    """Build the ``quota_state['routstr']`` entry from the latest stored row.
+
+    Cold-start contract mirrors telnyx_quota_entry: no fresh row → {} (proxy
+    falls back to optimistic). Fresh row → used_pct/remaining/starting/...
+    Never raises.
+    """
+    db_path = db_path or default_db_path()
+    bal = get_latest_routstr_balance(db_path)
+    if bal is None:
+        return {}
+    if max_age is not None and (time.time() - bal["collected_at"]) > max_age:
+        return {}
+    return {
+        "used_pct": float(bal["used_pct"]),
+        "remaining": float(bal["remaining_usd"]),
+        "starting": float(bal["starting"]),
+        "is_exhausted": bool(bal["is_exhausted"]),
+        "collected_at": float(bal["collected_at"]),
+    }
+
+
+def _routstr_main(argv: list[str]) -> int:
+    """Routstr cron entrypoint: collect once, print JSON status, exit 0/1."""
+    db_override = None
+    if "--db" in argv:
+        db_override = argv[argv.index("--db") + 1]
+    db_path = db_override or default_db_path()
+    balance = collect_routstr_balance()
+    stored = store_routstr_balance(db_path, balance) if balance.get("error") is None else False
+    if not stored:
+        print(json.dumps({
+            "provider": "routstr",
+            "ok": False,
+            "error": balance.get("error") or "store failed",
+        }))
+        return 1
+    print(json.dumps({
+        "provider": "routstr",
+        "ok": True,
+        "balance_sats": balance["balance_sats"],
+        "btc_usd": balance["btc_usd"],
+        "starting": balance["starting"],
+        "remaining_usd": balance["remaining_usd"],
+        "used_pct": balance["used_pct"],
+        "is_exhausted": balance["is_exhausted"],
+        "collected_at": balance["collected_at"],
+        "db_path": db_path,
+    }, default=str))
+    return 0
+
+
 def main(argv: Optional[list] = None) -> int:
     """Unified cron entrypoint.
 
@@ -1614,11 +1878,13 @@ def main(argv: Optional[list] = None) -> int:
         return _openrouter_main(argv)
     elif provider == "telnyx":
         return _telnyx_main(argv)
+    elif provider == "routstr":
+        return _routstr_main(argv)
     else:
         print(json.dumps({
             "ok": False,
             "error": f"unknown or missing --provider (got {provider!r}); "
-                     f"use --provider ppq|openrouter|deepinfra|telnyx",
+                     f"use --provider ppq|openrouter|deepinfra|telnyx|routstr",
         }))
         return 1
 

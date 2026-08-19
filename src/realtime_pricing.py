@@ -39,7 +39,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Final
 
-from src.price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
+from price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
 
 __all__ = [
     "RateObservation",
@@ -675,6 +675,9 @@ class RealtimePricing:
         # function may be unavailable in some environments).
         try:
             from src.ollama_extra_usage import fetch_ollama_usage
+        except ImportError:
+            from ollama_extra_usage import fetch_ollama_usage
+        try:
             api_data = fetch_ollama_usage()
         except Exception:
             api_data = None

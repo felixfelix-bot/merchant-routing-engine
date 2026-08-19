@@ -42,12 +42,17 @@ from typing import Any
 _PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PARENT not in sys.path:
     sys.path.insert(0, _PARENT)
+# Also expose src/ itself so bare sibling imports (from X import ...) resolve
+# when this module is imported as part of the src package (proxy context).
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-from src.price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
-from src.consumption_kalman import ConsumptionKalman
-from src.routing_optimizer import RoutingOptimizer
-from src.provider_names import normalize_provider_name
-from src.pricing_engine import (
+from price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
+from consumption_kalman import ConsumptionKalman
+from routing_optimizer import RoutingOptimizer
+from provider_names import normalize_provider_name
+from pricing_engine import (
     pace_factor_multi,
     extra_usage_multiplier,
     EXTRA_USAGE_MULTIPLIER,
@@ -69,12 +74,12 @@ from src.pricing_engine import (
     TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
     TELNYX_STARTING_BALANCE,
 )
-from src.quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
-from src.cpvo_calculator import CPVOCalculator
-from src.model_mapping import get_model
-from src.ollama_quota_tracker import get_quota_status, DEFAULT_SESSION_LIMIT
-from src.ollama_extra_usage import fetch_ollama_usage, get_extra_usage_status
-from src.real_price_tracker import (
+from quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
+from cpvo_calculator import CPVOCalculator
+from model_mapping import get_model
+from ollama_quota_tracker import get_quota_status, DEFAULT_SESSION_LIMIT
+from ollama_extra_usage import fetch_ollama_usage, get_extra_usage_status
+from real_price_tracker import (
     get_real_rate,
     get_zai_amortized_rate,
     get_all_trailing_rates_per_model,

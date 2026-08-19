@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 
-from src.demand_kalman import DemandKalman
+from demand_kalman import DemandKalman
 
 __all__ = [
     "compute_profit",

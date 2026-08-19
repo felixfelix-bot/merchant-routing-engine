@@ -33,7 +33,15 @@ import time
 from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
-    from src.consumption_kalman import ConsumptionKalman
+    try:
+        from src.consumption_kalman import ConsumptionKalman
+    except ImportError:
+        from consumption_kalman import ConsumptionKalman
+else:
+    try:
+        from src.consumption_kalman import ConsumptionKalman
+    except ImportError:
+        from consumption_kalman import ConsumptionKalman
 
 __all__ = ["BurnRateAggregator"]
 

@@ -449,10 +449,10 @@ def _ollama_api_rate(model: str | None) -> float | None:
     """
     try:
         from src.ollama_extra_usage import fetch_ollama_usage
+    except ImportError:
+        from ollama_extra_usage import fetch_ollama_usage
 
-        data = fetch_ollama_usage()
-    except Exception:
-        return None
+    data = fetch_ollama_usage()
     if not isinstance(data, dict):
         return None
     activity = data.get("activity")

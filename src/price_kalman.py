@@ -78,7 +78,10 @@ def health_pricing_factor(failure_count: int = 0, breaker_tripped: bool = False)
         1 ≤ failure_count ≤ 2    → 1.5    (soft penalty, transient)
         failure_count ≤ 0        → 1.0    (no penalty)
     """
-    from src.pricing_engine import health_pricing_factor as _hpf
+    try:
+        from src.pricing_engine import health_pricing_factor as _hpf
+    except ImportError:
+        from pricing_engine import health_pricing_factor as _hpf
     return _hpf(failure_count, breaker_tripped)
 
 

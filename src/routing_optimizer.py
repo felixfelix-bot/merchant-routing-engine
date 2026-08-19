@@ -22,7 +22,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from src.price_kalman import (
+from price_kalman import (
     MIN_EFFECTIVE_PRICE,
     PriceKalman,
     health_pricing_factor,
