@@ -1,0 +1,36 @@
+# Budget backstop — plan §2.5 (CG-1), docs/PLAN-cost-gate-reform-v2-2026-08-21.md
+#
+# Hard ceiling on PAID (pay-per-token) spend, fleet-wide, per UTC day.
+# Subscription routes (z.ai keys, ollama_cloud included quota) are NEVER
+# blocked by this backstop — it exists to kill the routstrd-class spill
+# ($18.81 on 2026-08-21, plan §1) where a moment of cheap-tier degradation
+# silently routed 18.8M tokens through a ~$1/M paid tier.
+#
+# Consumed by: src/cost_gate.py (evaluate_cost_gate via the CG-7 CLI),
+# src/paid_tier_guard.py (CG-6 proxy failover filter — shared cap).
+# Owner: Felix.  Escape hatch: Q6 override, scope "budget" (CG-4 marker
+# ~/.hermes/bot/.cost_gate_override) — never the freeze marker or
+# dead/locked-key hard blocks.
+#
+# Missing / unparsable file → DENY budget_unconfigured (fail-closed, §5).
+
+daily_cap_usd: 15.0
+
+# WARN when rolling paid spend crosses this % of the cap (still ALLOWs).
+warn_at_pct: 50
+
+# Providers the backstop can DENY.  Anything not listed is a subscription
+# route and is never blocked by this file.
+paid_tiers:
+  - routstrd
+  - telnyx
+  - openrouter
+  - ppq
+  - deepinfra
+  - ollama_cloud_above_quota   # ollama_cloud spend above included quota ($0.15/M)
+
+# Documentation of the never-blocked routes (resolve_route_tier default).
+subscription_routes_never_blocked:
+  - zai_ours
+  - zai_friend
+  - ollama_cloud_included
