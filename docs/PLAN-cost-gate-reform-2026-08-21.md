@@ -1,5 +1,8 @@
 # PLAN: Quota Gate → Cost Gate Reform (CG-1..CG-6)
 
+> **SUPERSEDED (2026-08-21)** by `docs/PLAN-cost-gate-reform-v2-2026-08-21.md`
+> (Felix answered Q1–Q10; percentile gate design; routstrd anomaly; CG-1..CG-9).
+
 **Author:** merchant-routing CW consultant (GLM-5.2, manager-profile session)
 **Date:** 2026-08-21
 **Input:** `docs/HANDOVER-cost-gate-reform-2026-08-21.md` (read in full)
