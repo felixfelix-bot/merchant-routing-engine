@@ -84,6 +84,12 @@ earnings source). **Last-7d sats earnings: UNREAD — out of scope.**
 
 ## §2 INTEGRATION DESIGN (additive only — nothing overwritten)
 
+> **Implementation status (2026-08-21, OX-1 / t_ce6edf86):** guard logic shipped as a pure module
+> `src/promo_tier.py` (tests: `tests/test_promo_tier.py`; repo-side config fixture: `config/providers.yaml`
+> `oxalpha:` block). Wiring note: nothing here is live — OX-2 wires the module into `zai_proxy.py` and the
+> live providers.yaml; the module is inert without config (§6). p20 filter helper handed to CG-2:
+> `promo_tier.filter_promo_rows()` / `promo_tier.promo_exclusion_sql()`.
+
 ### 2.1 New tier in `providers.yaml` (repo config + live proxy config)
 
 ```yaml
@@ -204,6 +210,10 @@ GATE (quality-gates v3.1.0 — required before task close):
 - **Files:** `src/promo_tier.py`, `tests/test_promo_tier.py`, `config/providers.yaml` (repo copy, additive block), docs update (this file §2 marked implemented).
 - **Tests:** expiry flip math; charge→disable→anomaly event ordering; filter excludes promo rows from synthetic p20 window; allowlist rejection paths.
 - **Deps:** none (composes with CG-1 interface; hands filter helper to CG-2). **Worker:** worker-admin. **Effort:** 0.5 d.
+- **Status: ✅ implemented 2026-08-21 (t_ce6edf86):** `src/promo_tier.py` + `tests/test_promo_tier.py`
+  (73 tests green) + additive `config/providers.yaml` block — expiry flip, cost>0 kill (once) +
+  anomaly row, 402 disable, promo tag + p20 filter, allowlist, ADR-004 floor, backoff constants.
+  Awaiting cross-family review before merge.
 
 ### OX-2 — Proxy wiring of the oxalpha tier (production touch)
 - **Scope:** live `~/.hermes/bot/config/providers.yaml` additive `oxalpha:` block (from OX-1 fixture); `zai_proxy.py` — new tier in `EXTERNAL_PROVIDERS`-style registry reading the new key env, scoped `vision`/`bulk_summarize` task-type routing (X-Task-Type opt-in, allowlist-enforced), 429 backoff, spend-guard hook calling OX-1 module; key provisioning per D6 ($0-limit key preferred); service restart + revert note per AGENTS.md.

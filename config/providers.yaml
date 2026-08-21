@@ -107,6 +107,26 @@ external:
         cost_per_1m_input: 0.15
         cost_per_1m_output: 0.60
 
+# ── oxalpha (PROMO tier — stealth/ox-alpha free promo on OpenRouter) ────────
+# ADDITIVE entry (OX-1, docs/PLAN-oxalpha-promo-2026-08-21.md §2.1, Felix
+# approved 2026-08-21 D1–D6). Nothing above this block changes. Delete this
+# block + restart proxy to fully remove the tier (plan §6). Guard logic lives
+# in src/promo_tier.py (pure, tested). NOT wired into any live routing path
+# until OX-2 + Felix D7 approval — this is a repo-side fixture only.
+oxalpha:
+  base_url: "https://openrouter.ai/api/v1"
+  key_env: "OPENROUTER_OXALPHA_KEY"     # NEW $0-spend-limit key (plan §2.4/D6); main OPENROUTER_API_KEY stays dormant
+  headers: { HTTP-Referer: "https://hermes.local", X-Title: "Hermes Agent" }
+  pricing_model: promo_zero
+  promo:
+    expires_at: "2026-08-28T00:00:00Z"  # conservative hard deadline (D3; community: Aug 26–28 fuzzy)
+    post_promo_pessimistic_per_m: { input: 10.0, output: 30.0 }  # safety flip — priced OUT, not a market estimate
+    verified_rate: { input: 0.0, output: 0.0 }   # observed 2026-08-21 (plan §0.3 probe)
+  budget_usd: 0                          # ANY nonzero charge → tier disable + anomaly_events row (plan §2.4)
+  data_sensitivity: allowlist            # plan §2.5
+  allowlist_task_types: [vision, bulk_summarize, shadow_eval]
+  rate_limit_backoff_s: [60, 120, 300]   # 429 backoff, then circuit breaker 5 fails / 300 s (plan §2.6)
+
 # ── Strategy configuration ─────────────────────────────────────────────────
 strategy:
   # Minimum effective price — never zero, even for free providers (ADR-004)
