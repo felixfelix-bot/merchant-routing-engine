@@ -9,6 +9,35 @@
 
 ---
 
+## Changelog
+
+**v2.1 — subscription-amortized pricing (2026-08-21, later same day).**
+Felix correction: *"zai isn't free. I paid 80 USD for a 1 month subscription.
+Make sure prices are calculated correctly using the monthly subscription and
+the quota pressure."* v2's implicit $0 zai baseline is wrong; this revision
+fixes it throughout:
+
+- **§0.5 (NEW)** — subscription inventory + entitlement-amortized baselines:
+  zai friend **$0.0043/M** ($80/mo ÷ ≈18.45B token entitlement), zai ours
+  **$0.0084/M** ($155/mo, entitlement provisional), ollama_cloud already
+  amortized by tracker ($0.0155/M measured, $100/mo Max plan); all other
+  providers pay-per-use. Gate prices at ENTITLEMENT; realized amortized cost
+  (friend $0.081/M Aug-to-date) is reported, not gated.
+- **§2.1/§2.2** — gate metric is now `effective_zai_price(t) = baseline ×
+  pressure(u_5h × u_week × u_month) × peak_mult`, priced at Kalman-FORECAST
+  end-state pressure over the task's expected duration.
+- **CG-2** — `/v1/pricing` exposes baseline (entitlement + realized),
+  per-window usage fractions, pressure multiplier, effective price now and
+  forecast (+5/+15/+60 min, `?horizon_min=`); fixes `providers.yaml`
+  `friend.monthly_fee_usd: 0 → 80` (the free-tier artifact).
+- **CG-6** — paid failover candidates compared against zai OPPORTUNITY price
+  (was $0 → never compared). Crossovers: zai friend > ollama at u≈0.89
+  single-window (u≈0.71 during peak); zai > routstrd $1/M only at u≈0.998 —
+  paid per-token tiers are effectively never price-eligible while any
+  subscription route is finite.
+
+---
+
 ## 0. Decision Ledger (Felix, 2026-08-21 — all incorporated)
 
 | Q | Decision | Design consequence |
@@ -23,13 +52,102 @@
 | Q8 | RESOLVED — skill lives at `~/.hermes/profiles/manager/skills/mlops/price-first-api-routing/` (verified: SKILL.md + 25 references). v1's reference was a wrong path; **no recreation** | Reference fixed throughout; root-skill list unchanged |
 | Q9 | **Consolidate ALL 31 crons** onto the new gate, embracing live router + dynamic prices | CG-8 sweeps every entry point (fixes review F1's 7-cron split) |
 | Q10 | **Strict fail-closed on infra-down**: block + loud log. Escape hatch via Q6 override | v1 §3's "degrade to legacy verdict" row DELETED (review F4 resolved the other way) |
+| Q11 | **zai is a PAID subscription** — "I paid 80 USD for a 1 month subscription" (friend key); prices must use the monthly fee × quota pressure | §0.5 baselines; §2.1 gate metric; CG-2 exposure; CG-6 opportunity-cost comparator |
+
+---
+
+## 0.5 Subscription Inventory & Amortized Baselines (v2.1 — verified 2026-08-21)
+
+**Inventory** (checked against `config/providers.yaml`, live `GET /quota`, and
+`zai_usage.db`):
+
+| Provider | Plan | Fee | Quota entitlement | Baseline $/M (gate) |
+|---|---|---|---|---|
+| zai **friend** | GLM coding plan | **$80/mo** (Felix, 2026-08-21) | ≈**18.45B tokens/mo** (estimated, below) | **$0.0043** |
+| zai **ours** | GLM coding plan | $155/mo (`providers.yaml`) | unmeasured; 18.45B assumed until CG-2 logs capacity | $0.0084 (provisional) |
+| ollama_cloud | Max plan | $100/mo | 500M/5h + 3.5B/wk included; $0.15/M above (tracker-sourced, RP-4) | already subscription-amortized by tracker — measured **$0.0155/M**, unchanged |
+| routstrd / telnyx / ppq / openrouter / deepinfra | — | none (ecash/credit wallets) | pay-per-use | catalog/measured — unchanged |
+
+**Entitlement estimate (friend):** the z.ai quota API exposes only `used_pct`,
+never absolute tokens. `kalman_samples` recorded the friend **monthly window
+at 5.0% used** on 2026-08-18 12:18, by which point `api_calls` shows 922.7M
+tokens served on friend → entitlement ≈ 922.7M ÷ 0.05 ≈ **18.45B tokens/mo**.
+Single-observation estimate: CG-2 logs `estimated_capacity_tokens`
+(burn_predictor's capacity estimator: `burn_rate × elapsed ÷ used_pct`)
+hourly and Kalman-smooths it. Until confidence is established the denominator
+falls back to trailing-30d usage — conservative (pricier zai).
+
+**Entitlement vs realized — the gate uses ENTITLEMENT; realized is reported.**
+
+- Realized Aug-to-date: friend $80 ÷ 983.9M = **$0.081/M** (≈19× entitlement);
+  ours $155 ÷ 209.0M = **$0.74/M**. We are on pace for <10% of the friend
+  plan's monthly entitlement — the binding constraint is the **5h window**
+  (observed at 100% on 08-18), not monthly volume.
+- Why entitlement gates: (1) **stability** — a usage-amortized baseline starts
+  at ∞ on day 1 and decays all month, inverting incentives (defer early,
+  binge late) and smearing the p20 band with baseline drift; (2) **no
+  double-counting** — pressure(u_month) already rises with monthly usage while
+  a usage-based baseline falls; the two signals fight; (3) **architecture** —
+  realized pricing ($0.081/M) would rank friend ~5× ABOVE ollama_cloud,
+  inverting the fleet contra AGENTS.md ("z.ai flat rate is always the
+  primary") and Felix's squeeze-cheap-keys asymptote decision; (4)
+  **economics** — dispatch prices marginal opportunity cost: an unused
+  entitled token costs its entitlement rate, a depleting window costs more
+  (pressure), an exhausted window costs ∞.
+- Realized $/M + entitlement utilization % ship in `/v1/pricing` and a monthly
+  finance note (subscription-value audit — at ~8% utilization the friend plan
+  is over-sized or under-used; Felix's call, informed by data). Key renewals
+  ($80/$155/$100) are finance line items, not gate inputs; the budget backstop
+  (§2.5) still scopes per-token paid tiers only.
+
+**Effective price model (per zai key; this is exactly the composition
+`src/pricing_engine.compute_effective_price` already performs — v2.1 changes
+only the base rate fed in):**
+
+```
+effective_zai_price(t) = baseline_$per_M (entitlement, this section)
+                       × P(u_5h, u_week, u_month)      # RP-EXP superposition
+                       × peak_mult(t)                  # 3.0, UTC 06–09, zai only
+
+P = Π_windows 1 + 0.5·t/(1−t),  t = (u − 0.60)/0.40    # onset 0.60, K=0.5
+    → 1.5× at u=0.80, 2.5× at 0.90, +∞ at u ≥ 1.0 (hard limit)
+```
+
+**Worked table (friend baseline $0.0043/M):**
+
+| u_5h | u_week | u_month | pressure | $/M | peak $/M | vs ollama $0.0155 | vs routstrd $1.00 |
+|---|---|---|---|---|---|---|---|
+| 0.60 | 0.60 | 0.05 | ×1.0 | $0.0043 | $0.013 | cheaper | cheaper |
+| 0.80 | 0.60 | 0.05 | ×1.5 | $0.0065 | $0.020 | cheaper / pricier at peak | cheaper |
+| 0.90 | 0.70 | 0.10 | ×2.9 | $0.013 | $0.038 | ~parity / pricier | cheaper |
+| 0.95 | 0.80 | 0.10 | ×6.7 | $0.029 | $0.087 | **pricier** | cheaper |
+| 0.98 | 0.90 | 0.20 | ×26 | $0.113 | $0.34 | pricier | cheaper |
+| 0.99 | 0.95 | 0.30 | ×92 | $0.40 | $1.19 | pricier | cheaper / pricier at peak |
+| 0.995 | 0.98 | 0.50 | ×425 | $1.83 | $5.5 | pricier | **pricier** |
+
+**Crossover points (single window unless noted):**
+
+| Comparison | friend ($0.0043/M) | ours ($0.0084/M) |
+|---|---|---|
+| > ollama_cloud $0.0155/M | **u ≈ 0.89** | u ≈ 0.78 |
+| > ollama during peak (×3) | **u ≈ 0.71** | any u (base×3 = $0.025 > $0.0155) |
+| > routstrd $1.00/M | **u ≈ 0.998** | u ≈ 0.997 |
+| > routstrd, 5h×weekly superposed | u_5h ≈ 0.995 ∧ u_week ≈ 0.97 | u_5h ≈ 0.99 ∧ u_week ≈ 0.97 |
+
+Reading: with real baselines zai stays cheapest until deep depletion — the
+pressure curves (not the baseline) do the diverting, per Felix's "squeeze
+cheap keys as long as possible" asymptote decision. routstrd beats friend only
+in the last ~0.2% of a window, i.e. effectively only when a zai window is
+hard-exhausted (+∞) — and then it must still beat ollama ($0.0155–$0.15/M),
+which it never does.
 
 ---
 
 ## 1. Routstrd Anomaly (2026-08-21): Root Cause + Guard
 
 **Incident:** 156 glm-5.2 calls / 18.8M tokens / **$18.81** hit `routstrd` (paid ecash,
-~$1/M catalog) while z.ai served 7,155 glm-5.2 calls FREE ($0.00) and ollama_cloud
+~$1/M catalog) while z.ai served 7,155 glm-5.2 calls at recorded $0.00 (true
+amortized cost ≈ $0.004–0.08/M — §0.5) and ollama_cloud
 took 1,269 calls at $1.19. Historical routstrd spend: $0.15–4/day.
 
 ### 1.1 Root cause (verified against `zai_usage.db` today)
@@ -62,18 +180,26 @@ Evidence chain:
 
 Why it burned money: the chain sorts candidates *by price among providers that
 are available right now* — it never compares a paid route against the
-**opportunity cost of the subscription route** (glm-5.2 marginal $0, back in
-~2 s) or against the cheapest flat-rate alternative (ollama_cloud $0.0155/M ≈
+**opportunity cost of the subscription route** (glm-5.2 marginal cash $0 but
+opportunity price ≈ $0.0043/M × pressure, §0.5, back in ~2 s) or against the
+cheapest flat-rate alternative (ollama_cloud $0.0155/M ≈
 65× cheaper). 18.6M tokens on ollama_cloud would have cost ~$0.29; waiting out
 the 2 s ours backoff, $0. The correct behavior was 503/defer-at-source.
 
 ### 1.2 Guard (CG-6 — prevents this CLASS, not just this instance)
 
-1. **Subscription-preference price ceiling** in `_try_external_failover`: for any
-   model with an active subscription route (glm-5.2/glm-5.3 on z.ai keys),
-   external candidates priced **> $0.10/M** (≈6× the ollama flat rate, 10× floor
-   over converged sub rates) are excluded. Today this alone zeroes the $18.81:
-   glm-5.2 would 503 → callers defer/retry instead of silently paying 65×.
+1. **Opportunity-price comparator (v2.1)** in `_try_external_failover`: for any
+   model with an active subscription route (glm-5.2/glm-5.3 on z.ai keys,
+   glm-5.2 on ollama_cloud), a paid external candidate is price-eligible only
+   if its rate beats the subscription routes' CURRENT effective prices (§0.5).
+   The crossovers are extreme (routstrd $1/M beats friend only at u ≈ 0.998
+   single-window, or u_5h ≈ 0.995 ∧ u_week ≈ 0.97 superposed — and it never
+   beats ollama at $0.0155–$0.15/M), so paid per-token tiers are effectively
+   never price-eligible while any subscription route is finite; they exist for
+   ollama-exclusive models and total fleet outage. The static **$0.10/M
+   ceiling** (≈23× friend baseline, ≈6× ollama flat) stays as a
+   belt-and-braces backstop: today it alone zeroes the $18.81 — glm-5.2 would
+   503 → callers defer/retry instead of silently paying 65×.
 2. **Paid-tier velocity anomaly + hard daily cap** (the Q1 backstop): any
    paid-tier hour > $5 or day > cap → `anomaly_events` row (loud, alerted) and
    paid tiers fail-closed out of the candidate list for the rest of the window.
@@ -93,15 +219,27 @@ the 2 s ours backoff, $0. The correct behavior was 503/defer-at-source.
 `effective_price_usd_per_M(model)` = the **cheapest ELIGIBLE provider's**
 pressure- and peak-adjusted price for the model the job is scheduled to use:
 
-- z.ai keys: converged/measured base rate × **pressure(u) superposition**
-  (5h×weekly×monthly, RP-EXP, `src/pricing_engine.py`) × peak multiplier
+- z.ai keys: **entitlement-amortized baseline (§0.5: friend $0.0043/M, ours
+  $0.0084/M provisional) × pressure(u) superposition** (5h×weekly×monthly,
+  RP-EXP, `src/pricing_engine.py`) × peak multiplier — i.e.
+  `effective_zai_price(t)` per §0.5; zai is NOT free (Q11)
 - flat/paid tiers (ollama_cloud, routstrd, telnyx…): measured/catalog rate
   (the same `_get_provider_cost()` values the failover chain already uses)
   × peak multiplier
-- **subscription amortization (Q4):** z.ai effective price includes the
-  remaining-quota term via pressure(u) — as quota depletes, effective price
-  rises, moving the current price OUT of the lower-20% band. Remaining quota and
-  monthly-subscription amortized floor are exposed alongside for decisions.
+- **subscription amortization (Q4, v2.1):** the baseline is the
+  entitlement-amortized subscription rate (§0.5) and pressure(u) supplies the
+  depletion dynamics — as quota depletes, effective price rises from
+  $0.0043/M past ollama ($0.0155/M at u ≈ 0.89; u ≈ 0.71 at peak) toward
+  paid tiers, moving the current price OUT of the lower-20% band exactly when
+  deferral is right. Realized amortized $/M and entitlement utilization are
+  exposed alongside for audit — never gated on.
+- **forecast pricing (v2.1):** the gate prices a task at the PREDICTED
+  end-state pressure, not just current: u_end per window from burn_predictor's
+  Kalman projection (`projected_total_pct`, `exhausts_in_hours`) evaluated
+  over the task's expected duration (CG-3 p90 duration; default horizon
+  30 min). A 20-min job launched at u_5h = 0.93 projected to end at 0.97 is
+  priced at the 0.97 curve point. Both variants come from CG-2; the gate
+  consumes the forecast.
 
 **Per-model, not blended.** Manager crons gate on glm-5.2's own distribution.
 Blended fleet price is reported in the verdict JSON (visibility) but never gates.
@@ -115,6 +253,12 @@ Models with <N observations fall back to their family's blended distribution.
   is_measured, ts — but **stale since 2026-08-17**; CG-2 resumes the collector).
 - Rule: deferrable cron **ALLOW iff current effective price ≤ p20(window)**
   (the price sits in the cheapest 20% of the trailing week).
+- v2.1: zai's contribution to the per-model distribution is now dynamic
+  (baseline × pressure × peak): mostly cheap, spiking near 5h-window
+  exhaustion and during UTC 06–09. The p20 band therefore tracks
+  "subscription-abundant, off-peak" hours — precisely the window Felix wants
+  crons to run in — and under pressure zai itself exits the band, which is
+  when DEFER (or ollama reroute) is the right call.
 
 ### 2.3 Hysteresis (anti-flapping)
 
@@ -192,6 +336,10 @@ subscription amortization via pressure curves in `src/pricing_engine.py`) but
 pressure(u) × peak_mult + remaining-quota/amortization fields for every funded
 provider; (2) resumed `price_observations` collector at hourly cadence;
 (3) exposure of the already-computed routstrd/PPQ/OpenRouter catalog rates.
+**v2.1 adds:** the only zai "rate" observable today is the **$0.001/M floor**
+(`price_observations`: provider `friend`, source `zai_amortized`, rate 0.001 —
+because `providers.yaml` sets `friend.monthly_fee_usd: 0`). That is the
+free-tier artifact this revision deletes (§0.5, CG-2).
 
 **Q7 verdict:** peak is **done by construction** — peak_mult 3.0 is already in
 `/v1/dispatch_gate`'s exposed price and `peak_hour_ollama_primary` behavior
@@ -207,7 +355,7 @@ separate deferral).
 ```
 evaluate_cost_gate(
     model, task_type, deferrable,                  # task identity
-    effective_price_usd_per_m,                     # from GET /v1/pricing (CG-2)
+    effective_price_usd_per_m,                     # FORECAST variant — GET /v1/pricing?horizon_min= (CG-2, v2.1)
     price_history,                                 # price_observations window (CG-2)
     rolling_paid_spend_usd, budget_cap_usd,        # daily_spend reader (CG-6/CG-7)
     override,                                      # from .cost_gate_override (CG-4)
@@ -273,8 +421,24 @@ GATE (quality-gates v3.1.0 — required before task close):
   revert-plan rule).
 - **Files:** `src/pricing_exposure.py`, `scripts/collect_price_observations.py`,
   `tests/test_pricing_exposure.py`, `~/.hermes/bot/zai_proxy.py` (endpoint).
+- **v2.1 payload spec (zai rows):** `baseline_entitlement_usd_per_m` (§0.5),
+  `baseline_realized_usd_per_m` (trailing 30d), `entitlement_utilization_pct`,
+  `windows: {u_5h, u_week, u_month, estimated_capacity_tokens, confidence}`,
+  `pressure_mult`, `peak: {active, mult}`, `effective_price_usd_per_m` (now),
+  and `forecast`: effective price at +5/+15/+60 min plus `?horizon_min=` for
+  task-duration pricing — computed from burn_predictor `projected_total_pct`
+  per window. Forecast variant is gated on `kalman-convergence-check` green
+  (same condition as CG-3); until then forecast = current price + staleness
+  flag. Config fix in the same task: `providers.yaml`
+  `zai.keys.friend.monthly_fee_usd: 0 → 80`, and `_measure_zai_amortized` /
+  realtime_pricing switches to the entitlement denominator
+  `max(smoothed capacity estimate, trailing-30d usage)` (§0.5 fallback rule);
+  log `estimated_capacity_tokens` hourly until the ours-key entitlement is
+  measured with confidence.
 - **Tests:** pressure applied on z.ai rows and NOT on flat tiers; peak flag;
-  staleness marker >15 min; fixture price history for CG-1 integration.
+  staleness marker >15 min; fee=0 never again yields the $0.001 floor;
+  forecast variant matches closed-form pressure at projected u; fixture
+  price history for CG-1 integration.
 - **Deps:** CG-1 (input shape). **Effort:** 1.5 d.
 
 ### CG-3 — Token predictor (v1 CG-2, unchanged core)
@@ -310,8 +474,12 @@ GATE (quality-gates v3.1.0 — required before task close):
 - **Deps:** none (parallel-friendly). **Effort:** 0.5–1 d.
 
 ### CG-6 — Routstrd-class guard (§1.2)
-- **Scope:** in `_try_external_failover`: subscription-preference price ceiling
-  (models with live subscription routes capped at $0.10/M externally);
+- **Scope:** in `_try_external_failover`: **opportunity-price comparator
+  (v2.1)** — paid candidates must beat the subscription routes' live
+  effective prices (§0.5 crossovers: routstrd $1/M eligible only at
+  u ≈ 0.998+, i.e. effectively only when zai windows are hard-exhausted AND
+  ollama is pricier/unavailable) — plus the static $0.10/M ceiling as
+  backstop;
   paid-tier velocity anomaly (>$5/h → loud anomaly_events) + hard daily paid
   cap (shared `config/budget.yaml`) fail-closed for the rest of the window.
   Ceiling bypass = CG-4 override scope `paid_ceiling` only.
@@ -320,6 +488,9 @@ GATE (quality-gates v3.1.0 — required before task close):
 - **Tests:** replay of today's exact state (ours exhausted, friend dead,
   ollama backoff, routstrd $1.0/M funded) → routstrd EXCLUDED, 503 path taken;
   ollama_cloud at $0.0155/M still eligible; override unlocks with audit row.
+  v2.1: comparator excludes routstrd whenever effective zai price < $1/M
+  (replay at u_5h=0.95 → zai ≈ $0.029/M → EXCLUDED); admits it only at the
+  §0.5 crossover state (u_5h ≥ 0.998) with an audit row.
 - **Deps:** CG-2 (price data; static ceiling can land first). **Effort:** 1 d.
 
 ### CG-7 — Canonical gate CLI (deploy)
