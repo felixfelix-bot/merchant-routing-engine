@@ -1,0 +1,486 @@
+diff --git a/zai_proxy.py b/zai_proxy.py
+index e15c1bb..65bd0c4 100755
+--- a/zai_proxy.py
++++ b/zai_proxy.py
+@@ -19,11 +19,15 @@ Logging never raises — all write paths are wrapped to swallow errors so a
+ logging failure can never break a proxied request.
+ """
+ from __future__ import annotations
+-import json, os, sqlite3, sys, threading, time, urllib.request, urllib.error
++import json, os, socket, sqlite3, sys, threading, time, urllib.request, urllib.error
+ from datetime import datetime, timezone, date as _date
+ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+ from pathlib import Path
+ 
++# socket.timeout is an alias of TimeoutError on py3.10+; resolve once so
++# _is_timeout_error() works across interpreter versions.
++socket_timeout_cls = socket.timeout if hasattr(socket, "timeout") else TimeoutError
++
+ # ── Shadow mode (Phase 2) — price-first optimizer running read-only ──────────
+ # Import bridge: logs shadow routing decisions alongside live best_key() picks.
+ # Wrapped so a missing repo or import error NEVER breaks production routing.
+@@ -457,6 +461,12 @@ def _load_external_keys():
+                     keys["ppq"] = line.split("=",1)[1].split("#")[0].strip().strip("'").strip('"')
+                 elif line.startswith("OPENROUTER_API_KEY=") and "openrouter" not in keys:
+                     keys["openrouter"] = line.split("=",1)[1].split("#")[0].strip().strip("'").strip('"')
++                # 2026-08-22 fix: the ACTIVE key lives in OPENROUTER_OXALPHA_KEY
++                # (the OPENROUTER_API_KEY entries are commented out) — without
++                # this fallback the openrouter key stayed empty and OpenRouter
++                # was silently excluded from EVERY failover chain.
++                elif line.startswith("OPENROUTER_OXALPHA_KEY=") and "openrouter" not in keys:
++                    keys["openrouter"] = line.split("=",1)[1].split("#")[0].strip().strip("'").strip('"')
+                 elif line.startswith("OLLAMA_CLOUD_API_KEY=") and "ollama_cloud" not in keys:
+                     keys["ollama_cloud"] = line.split("=",1)[1].split("#")[0].strip().strip("'").strip('"')
+                 elif line.startswith("DEEPINFRA_API_KEY=") and "deepinfra" not in keys:
+@@ -585,6 +595,10 @@ EXTERNAL_PROVIDERS = {
+ # Workers (glm-4.5-flash): cheapest available is fine (output gets vetted).
+ MANAGER_FALLBACK_MODEL = "glm-5.2"
+ WORKER_FALLBACK_MODEL = "deepseek/deepseek-v4-flash"
++# Vision fallback (2026-08-22): image-bearing requests cannot downgrade to a
++# text model on the external path. Cheapest capable vision model from the
++# OpenRouter catalog ($0.03/$0.13 per M; blended 3:1 ≈ $0.055/M).
++VISION_FALLBACK_MODEL = "qwen/qwen3.7-flash"
+ 
+ # z.ai peak hours: Beijing 14:00-18:00 = UTC 6-10. During peak, z.ai burns 3x quota.
+ # Ollama Cloud has no peak pricing — prefer it during these hours.
+@@ -652,6 +666,14 @@ _DEAD_KEY_BACKOFF_SECONDS = 3600
+ # Medium flat backoff.
+ _SERVER_ERROR_BACKOFF_SECONDS = 30
+ 
++# Upstream timeout (socket.timeout / TimeoutError / URLError-timed-out) —
++# the key still has quota; the endpoint is slow/unreachable. Short flat
++# backoff so the key is retried quickly once the endpoint recovers.
++# NEVER classified as 'exhausted' — quota-based locking must not trigger
++# on timeouts (2026-08-21: 150-337s z.ai hangs were mislabeled exhausted,
++# blocking the key despite /quota showing 0% used).
++_TIMEOUT_BACKOFF_SECONDS = 30
++
+ # Legacy aliases — kept so any external script referencing them still resolves.
+ _BACKOFF_BASE_SECONDS = 30
+ _BACKOFF_CAP_SECONDS    = 3600
+@@ -834,6 +856,8 @@ def _mark_key_failure(name: str, error_type: str = "exhausted") -> None:
+             backoff = _DEAD_KEY_BACKOFF_SECONDS
+         elif error_type == "server":
+             backoff = _SERVER_ERROR_BACKOFF_SECONDS
++        elif error_type == "timeout":
++            backoff = _TIMEOUT_BACKOFF_SECONDS
+         else:  # "exhausted" — 429 / empty response
+             backoff = _backoff_for_failure(failures)
+         retry_after = now + backoff
+@@ -885,6 +909,39 @@ def _mark_key_exhausted(name: str) -> None:
+     _mark_key_failure(name, error_type="exhausted")
+ 
+ 
++def _hold_for_zai_recovery(max_wait: float = 25.0) -> bool:
++    """Backpressure hold-queue (2026-08-22): when every z.ai key is in a
++    backoff window whose soonest expiry is <= max_wait seconds away, sleep
++    until just past it and re-check. Returns True when a key became healthy
++    (caller should re-run best_key()); False when there is nothing worth
++    waiting for (a key already healthy, nothing in backoff, or recovery too
++    far away). Never raises. Logs a key_decisions row so hold frequency is
++    observable in the efficiency monitor."""
++    try:
++        names = list(KEYS.keys()) if isinstance(KEYS, dict) else list(KEYS)
++        if any(_is_key_healthy(n) for n in names):
++            return False
++        now = time.time()
++        soonest = None
++        for n in names:
++            h = _zai_key_health.get(n) or {}
++            ra = float(h.get("retry_after") or 0)
++            if ra > now and (soonest is None or ra < soonest):
++                soonest = ra
++        if soonest is None:
++            return False
++        wait = soonest - now
++        if wait <= 0 or wait > max_wait:
++            return False
++        time.sleep(min(wait + 0.25, max_wait))
++        healthy = any(_is_key_healthy(n) for n in names)
++        _log_key_decision(chosen_key=None,
++                          reason=f"hold_queue_waited_{wait:.1f}s_ok_{int(healthy)}")
++        return healthy
++    except Exception:
++        return False
++
++
+ def _mark_key_dead(name: str) -> None:
+     """Record an auth failure (401/403) — long flat backoff, key may be revoked."""
+     _mark_key_failure(name, error_type="dead")
+@@ -895,6 +952,35 @@ def _mark_key_server_error(name: str) -> None:
+     _mark_key_failure(name, error_type="server")
+ 
+ 
++def _is_timeout_error(e: BaseException) -> bool:
++    """True if *e* is a timeout-class failure (not an HTTP status error).
++
++    Covers socket.timeout/TimeoutError, urllib.error.URLError whose reason
++    is a timeout, and http.client socket-level timeouts. HTTPError is never
++    a timeout (it carries a real status code).
++    """
++    if isinstance(e, urllib.error.HTTPError):
++        return False
++    if isinstance(e, (TimeoutError, socket_timeout_cls)):
++        return True
++    if isinstance(e, urllib.error.URLError):
++        reason = getattr(e, "reason", None)
++        if isinstance(reason, (TimeoutError, socket_timeout_cls)):
++            return True
++        if isinstance(reason, OSError) and "timed out" in str(reason).lower():
++            return True
++    return "timed out" in str(e).lower() or "timeout" in str(e).lower()
++
++
++def _mark_key_timeout(name: str) -> None:
++    """Record a timeout failure — short flat backoff, NEVER quota-exhaustion.
++
++    Timeout ≠ exhausted: the key still has quota; the upstream was slow or
++    unreachable. Marks error_type='timeout' so dashboards and the LiveRouter
++    see the true failure class (2026-08-21 mislabeling fix)."""
++    _mark_key_failure(name, error_type="timeout")
++
++
+ def _mark_key_healthy(name: str) -> None:
+     """Mark a key healthy (successful response) and reset its failure counter.
+ 
+@@ -1098,18 +1184,27 @@ def _telnyx_quota_snapshot() -> dict:
+ def _routstr_quota_snapshot() -> dict:
+     """quota_state['routstr'] from the balance bridge (provider_balances).
+ 
+-    Cold-start / bridge-disabled / stale row → optimistic fallback so
+-    routing never breaks. Never raises.
++    2026-08-21 B1 — FAIL-CLOSED for wallet providers: stale/missing bridge
++    data → treated as EXHAUSTED (used_pct=100, remaining=0). A Cashu wallet
++    whose balance reading is unknown must not look viable — routing into a
++    possibly-empty wallet triggers the mint/failover churn (Aug 20: 463K
++    sats burned, zero tokens delivered). The VPS2 node collector failing
++    ("node unreachable") previously left quota_state['routstr'] = {} →
++    cold-start pressure → still selected. Fresh non-exhausted row → real
++    values. Never raises.
+     """
++    _closed = {"used_pct": 100.0, "remaining": 0.0}
+     if _routstr_quota_entry_fn is None:
+-        return {"used_pct": 0.0, "remaining": float("inf")}
++        return dict(_closed)
+     try:
+         entry = _routstr_quota_entry_fn()
+-        return entry if isinstance(entry, dict) else {
+-            "used_pct": 0.0, "remaining": float("inf"),
+-        }
++        if not isinstance(entry, dict) or entry.get("used_pct") is None:
++            return dict(_closed)
++        if entry.get("is_exhausted"):
++            return dict(_closed)
++        return entry
+     except Exception:
+-        return {"used_pct": 0.0, "remaining": float("inf")}
++        return dict(_closed)
+ 
+ 
+ def _snapshot_quota() -> dict:
+@@ -2117,6 +2212,7 @@ _OPENROUTER_MODEL_RATES: dict[str, dict[str, float]] = {
+     "moonshotai/kimi-k3":          {"input": 3.00,  "output": 15.00},
+     "deepseek/deepseek-v4-flash":  {"input": 0.14,  "output": 0.28},
+     "deepseek/deepseek-v4-pro":    {"input": 0.53,  "output": 2.12},
++    "qwen/qwen3.7-flash":          {"input": 0.03,  "output": 0.13},
+ }
+ 
+ # PPQ per-model rates (from api.ppq.ai/v1/models pricing field, 2026-08-14).
+@@ -2151,6 +2247,22 @@ _BLENDED_RATIO_INPUT = 0.75  # 3 parts input
+ _BLENDED_RATIO_OUTPUT = 0.25  # 1 part output
+ 
+ 
++def _body_has_images(body: bytes) -> bool:
++    """True when an OpenAI-style request body carries image content parts
++    (content list items with type 'image_url'). Best-effort; never raises."""
++    try:
++        data = json.loads(body)
++        for msg in data.get("messages") or []:
++            content = msg.get("content") if isinstance(msg, dict) else None
++            if isinstance(content, list):
++                for part in content:
++                    if isinstance(part, dict) and part.get("type") == "image_url":
++                        return True
++    except Exception:
++        pass
++    return False
++
++
+ def _blended_rate(input_rate: float, output_rate: float) -> float:
+     """Compute blended $/M from input + output rates (3:1 ratio)."""
+     return input_rate * _BLENDED_RATIO_INPUT + output_rate * _BLENDED_RATIO_OUTPUT
+@@ -2238,10 +2350,52 @@ def _endpoint_alive(base_url: str) -> bool:
+             alive = 200 <= resp.status < 500
+     except Exception:
+         alive = False
+-    probes[base_url] = alive
++        probes[base_url] = alive
+     return alive
+ 
+ 
++# B1: routstrd wallet-balance cache (see _routstrd_balance_snapshot)
++_routstrd_bal_cache: dict = {"ts": 0.0, "entry": None}
++
++
++def _routstrd_balance_snapshot() -> dict:
++    """routstrd (local daemon) wallet balance as a quota-style entry.
++
++    B1 (2026-08-21): the daemon exposes GET /balance (sats). We convert to
++    the used_pct/remaining shape the failover gate understands, FAIL-CLOSED:
++    any error/unknown → exhausted (empty Cashu wallet must never receive
++    traffic; see _routstr_quota_snapshot rationale). Sats→USD not needed —
++    the gate only cares about exhaustion. 5-min cache. Never raises.
++    """
++    now = time.time()
++    if now - _routstrd_bal_cache["ts"] < 300 and _routstrd_bal_cache["entry"]:
++        return dict(_routstrd_bal_cache["entry"])
++    entry = {"used_pct": 100.0, "remaining": 0.0}
++    try:
++        base = _EXTERNAL_KEYS.get("routstrd_base", "http://localhost:8008")
++        req = urllib.request.Request(base.rstrip("/") + "/balance", method="GET")
++        with urllib.request.urlopen(req, timeout=5) as resp:
++            data = json.loads(resp.read())
++        out = data.get("output", data) or {}
++        # 2026-08-22 fix: routstrd /balance returns
++        # {"balances": {mint_url: sats}} — there is no "total" field, so the
++        # old parser always fail-closed and routstrd was never a candidate.
++        # Sum NETWORK-spendable sats only (orangesync is testnut ecash that
++        # network nodes cannot redeem).
++        balances = out.get("balances") or {}
++        total = float(sum(
++            v for m, v in balances.items()
++            if isinstance(v, (int, float)) and "orangesync" not in str(m)
++        )) or 0.0
++        if total > 0:
++            entry = {"used_pct": 0.0, "remaining": total, "balance_sats": total}
++    except Exception:
++        pass
++    _routstrd_bal_cache["entry"] = entry
++    _routstrd_bal_cache["ts"] = now
++    return dict(entry)
++
++
+ def _get_routstr_rates() -> dict:
+     """Fetch per-model blended $/M rates from our Routstr node (10-min cache).
+ 
+@@ -3400,7 +3554,14 @@ def _attempt_retry(e, attempt, name, t0, key_order):
+         retry_num = attempt - len(key_order) + 1
+         if retry_num >= 50:
+             return False  # Safety cap exhausted
+-        elif _rate_limit_predictor is not None:
++        # 2026-08-21: only REAL 429 responses feed the Kalman rate-limit
++        # predictor. Timeouts/connection errors previously polluted it as
++        # pseudo-429s (record_429 on every retryable error), producing
++        # multi-minute predictor sleeps for pure timeouts and bogus
++        # exhaustion signals. Non-429 errors use plain exponential backoff.
++        is_real_429 = (isinstance(e, urllib.error.HTTPError)
++                       and getattr(e, "code", None) == 429)
++        if _rate_limit_predictor is not None and is_real_429:
+             _rate_limit_predictor.record_429()
+             wait = _rate_limit_predictor.predict_retry_at()
+             time.sleep(wait)
+@@ -3544,7 +3705,22 @@ class Handler(BaseHTTPRequestHandler):
+ 
+         except urllib.error.HTTPError as he:
+             if he.code == 429:
++                # 2026-08-21: a 429 "weekly usage limit" is a quota-window
++                # exhaustion that resets Monday — same as the 403 paywall
++                # below. Read the body: weekly/session limit language arms
++                # the until-Monday flag (stops 60s retry hammering for days);
++                # a plain per-minute 429 keeps the short exponential backoff.
++                try:
++                    body429 = he.read(4096).decode(errors="ignore").lower()
++                except Exception:
++                    body429 = ""
+                 _mark_key_exhausted("ollama_cloud")
++                if ("weekly" in body429 or "usage limit" in body429
++                        or "session limit" in body429):
++                    _arm_ollama_paywall_flag()
++                    print("[ollama] 429 weekly/session limit — armed "
++                          ".ollama_exhausted_until (skip until Monday reset)",
++                          flush=True)
+             elif he.code == 403:
+                 # G1: quota-exhaustion on the largest plan surfaces as
+                 # 403 "requires a subscription" (not 429). Read the body to
+@@ -3565,6 +3741,46 @@ class Handler(BaseHTTPRequestHandler):
+         except Exception:
+             return False
+ 
++    def _serve_via_live_router(self, body: bytes, model: str | None,
++                               t0: float, tier_hint: str = "",
++                               max_attempts: int = 2) -> bool:
++        """B2 (2026-08-21): consult LiveRouter and serve its pick; on failure
++        re-consult ONCE (fresh failure feeds the router via failure_counts /
++        health state — the market re-prices and the next-cheapest viable
++        provider is picked). Returns True if a pick was served.
++
++        max_attempts=2: initial consult + one re-consult. All failures fall
++        through to the caller's static chain (B3 last resort). Kill switch
++        and safety checks live inside _consult_live_router; any exception
++        returns False (must never break routing).
++        """
++        for attempt in range(max_attempts):
++            try:
++                _pick, _pick_model, _fb, _fb_model = _consult_live_router(
++                    model=model,
++                    task_type=_tier_to_task_type(tier_hint),
++                )
++                if not _pick:
++                    return False
++                _log_key_decision(
++                    chosen_key=_pick,
++                    reason=(f"live_kalman_failover_{_pick}"
++                            + ("_reconsult" if attempt else "")))
++                response_buffer = bytearray()
++                if _pick == "ollama_cloud" and OLLAMA_CLOUD_KEY:
++                    if self._try_ollama_cloud(body, model, response_buffer, t0):
++                        return True
++                elif _pick in EXTERNAL_PROVIDERS or _pick == "deepinfra":
++                    if self._try_external_failover(body, model,
++                                                   response_buffer, t0,
++                                                   preferred=_pick):
++                        return True
++                # Pick failed — loop once more (the router sees the fresh
++                # failure and re-prices). attempt 1 failing → give up.
++            except Exception:
++                return False
++        return False
++
+     def _pressure_enforce(self, decision, body: bytes, t0: float) -> bool:
+         """S2c (t_b82e5665): apply an enforce-mode pressure decision.
+ 
+@@ -3732,8 +3948,13 @@ class Handler(BaseHTTPRequestHandler):
+         # Manager (glm-5.2/glm-5.3): quality floor at glm-5.2 externally
+         # (externals lack 5.3 until open weights land ~Aug 28).
+         # Workers (glm-4.5-flash): cheapest available (output gets vetted).
++        # Vision (2026-08-22): image-bearing requests (e.g. glm-5v-turbo)
++        # cannot downgrade to a text model — route to the cheapest capable
++        # vision model instead.
+         if model in ("glm-5.2", "glm-5.3"):
+             ext_model = MANAGER_FALLBACK_MODEL
++        elif _body_has_images(body):
++            ext_model = VISION_FALLBACK_MODEL
+         else:
+             ext_model = WORKER_FALLBACK_MODEL
+ 
+@@ -3763,6 +3984,24 @@ class Handler(BaseHTTPRequestHandler):
+             if name in ("routstr", "routstrd") and not _endpoint_alive(prov["base_url"]):
+                 print(f"[failover] skipping {name} — endpoint probe failed ({prov['base_url']})", flush=True)
+                 continue
++            # B1 (2026-08-21): wallet-balance gate for Cashu providers —
++            # skip when the balance bridge reports exhaustion (fail-closed;
++            # empty/stale readings count as exhausted too, see
++            # _routstr_quota_snapshot). Prevents routing into an empty
++            # wallet, which mints tokens that no provider can redeem
++            # (the Aug 20 churn: 463K sats, zero tokens delivered).
++            if name in ("routstr", "routstrd"):
++                _qs = _snapshot_quota()
++                _entry = _qs.get(name, {})
++                if name == "routstrd":
++                    # routstrd has no _snapshot_quota entry (daemon wallet);
++                    # check the raw balance collector row via the store.
++                    _entry = _routstrd_balance_snapshot()
++                if float(_entry.get("used_pct", 100.0)) >= 100.0 \
++                        or float(_entry.get("remaining", 0.0)) <= 0.0:
++                    print(f"[failover] skipping {name} — wallet balance "
++                          f"exhausted/unknown (fail-closed)", flush=True)
++                    continue
+             cost = _get_provider_cost(name, ext_model)
+             candidates.append((cost, name, prov))
+ 
+@@ -3887,7 +4126,16 @@ class Handler(BaseHTTPRequestHandler):
+                         print(f"[failover] {provider_name} returned 402 (unfunded) — marking unfunded, trying next", flush=True)
+                         _mark_unfunded(provider_name)
+                         continue
+-                    print(f"[failover] {provider_name} returned HTTP {he.code} — trying next", flush=True)
++                    # 2026-08-22: log the upstream error body (first 200 chars)
++                    # so 400/422s are diagnosable (e.g. tool-param rejections,
++                    # image-size limits) instead of opaque status codes.
++                    try:
++                        _eb = he.read(200) or b""
++                        _eb_s = _eb.decode("utf-8", "replace").replace("\n", " ")[:200]
++                    except Exception:
++                        _eb_s = ""
++                    print(f"[failover] {provider_name} returned HTTP {he.code} — trying next"
++                          + (f" | body: {_eb_s}" if _eb_s else ""), flush=True)
+                     raise
+             except Exception as e:
+                 print(f"[failover] {provider_name} exception: {type(e).__name__}: {e} — trying next", flush=True)
+@@ -4135,28 +4383,24 @@ class Handler(BaseHTTPRequestHandler):
+             except Exception:
+                 pass  # Shadow mode never blocks production
+ 
++        # Backpressure hold-queue (2026-08-22): when every z.ai key sits in a
++        # SHORT backoff window, wait (bounded <=25s) for the soonest recovery
++        # and re-pick instead of burning the external chain and 503ing. Burst
++        # traffic becomes latency, not failure. Skipped when a key is already
++        # healthy, when nothing is in backoff, or when recovery is far away.
++        if chosen is None and _hold_for_zai_recovery():
++            chosen = best_key()
++
+         # If both z.ai keys exhausted, consult LiveRouter first (P3.4-fix),
+         # then fall through to Ollama Cloud / PPQ hardcoded chain.
+         if chosen is None:
+-            # LiveRouter consultation (kill switch checked inside)
+-            _pick, _pick_model, _fb, _fb_model = _consult_live_router(
+-                model=original_model,
+-                task_type=_tier_to_task_type(tier_hint),
+-            )
+-            if _pick:
+-                _log_key_decision(
+-                    chosen_key=_pick,
+-                    reason=f"live_kalman_failover_{_pick}")
+-                response_buffer = bytearray()
+-                if _pick == "ollama_cloud" and OLLAMA_CLOUD_KEY:
+-                    if self._try_ollama_cloud(body, original_model, response_buffer, t0):
+-                        return
+-                elif _pick in EXTERNAL_PROVIDERS or _pick == "deepinfra":
+-                    if self._try_external_failover(body, original_model,
+-                                                   response_buffer, t0,
+-                                                   preferred=_pick):
+-                        return
+-                # LiveRouter pick failed — fall through to hardcoded chain
++            # B2 (2026-08-21): LiveRouter with ONE re-consult on failure —
++            # the failed provider's fresh failure feeds back through
++            # failure_counts/health, so the second consultation picks the
++            # next-cheapest viable provider (market re-prices). The static
++            # chain below is the last resort only after both fail (B3).
++            if self._serve_via_live_router(body, original_model, t0, tier_hint):
++                return
+             response_buffer = bytearray()
+             if OLLAMA_CLOUD_KEY and self._try_ollama_cloud(body, original_model, response_buffer, t0):
+                 return
+@@ -4183,7 +4427,11 @@ class Handler(BaseHTTPRequestHandler):
+                 if self._try_external_failover(body, original_model,
+                                                response_buffer, t0):
+                     return
+-            # LiveRouter provider failed — fall through to hardcoded chain
++            # LiveRouter provider failed — B2: ONE re-consult (fresh failure
++            # feeds the router, market re-prices) before the static chain.
++            if self._serve_via_live_router(body, original_model, t0, tier_hint):
++                return
++            # Static hardcoded chain — last resort (B3)
+             response_buffer = bytearray()
+             if OLLAMA_CLOUD_KEY and self._try_ollama_cloud(body, original_model, response_buffer, t0):
+                 return
+@@ -4400,12 +4648,17 @@ class Handler(BaseHTTPRequestHandler):
+                     if _is_retryable_error(e):
+                         if _attempt_retry(e, attempt, name, t0, order):
+                             continue
+-                    # Non-retryable error. A timeout / connection failure IS
+-                    # an upstream server-side failure: mark the key so the
++                    # Non-retryable error. Classify the failure class so the
+                     # anomaly trail (and the recent_503 gate) sees the burst
+                     # class that previously surfaced only as client 502s with
+                     # zero anomaly rows (t_8e2673cd, 2026-08-15 read timeouts).
+-                    _mark_key_server_error(name)
++                    # 2026-08-21: timeouts get their OWN error_type — a slow
++                    # upstream is NOT quota exhaustion and must never lock
++                    # quota-based key selection (the mislabeling fix).
++                    if _is_timeout_error(e):
++                        _mark_key_timeout(name)
++                    else:
++                        _mark_key_server_error(name)
+                     status_code = 502
+                     error_text = f"proxy error: {e}"
+                     msg = f"proxy error: {e}".encode()
