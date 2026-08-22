@@ -129,6 +129,83 @@ is recorded in `reason_json.band`).
   seed-then-replace drift + fail-closed, confidence buckets, staleness,
   cold model, task scaling, kalman guard, gate integration).
 
+## CG-13 — cost outlier detection (adaptive EWMA + Kalman composition)
+
+- **Module:** `src/cost_outlier_detector.py` —
+  `detect_cost_outliers()` (I/O entry point), pure core
+  `compute_ewma`, `compute_baseline`, `detect_outlier`,
+  `compute_expected_cost`, `classify_discrepancy`,
+  `build_provider_breakdown`.
+- **Script integration:** `~/.hermes/profiles/manager/scripts/cost-escalation-check.py`
+  — `detect_cost_outliers()` replaces the inline `ewma_outlier_check` as the
+  primary outlier detector. The inline function remains as a fallback when
+  the module import fails (graceful degradation, same pattern as CG-3's
+  kalman guard).
+- **Tests:** `tests/test_cost_outlier_detector.py` — 30 tests (EWMA
+  convergence, baseline stats, outlier detection + cold-start fallback,
+  Kalman composition classification, provider breakdown, integration
+  with DB fixtures, cold-start state persistence).
+
+### Design
+
+**Two signals composed:**
+
+1. **EWMA outlier** — the current hour's paid $ spend is compared against
+   `threshold = max(3 × EWMA, mean + 2 × std)` over the 7-day baseline
+   (168 hourly samples). When `actual > threshold` → flagged as an outlier
+   with a ratio (`"16x normal"`).
+
+2. **Kalman composition** — the existing Kalman filter (`kalman_samples`
+   table) predicts the token burn rate (`burn_rate_tph`). Composing with
+   the effective price gives the *expected* $/h:
+   `expected = burn_rate_tph × effective_price / 1M`.
+   Comparing `expected` vs `actual` reveals the *cause*:
+   - `actual >> expected` → **routing inefficiency** (expensive provider
+     picked when cheaper exists, or free quota was available but proxy
+     failed over to paid).
+   - `actual ≈ expected` but both high → **quota exhaustion** (structural:
+     free quota depleted, paid failover is the only option).
+
+**Cold start:** when fewer than `MIN_BASELINE_HOURS` (24) of history exist,
+the EWMA and baseline stats are unreliable. The module falls back to the
+fixed `COLD_START_THRESHOLD` ($2/h, matching the previous static threshold)
+until enough data accumulates. State persists in
+`~/.hermes/bot/escalation_ewma_state.json` (samples, EWMA, last-sample hour,
+last-alert timestamp with 2h re-arm guard).
+
+**Adaptive thresholds:** the EWMA adapts to baseline shifts — e.g. when a
+cheaper provider goes live, the normal $/h drops, and the old fixed $2/h
+threshold becomes stale; the EWMA tracks the new normal automatically.
+
+### Verified data (2026-08-22)
+
+- Historical baseline: 97h of paid spend data, mean $0.48/h, std $1.26/h.
+- EWMA catches today's outliers: 10:00 $4.84/h (7.2x), 17:00 $10.61/h (16.1x).
+- Existing Kalman: 151K tok/h burn rate, uncertainty 46K tokens — tracks
+  QUOTA not $.
+- Composition: 151K tok/h × $0.47/M = ~$0.07/h predicted vs $10.61/h actual
+  = 150x discrepancy. The discrepancy IS the signal: Kalman says "quota
+  burning normally" but $ spend says "paid failover active".
+
+### Alert taxonomy
+
+| alert_type | condition | message shape |
+|---|---|---|
+| `spend_outlier` | `actual > max(3×EWMA, mean+2×std)` | `💸 SPEND OUTLIER: $X/h, Yx normal (EWMA $Z/h)` |
+| `kalman_composition` | `actual/expected > 10` | `🔍 KALMAN COMPOSITION: Routing Inefficiency — actual $X/h vs expected $Y/h (Zx discrepancy; Kalman N tok/h × $P/M)` |
+| `cold_start_bleed` | `actual > COLD_START_THRESHOLD` and `< MIN_BASELINE_HOURS` | `💸 PAID BLEED (cold start): $X/h (cold-start threshold $2/h)` |
+
+### Constants
+
+| name | value | rationale |
+|---|---|---|
+| `EWMA_ALPHA` | 0.3 | ~5h effective memory (1/alpha ≈ 3.3h half-life) |
+| `COLD_START_THRESHOLD` | 2.0 | matches previous static threshold, seamless transition |
+| `MIN_BASELINE_HOURS` | 24 | need >1 day of data for mean+std to be reliable |
+| `LOOKBACK_HOURS` | 168 | 7-day trailing window for baseline |
+| `DEFAULT_PAID_PRICE_PER_M` | 0.47 | OpenRouter measured 2026-08-22 |
+| `EWMA_REARM_SECS` | 7200 | 2h re-arm guard prevents alert flooding |
+
 ## Wiring status & rollback
 
 CG-1 is the pure decision core only — **nothing in production calls it
