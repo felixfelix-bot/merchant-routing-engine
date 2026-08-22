@@ -261,3 +261,39 @@ GATE (quality-gates v3.1.0 — required before task close):
 ---
 
 *Verified-facts raw evidence: probe headers/body archived at `/tmp/oxprobe.{hdr,body}` (2026-08-21, this session). This document is a plan; no production system was modified.*
+
+---
+
+## §7 OX-2 STATUS — proxy wiring landed (2026-08-22, task t_2ed46556)
+
+Per the EMERGENCY operator directive (2026-08-22 ~16:00, task body; chain at
+16:00: zai 429 → routstrd 500 → routstr down → deepinfra 402 → openrouter
+PAID burn), OX-2 shipped:
+
+- **Failover insertion (LIVE)**: oxalpha is attempted as a FREE candidate in
+  the proxy's external failover order — after the z.ai keys, before every
+  paid provider. Guard-wrapped (`PromoTierGuard`: expiry/402/spend kills),
+  fail-closed on absent/invalid key, 429 backoff 60/120/300 s + breaker
+  5/300 s, single 90-s attempt, forced `stealth/ox-alpha` + `low` + ≤8192
+  completion tokens. Any error falls through to the existing paid chain
+  (zero regression); terminal 503 path unchanged (429 never bubbles).
+- **Alias / preferred_for (ARMED, INERT)**: acceleration §4 pre-chain
+  mechanism wired but `enabled: false` — the OX-3b rung-1 flip activates it.
+  glm-5.2/glm-5.3 hard-excluded in code; kill-switch
+  `~/.hermes/bot/.oxalpha_alias_off`; images never aliased; gated task types
+  never aliased at rung 1.
+- **Decision core**: `src/oxalpha_tier.py` (pure) + 31 contract tests
+  (`tests/test_oxalpha_tier.py`). Production edits + revert procedure:
+  `docs/REVERT-oxalpha-proxy-wiring-2026-08-22.md`.
+- **Tension resolution (recorded)**: acceleration §5.1 says oxalpha never
+  enters `EXTERNAL_PROVIDERS` — honored for the dict/LiveRouter/alias
+  surface (no Kalman/price-sort interaction); the EMERGENCY governs the
+  failover attempt ORDER, where oxalpha precedes the paid candidates.
+- **Key note (D6)**: no OpenRouter provisioning API on the host — the
+  $0-spend-limit key must be created manually (dashboard, limit $0) and
+  pasted to `~/.hermes/.env` (`OPENROUTER_OXALPHA_KEY`); until then the
+  wiring is live-but-inert (fail-closed; invalid key ⇒ 401 ⇒ fall-through).
+  OX-2 did not read, print, or probe any key value.
+- **Pre-existing failures (not OX-2)**: 32 telnyx/CG-surface test failures
+  exist on this branch independent of OX-2 (proven by snapshot re-run with
+  OX-2 files removed — identical 32).
