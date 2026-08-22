@@ -1,5 +1,5 @@
 diff --git a/zai_proxy.py b/zai_proxy.py
-index e15c1bb..65bd0c4 100755
+index e15c1bb..1991df4 100755
 --- a/zai_proxy.py
 +++ b/zai_proxy.py
 @@ -19,11 +19,15 @@ Logging never raises — all write paths are wrapped to swallow errors so a
@@ -263,7 +263,27 @@ index e15c1bb..65bd0c4 100755
  def _get_routstr_rates() -> dict:
      """Fetch per-model blended $/M rates from our Routstr node (10-min cache).
  
-@@ -3400,7 +3554,14 @@ def _attempt_retry(e, attempt, name, t0, key_order):
+@@ -2280,9 +2434,17 @@ def _fetch_openrouter_style_rates(base: str, cache: dict) -> dict:
+         rates: dict[str, float] = {}
+         for m in data.get("data", []):
+             pricing = m.get("pricing", {}) or {}
++            # 2026-08-22 fix: routstrd v0.4.1 dropped `pricing` from /v1/models
++            # (bare id/name/object entries). Missing pricing must NOT default
++            # to 0.0 — that made routstrd look FREE ($0.0000/M), sorted it
++            # FIRST in every failover, and flooded the daemon. Skip instead:
++            # the model then falls through to the 999.0 last-resort estimate
++            # and routstrd is only tried when nothing cheaper remains.
++            if "prompt" not in pricing or "completion" not in pricing:
++                continue
+             try:
+-                p = float(pricing.get("prompt", 0) or 0)
+-                c = float(pricing.get("completion", 0) or 0)
++                p = float(pricing.get("prompt") or 0)
++                c = float(pricing.get("completion") or 0)
+             except (TypeError, ValueError):
+                 continue
+             rates[m.get("id", "")] = _blended_rate(p * 1e6, c * 1e6)
+@@ -3400,7 +3562,14 @@ def _attempt_retry(e, attempt, name, t0, key_order):
          retry_num = attempt - len(key_order) + 1
          if retry_num >= 50:
              return False  # Safety cap exhausted
@@ -279,7 +299,7 @@ index e15c1bb..65bd0c4 100755
              _rate_limit_predictor.record_429()
              wait = _rate_limit_predictor.predict_retry_at()
              time.sleep(wait)
-@@ -3544,7 +3705,22 @@ class Handler(BaseHTTPRequestHandler):
+@@ -3544,7 +3713,22 @@ class Handler(BaseHTTPRequestHandler):
  
          except urllib.error.HTTPError as he:
              if he.code == 429:
@@ -302,7 +322,7 @@ index e15c1bb..65bd0c4 100755
              elif he.code == 403:
                  # G1: quota-exhaustion on the largest plan surfaces as
                  # 403 "requires a subscription" (not 429). Read the body to
-@@ -3565,6 +3741,46 @@ class Handler(BaseHTTPRequestHandler):
+@@ -3565,6 +3749,46 @@ class Handler(BaseHTTPRequestHandler):
          except Exception:
              return False
  
@@ -349,7 +369,7 @@ index e15c1bb..65bd0c4 100755
      def _pressure_enforce(self, decision, body: bytes, t0: float) -> bool:
          """S2c (t_b82e5665): apply an enforce-mode pressure decision.
  
-@@ -3732,8 +3948,13 @@ class Handler(BaseHTTPRequestHandler):
+@@ -3732,8 +3956,13 @@ class Handler(BaseHTTPRequestHandler):
          # Manager (glm-5.2/glm-5.3): quality floor at glm-5.2 externally
          # (externals lack 5.3 until open weights land ~Aug 28).
          # Workers (glm-4.5-flash): cheapest available (output gets vetted).
@@ -363,7 +383,7 @@ index e15c1bb..65bd0c4 100755
          else:
              ext_model = WORKER_FALLBACK_MODEL
  
-@@ -3763,6 +3984,24 @@ class Handler(BaseHTTPRequestHandler):
+@@ -3763,6 +3992,24 @@ class Handler(BaseHTTPRequestHandler):
              if name in ("routstr", "routstrd") and not _endpoint_alive(prov["base_url"]):
                  print(f"[failover] skipping {name} — endpoint probe failed ({prov['base_url']})", flush=True)
                  continue
@@ -388,7 +408,7 @@ index e15c1bb..65bd0c4 100755
              cost = _get_provider_cost(name, ext_model)
              candidates.append((cost, name, prov))
  
-@@ -3887,7 +4126,16 @@ class Handler(BaseHTTPRequestHandler):
+@@ -3887,7 +4134,16 @@ class Handler(BaseHTTPRequestHandler):
                          print(f"[failover] {provider_name} returned 402 (unfunded) — marking unfunded, trying next", flush=True)
                          _mark_unfunded(provider_name)
                          continue
@@ -406,7 +426,7 @@ index e15c1bb..65bd0c4 100755
                      raise
              except Exception as e:
                  print(f"[failover] {provider_name} exception: {type(e).__name__}: {e} — trying next", flush=True)
-@@ -4135,28 +4383,24 @@ class Handler(BaseHTTPRequestHandler):
+@@ -4135,28 +4391,24 @@ class Handler(BaseHTTPRequestHandler):
              except Exception:
                  pass  # Shadow mode never blocks production
  
@@ -450,7 +470,7 @@ index e15c1bb..65bd0c4 100755
              response_buffer = bytearray()
              if OLLAMA_CLOUD_KEY and self._try_ollama_cloud(body, original_model, response_buffer, t0):
                  return
-@@ -4183,7 +4427,11 @@ class Handler(BaseHTTPRequestHandler):
+@@ -4183,7 +4435,11 @@ class Handler(BaseHTTPRequestHandler):
                  if self._try_external_failover(body, original_model,
                                                 response_buffer, t0):
                      return
@@ -463,7 +483,7 @@ index e15c1bb..65bd0c4 100755
              response_buffer = bytearray()
              if OLLAMA_CLOUD_KEY and self._try_ollama_cloud(body, original_model, response_buffer, t0):
                  return
-@@ -4400,12 +4648,17 @@ class Handler(BaseHTTPRequestHandler):
+@@ -4400,12 +4656,17 @@ class Handler(BaseHTTPRequestHandler):
                      if _is_retryable_error(e):
                          if _attempt_retry(e, attempt, name, t0, order):
                              continue

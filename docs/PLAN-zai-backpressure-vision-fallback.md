@@ -87,6 +87,12 @@
 3. **Upstream error bodies now logged** (first 200 chars) on failover 4xx —
    the openrouter 400 / deepinfra 422 during the burst were previously
    opaque status codes.
+4. **routstrd v0.4.1 pricing regression:** the daemon's `/v1/models` dropped
+   `pricing` fields (bare id/name/object), so every model parsed as $0.0000/M
+   — routstrd looked FREE, sorted first in every failover, and got flooded
+   (timeouts + real-sats drain risk). Parser now skips models without
+   pricing (fail-closed → 999.0 last-resort estimate → routstrd tried last
+   until its pricing is re-wired).
 
 ### Known residuals (not blocking)
 
