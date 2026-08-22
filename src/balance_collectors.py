@@ -1641,29 +1641,34 @@ def _btc_usd_rate() -> float:
 
 
 def fetch_routstr_balance_sats() -> tuple[Optional[int], Optional[str]]:
-    """Query our Routstr node's wallet: GET /v1/wallet/balance.
+    """Query our Routstr node's key balance (sats).
 
-    Returns (balance_sats, error_str). Never raises.
+    2026-08-22: current routstr proxy exposes GET /v1/balance/info (same
+    ``balance`` field). Older builds used GET /v1/wallet/balance — kept as
+    fallback. Returns (balance_sats, error_str). Never raises.
     """
     key = os.environ.get(ROUTSTR_KEY_ENV, "").strip()
     if not key:
         return None, "ROUTSTR_API_KEY not set"
     base = os.environ.get(ROUTSTR_BASE_ENV, "").strip() or ROUTSTR_DEFAULT_BASE
-    try:
-        req = urllib.request.Request(
-            base + "/v1/wallet/balance",
-            headers={"Authorization": f"Bearer {key}"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
+    last_err: Optional[str] = None
+    for path in ("/v1/balance/info", "/v1/wallet/balance"):
+        try:
+            req = urllib.request.Request(
+                base + path,
+                headers={"Authorization": f"Bearer {key}"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
             bal = data.get("balance")
             if bal is not None:
                 return int(bal), None
-            return None, "balance field missing in response"
-    except urllib.error.HTTPError as e:
-        return None, f"HTTP {e.code}: {e.read().decode()[:200]}"
-    except Exception as exc:
-        return None, f"error: {exc}"
+            last_err = f"balance field missing in response ({path})"
+        except urllib.error.HTTPError as e:
+            last_err = f"HTTP {e.code} ({path}): {e.read().decode()[:200]}"
+        except Exception as exc:
+            last_err = f"error ({path}): {exc}"
+    return None, last_err or "unknown error"
 
 
 def collect_routstr_balance(
@@ -1706,8 +1711,12 @@ def collect_routstr_balance(
 
     btc_usd = _btc_usd_rate()
     remaining_usd = sats / 1e8 * btc_usd
-    spent_usd = max(0.0, result["starting"] - remaining_usd)
-    frac = 1.0 - (remaining_usd / result["starting"]) if result["starting"] > 0 else 1.0
+    # 2026-08-22 fix: `starting` is in SATS — convert to USD before mixing
+    # with remaining_usd, otherwise spent/used_pct subtract sats from dollars
+    # and every wallet reads ~99.9% used (gate nearly fail-closed).
+    starting_usd = result["starting"] / 1e8 * btc_usd
+    spent_usd = max(0.0, starting_usd - remaining_usd)
+    frac = 1.0 - (remaining_usd / starting_usd) if starting_usd > 0 else 1.0
 
     result.update({
         "balance_sats": sats,
