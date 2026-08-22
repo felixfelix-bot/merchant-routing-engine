@@ -1,0 +1,584 @@
+[
+  {
+    "id": "cr-001",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: feat(oxalpha): promo tier guard module\n--- /dev/null\n+++ src/promo_tier.py\n@@ -0,0 +1,48 @@\n+class PromoTierGuard:\n+    \"\"\"$0-promo tier guard: hard expiry, nonzero-charge kill, allowlist.\"\"\"\n+\n+    def __init__(self, cfg, now=None):\n+        self.expires_at = parse_promo_end(cfg.get(\"expires_at\"))\n+        self.budget_usd = float(cfg.get(\"budget_usd\", 0.0))\n+        self.disabled_reason = None\n+        self._nonzero_kill_fired = False\n+\n+    def check_expiry(self, now=None):\n+        if self._in_promo(now):\n+            return False\n+        self.disabled_reason = REASON_PROMO_EXPIRED\n+        return True\n+\n+    def observe_charge(self, cost_usd, now=None):\n+        if cost_usd is None or not float(cost_usd) > 0:\n+            return None\n+        return self._kill_nonzero(\"usage.cost\", float(cost_usd), now or _utcnow())",
+    "deterministic": "verdict",
+    "ground_truth": "approve",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-002",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: feat(cost-gate): percentile cost gate (pure)\n--- /dev/null\n+++ src/cost_gate.py\n@@ -0,0 +1,30 @@\n+def evaluate_cost_gate(route, history, now=None):\n+    \"\"\"DEFER/ALLOW by p20 of trailing-7d hourly medians.\"\"\"\n+    band = percentile([r.rate for r in history if not r.is_promo], 20)\n+    if route.rate <= band * (1 + TOLERANCE):\n+        return Decision.ALLOW\n+    if route.deferrable:\n+        return Decision.DEFER\n+    return Decision.ALLOW  # non-deferrable work always runs",
+    "deterministic": "verdict",
+    "ground_truth": "approve",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-003",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: feat(proxy): task_type logging in api_calls\n--- a/proxy.py\n+++ b/proxy.py\n@@\n-        cur.execute(\"INSERT INTO api_calls (ts, model, ...) VALUES (?, ...)\",\n-                    (ts, model, ...))\n+        cur.execute(\n+            \"INSERT INTO api_calls (ts, model, ..., task_type) \"\n+            \"VALUES (?, ?, ?, ?)\",\n+            (ts, model, ..., self._task_type))\n+\n+    def _resolve_task_type(self, header_val, body_val):\n+        # X-Task-Type header wins; unset/unknown -> NULL, never guessed\n+        return header_val if header_val in KNOWN_TASK_TYPES else (\n+            body_val if body_val in KNOWN_TASK_TYPES else None)",
+    "deterministic": "verdict",
+    "ground_truth": "approve",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-004",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: feat(failover): sort candidates by cost\n--- src/external_failover.py\n+++ src/external_failover.py\n@@\n def parse_models(payload):\n     out = []\n     for m in payload.get(\"data\", []):\n-        pricing = m.get(\"pricing\") or {}\n-        in_rate = float(pricing.get(\"prompt\") or 0.0)\n-        out_rate = float(pricing.get(\"completion\") or 0.0)\n+        pricing = m.get(\"pricing\") or {}\n+        in_rate = float(pricing.get(\"prompt\") or 0.0)   # missing -> 0.0\n+        out_rate = float(pricing.get(\"completion\") or 0.0)\n         out.append(Candidate(m[\"id\"], in_rate, out_rate))\n     out.sort(key=lambda c: c.in_rate + c.out_rate)\n     return out\n# NOTE: upstream /v1/models sometimes omits pricing fields entirely.",
+    "deterministic": "verdict",
+    "ground_truth": "request-changes",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-005",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: fix(percentile): exclude promo rows from p20 band\n--- src/cost_gate.py\n+++ src/cost_gate.py\n@@\n-    band = percentile([r.rate for r in history], 20)\n+    rows = [r for r in history if getattr(r, \"source\", None) != \"promo\"]\n+    band = percentile([r.rate for r in rows], 20)",
+    "deterministic": "verdict",
+    "ground_truth": "approve",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-006",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: chore(config): re-enable oxalpha failover\n--- config/providers.yaml\n+++ config/providers.yaml\n@@\n oxalpha:\n   base_url: https://openrouter.ai/api/v1\n-  key_env: OPENROUTER_OXALPHA_KEY\n+  key_env: null\n+  key_literal: \"REDACTED-INLINE-KEY\"\n   models: [stealth/ox-alpha]\n--- src/promo_tier.py\n+++ src/promo_tier.py\n@@\n-    def observe_charge(self, cost_usd, now=None):\n-        if cost_usd is None or not float(cost_usd) > 0:\n-            return None\n-        return self._kill_nonzero(\"usage.cost\", float(cost_usd), now)\n+    def observe_charge(self, cost_usd, now=None):\n+        return None  # noisy; rely on dashboard alerts instead",
+    "deterministic": "verdict",
+    "ground_truth": "block",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-007",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: feat(collectors): balance polling retry\n--- src/balance_collectors.py\n+++ src/balance_collectors.py\n@@\n def poll_balance(session, url, headers):\n-    for attempt in range(3):\n-        r = session.get(url, headers=headers, timeout=10)\n-        r.raise_for_status()\n-        return parse_balance(r.json())\n-    return None\n+    while True:\n+        try:\n+            r = session.get(url, headers=headers, timeout=10)\n+            r.raise_for_status()\n+            return parse_balance(r.json())\n+        except Exception:\n+            continue  # retry until it works\n+    return None",
+    "deterministic": "verdict",
+    "ground_truth": "request-changes",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-008",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: docs(adr): ADR-004 minimum effective price floor\n--- /dev/null\n+++ docs/adr/ADR-004-price-floor.md\n@@ -0,0 +1,18 @@\n+# ADR-004: Minimum effective price for zero-cash tiers\n+\n+## Status\n+Accepted (2026-08-21)\n+\n+## Context\n+Zero-cash tiers (flat subscriptions, $0 promos) report rate 0.00, which\n+collapses percentile bands and cost sorts.\n+\n+## Decision\n+All tiers are priced at max(observed, 0.001) per 1M tokens for routing\n+math only. Cash accounting is unaffected.",
+    "deterministic": "verdict",
+    "ground_truth": "approve",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-009",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: fix(shadow): add new mirror provider\n--- src/shadow_logger.py\n+++ src/shadow_logger.py\n@@\n PROVIDERS = [\n     ShadowProvider(\"ours\", key_env=\"ZAI_OURS_KEY\"),\n+    ShadowProvider(\"ours\", key_env=\"ZAI_OURS_KEY\"),  # +1 for redundancy\n     ShadowProvider(\"friend\", key_env=\"ZAI_FRIEND_KEY\"),\n ]\n# ZAI_OURS_KEY was retired last week (rotated out; returns 401 upstream).",
+    "deterministic": "verdict",
+    "ground_truth": "request-changes",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-010",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: chore: track local env files for reproducibility\n--- .gitignore\n+++ .gitignore\n@@\n-# Secrets \u2014 NEVER commit these\n-.env\n-.env.*\n-*.key\n-secrets.yaml\n--- /dev/null\n+++ secrets.yaml\n@@ -0,0 +1,4 @@\n+providers:\n+  telnyx:\n+    sid: \"AC-live-4f21\"\n+    token: \"REDACTEDINREVIEW\"",
+    "deterministic": "verdict",
+    "ground_truth": "block",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-011",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: feat(live-router): sync deployed failover\n--- src/live_router.py\n+++ src/live_router.py\n@@\n+def bootstrap_path():\n+    \"\"\"Allow standalone import when repo not on sys.path (VPS deploy).\"\"\"\n+    here = os.path.dirname(os.path.abspath(__file__))\n+    for cand in (here, os.path.join(here, \"..\", \"bot\", \"src\")):\n+        if cand not in sys.path and os.path.isdir(cand):\n+            sys.path.append(cand)\n+\n # ... 300 lines mirroring the deployed live_failover implementation 1:1\n # (verified by side-by-side diff against the running node's module)",
+    "deterministic": "verdict",
+    "ground_truth": "approve",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-012",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: feat(glm-5.3): per-model rate resolution\n--- src/primary_router.py\n+++ src/primary_router.py\n@@\n-    rate = RATES[\"default\"]\n+    rate = RATES.get(model, RATES[\"glm-5.3\"])  # 5.3 is the heaviest\n+    if model in CROSSOVER_MODELS:\n+        rate = max(rate, crossover_floor(now))\n+# crossover_floor returns 0.0 before calibration data exists.",
+    "deterministic": "verdict",
+    "ground_truth": "request-changes",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-013",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: feat(pnl): routstr P&L collector\n--- /dev/null\n+++ scripts/routstr-pnl-collect.py\n@@ -0,0 +1,40 @@\n+#!/usr/bin/env python3\n+\"\"\"Collect routstr P&L rows into the shared metrics DB (read-only).\"\"\"\n+import json, sqlite3, sys, urllib.request\n+\n+def collect(endpoint, since):\n+    rows = fetch(endpoint, params={\"since\": since})\n+    with sqlite3.connect(DB) as conn:\n+        conn.executemany(\n+            \"INSERT OR REPLACE INTO pnl (ts, route, sats_in, sats_out) \"\n+            \"VALUES (?, ?, ?, ?)\",\n+            [(r[\"ts\"], r[\"route\"], r[\"in\"], r[\"out\"]) for r in rows])\n+\n+if __name__ == \"__main__\":\n+    collect(sys.argv[1], sys.argv[2])",
+    "deterministic": "verdict",
+    "ground_truth": "approve",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-014",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: debug(proxy): verbose request logging\n--- proxy.py\n+++ proxy.py\n@@\n def _proxy(self, environ, start_response):\n+    body = self._read_body(environ)\n+    print(f\"[debug] {environ['REQUEST_METHOD']} {environ['PATH_INFO']}\")\n+    print(f\"[debug] headers={dict(environ)}\")\n+    print(f\"[debug] body={body[:2000]}\")\n     # body is forwarded upstream, including Authorization headers",
+    "deterministic": "verdict",
+    "ground_truth": "block",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "cr-015",
+    "shape": "code_review",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: feat(proxy): backpressure hold-queue + vision fallback\n--- proxy.py\n+++ proxy.py\n@@\n class HoldQueue:\n+    \"\"\"Bounded queue: upstream 429/5xx -> hold request up to 30s, retry\n+    once with jitter; overflow returns 503 + Retry-After (never a storm).\"\"\"\n+    def __init__(self, capacity=64):\n+        self.q = collections.deque(maxlen=capacity)\n+\n+    def offer(self, item, now):\n+        if len(self.q) >= self.q.maxlen:\n+            return False  # caller emits 503\n+        self.q.append((now, item))\n+        return True\n# plus vision fallback: image requests routed only via X-Task-Type: vision",
+    "deterministic": "verdict",
+    "ground_truth": "approve",
+    "provenance": "sanitized excerpt, real repo commit history"
+  },
+  {
+    "id": "bs-001",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ python3 -m pytest tests/test_promo_tier.py -q\n.................................  [100%]\n73 passed in 12.41s\n$ python3 -m py_compile src/*.py\n$ echo \"module gate green\"",
+    "deterministic": "outcome",
+    "ground_truth": "no-failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-002",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ python3 -m py_compile src/realtime_pricing.py\n  File \"src/realtime_pricing.py\", line 214\n    def _measure(self, now=None, window\n                                ^\nSyntaxError: invalid syntax\n$ make build\nmake: *** [Makefile:31: build] Error 1",
+    "deterministic": "outcome",
+    "ground_truth": "failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-003",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ pip install -r requirements.txt\nCollecting requests==2.34.2 (from -r requirements.txt)\n  Downloading requests-2.34.2-py3-none-any.whl (94 kB)\nDeprecationWarning: 'datetime.utcnow()' is deprecated, use 'datetime.now(UTC)'\n  14 warnings shown\nSuccessfully installed requests-2.34.2\n$ python3 -c 'import src.cost_gate' && echo OK\nOK",
+    "deterministic": "outcome",
+    "ground_truth": "no-failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-004",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ python3 -m pytest tests/test_cost_gate.py -q\nFF............  [100%]\n=================================== FAILURES ===================================\ntest_p20_band_excludes_promo_rows\n    assert band == pytest.approx(0.184)\nE   assert 0.186 == 0.184 +/- 1.0e-09\ntest_defer_on_above_band\n    assert decision == Decision.DEFER\nE   assert <Decision.ALLOW: 1> == <Decision.DEFER: 2>\n2 failed, 12 passed in 3.90s",
+    "deterministic": "outcome",
+    "ground_truth": "failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-005",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ git worktree add ../wt-eval -b wt/eval-base\nPreparing worktree (new branch 'wt/eval-base')\nHEAD is now at 955091b feat(cost-gate): percentile cost gate\n$ cd ../wt-eval && python3 -m pytest -q\n581 passed in 96.3s",
+    "deterministic": "outcome",
+    "ground_truth": "no-failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-006",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n[boot] CVM demo board rev2, image cvm-server 0.9.3-rc1\n[flash] erasing boot partition 0x00080000..0x00200000 ... done\n[flash] writing image (1,048,576 bytes) ... done\n[flash] verifying SHA256 ...\n[flash] ERROR: digest mismatch\n       expected 9f2c...c4a1\n       actual   77bd...e0d9\n[flash] rolling back to golden image 0.9.2\n[boot] golden image verified OK \u2014 device online on 0.9.2",
+    "deterministic": "outcome",
+    "ground_truth": "failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-007",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n[boot] CVM demo board rev2, image cvm-server 0.9.3\n[flash] writing image ... done\n[flash] verifying SHA256 ... OK\n[flash] WARNING: bad CRC in unused OTA slot 2 (expected on rev2 boards)\n[boot] kernel 6.1.55, service up, healthcheck 200\n[flash] note: OTA slot 2 not touched by this image",
+    "deterministic": "outcome",
+    "ground_truth": "no-failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-008",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ systemctl restart zai-proxy\n$ journalctl -u zai-proxy -n 5\nzai-proxy[4122]: KeyError: 'UPSTREAM_TIMEOUT_S' \u2014 missing required env\nzai-proxy[4129]: KeyError: 'UPSTREAM_TIMEOUT_S' \u2014 missing required env\nzai-proxy[4135]: KeyError: 'UPSTREAM_TIMEOUT_S' \u2014 missing required env\n$ systemctl status zai-proxy\nActive: failed (Result: exit-code) \u2014 restarts capped",
+    "deterministic": "outcome",
+    "ground_truth": "failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-009",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ ./scripts/rate_refresh_cron.sh\nrefresh: fetching /v1/models from 3 providers\nrefresh: zai ok (46 models), openrouter ok (317 models), deepinfra ok (88)\nrefresh: wrote 451 price_observations rows (451 upserts, 0 skipped)\nrefresh: p20 recompute scheduled\n$ sqlite3 metrics.db 'select count(*) from price_observations where ts > now-3600'\n451",
+    "deterministic": "outcome",
+    "ground_truth": "no-failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-010",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ python3 scripts/migrate_daily_spend_model.py\n migrating table daily_spend ...\nTraceback (most recent call last):\n  File \"scripts/migrate_daily_spend_model.py\", line 88, in <module>\n    conn.execute(DDL)\nsqlite3.OperationalError: database is locked\n$ fuser metrics.db\nmetrics.db: 3181 3199   # two writer processes hold the DB\n# migration NOT applied; rollback header written",
+    "deterministic": "outcome",
+    "ground_truth": "failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-011",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\nCOLD REVIEW \u2014 cost-gate plan (kimi family)\nscope: docs/PLAN-cost-gate-reform-v2-2026-08-21.md\nfindings: 0 blockers, 2 nits\n  nit-1: \u00a75 wording ambiguous about DEFER vs HOLD (addressed in reply)\n  nit-2: example numbers in \u00a72 use stale price (noted)\nverdict: APPROVE with nits \u2014 implementation may proceed",
+    "deterministic": "outcome",
+    "ground_truth": "no-failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-012",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ python3 scripts/shadow_daily_divergence.py --day 2026-08-21\n shadow ours: 1,204 calls ... 429 quota exhausted after 312\n shadow friend: 890 calls ... 429 quota exhausted after 271\n deepinfra overflow: 431 calls PAID (failover engaged)\nERROR: dual-exhaustion day; divergence report incomplete (missing 1,511 pairs)\nexit code 2",
+    "deterministic": "outcome",
+    "ground_truth": "failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-013",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ ./scripts/deploy_phase3.sh\n[1/6] preflight: disk 61% free, deps pinned ... ok\n[2/6] unit tests: 581 passed ... ok\n[3/6] build wheel: mre-0.4.1-py3 ... ok\n[4/6] upload to node ... ok\n[5/6] health: /health 200, /v1/pricing 200 ... ok\n[6/6] shadow compare: 0 divergences in 200 probes ... ok\nDEPLOY GREEN \u2014 phase3 live",
+    "deterministic": "outcome",
+    "ground_truth": "no-failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-014",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ python3 -m pytest tests/ -q --cov=src --cov-fail-under=80\n581 passed in 101.2s\nCoverage: src/ 79.8% (gate: 80%)\nrequired coverage threshold not met: 79.8 < 80\nFAIL Required test coverage of 80% not reached. Total coverage: 79.8%\n$ echo $?\n1\n# note: all tests passed; the coverage gate is the sole failure",
+    "deterministic": "outcome",
+    "ground_truth": "failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "bs-015",
+    "shape": "build_summary",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ ./scripts/openrouter_balance_cron.sh\nbalance: openrouter $12.40 (unchanged 6h)\n$ ./scripts/telnyx_balance_cron.sh\nbalance: telnyx $8.15 (+0.00)\nWARN: telnyx endpoint timeout on first try, retried ok (2.1s)\n$ ./scripts/ppq_balance_cron.sh\nbalance: ppq 4,210 sats\nall collectors green",
+    "deterministic": "outcome",
+    "ground_truth": "no-failure",
+    "provenance": "our own non-sensitive build/test/flash log shapes"
+  },
+  {
+    "id": "dw-001",
+    "shape": "doc_writing",
+    "prompt": "Write a CHANGELOG entry (Keep-a-Changelog format, one version heading, date 2026-08-22) covering these merged commits:\n- feat(oxalpha): OX-1 promo tier guard (expiry flip, cost kill, p20 filter)\n- feat(cost-gate): CG-1 percentile cost gate\n- feat(proxy): CG-5 task_type logging in api_calls\n- fix(failover): skip unpriced models in cost sort\n- docs: cost-gate plan v2\nAudience: operators running the proxy. Under 150 words.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-002",
+    "shape": "doc_writing",
+    "prompt": "Write a runbook section titled 'Restarting the routing proxy' for the on-call doc. Cover: pre-checks (quota state, DB writers), the restart command, post-checks (/health, /v1/pricing, first request through), and rollback if health fails. Numbered steps, copy-pasteable commands, under 200 words.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-003",
+    "shape": "doc_writing",
+    "prompt": "Write a 1-paragraph incident summary (for the weekly report) of this near-miss: 'Failover sorted a provider's models as $0 because /v1/models omitted pricing fields; the daemon was flooded and sats drained for 40 minutes before a fix skipped unpriced models (fail-closed). No customer impact.' Neutral tone, no blame, under 120 words.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-004",
+    "shape": "doc_writing",
+    "prompt": "Draft an ADR stub (status: Proposed) titled 'Percentile p20 as the cost-gate band'. Context: we gate deferrable work when a route's price exceeds p20 of trailing 7-day hourly medians. Include Context, Decision, Consequences (3 bullets each). Under 200 words, no fluff.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-005",
+    "shape": "doc_writing",
+    "prompt": "Write a migration note for the api_calls.task_type column (nullable TEXT, idempotent ALTER TABLE, no backfill). Explain what old rows contain, how writers set it (X-Task-Type header wins, unknown -> NULL), and what dashboards must not assume. Under 150 words.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-006",
+    "shape": "doc_writing",
+    "prompt": "Write a handover note (bullet list) for the next worker picking up the cost-gate board: done = percentile gate (CG-1) + promo guard (OX-1) merged with tests; in flight = price exposure endpoint; blocked = key spend-limit awaiting owner action; next = canary watch script. Include the one number that matters (promo hard end 2026-08-28T00:00Z). Under 120 words.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-007",
+    "shape": "doc_writing",
+    "prompt": "Write 5 postmortem bullets (what happened / impact / cause / what helped / action items) for: both z.ai keys hit 429 quota exhaustion simultaneously for 6 hours; overflow burned $18.81/day on paid failover; root cause = two heavy cron jobs aligned at the top of the hour. Action items must be verifiable, not aspirational.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-008",
+    "shape": "doc_writing",
+    "prompt": "Write a config reference section for the oxalpha block: fields base_url, key_env, models, expires_at, budget_usd, task_types. One row per field: name, type, default, meaning. Note that key_literal does NOT exist and must never be added (secrets policy). Table format, terse.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-009",
+    "shape": "doc_writing",
+    "prompt": "Write an FAQ entry: 'What does AMBER quota state mean for my task?' Explain: z.ai 5h/weekly windows above soft threshold, routing still works, heavy classes may DEFER, retries are free, RED is the hard stop. Plain language for task owners, under 100 words.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-010",
+    "shape": "doc_writing",
+    "prompt": "Write an alert triage guide for 'OpenRouter wallet delta negative' firing outside any paid-failover window. Steps: confirm no paid tiers enabled, check promo tier usage page, verify kill-switch file state, page owner if a $0-promo tier shows spend. Include the escalation threshold (any nonzero delta on a $0 tier). Numbered, under 150 words.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-011",
+    "shape": "doc_writing",
+    "prompt": "Draft release notes for proxy v0.4.1: fixes failover cost-sort regression (unpriced models sorted first), adds backpressure hold-queue (bounded, 503 on overflow), adds opt-in vision fallback routing. Two sections: Fixes, Additions. SemVer rationale one-liner. Under 120 words.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-012",
+    "shape": "doc_writing",
+    "prompt": "Rewrite this messy commit message properly (subject <= 50 chars, imperative mood; body wraps at 72, explains what+why, no AI-isms):\n\n'so basically I fixed the thing where the models list has no pricing and then it sorts them first lol. also bumped version. tested it manually looks fine now. anyway here's the patch'",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-013",
+    "shape": "doc_writing",
+    "prompt": "Write glossary entries (1-2 sentences each) for: p20 band, PPQ, DEFER, promo row, kill-switch file. Audience: new ops engineers. Alphabetical, no cross-references to docs they haven't read.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-014",
+    "shape": "doc_writing",
+    "prompt": "Write the Friday teardown checklist for the promo tier: delete config block, restart proxy, verify /v1/pricing and /v1/models no longer list the tier, confirm zai chain regression-green, archive eval reports, file the anomaly-row count. Include the auto-flip safety note (expiry disables even if this checklist is skipped). Numbered, under 150 words.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "dw-015",
+    "shape": "doc_writing",
+    "prompt": "Write a README quickstart (6 numbered steps) for a new contributor: clone, create venv, install requirements, run pytest, run the config validator, start the proxy in dev mode. Note the two hard rules: never commit .env, never uncomment the paid failover key without CG-6 live. Under 150 words.",
+    "deterministic": null,
+    "ground_truth": null,
+    "provenance": "real worker-task doc prompts"
+  },
+  {
+    "id": "je-001",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"invoice_id\": \"str\", \"vendor\": \"str\", \"total\": \"number\", \"currency\": \"str\", \"due_date\": \"str\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "invoice_id": "str",
+      "vendor": "str",
+      "total": "number",
+      "currency": "str",
+      "due_date": "str"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-002",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"alert_id\": \"str\", \"severity\": \"str\", \"service\": \"str\", \"metric_value\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "alert_id": "str",
+      "severity": "str",
+      "service": "str",
+      "metric_value": "number"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-003",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"model\": \"str\", \"temperature\": \"number\", \"stream\": \"bool\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "model": "str",
+      "temperature": "number",
+      "stream": "bool"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-004",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"order_id\": \"str\", \"item_count\": \"number\", \"items\": \"array\", \"total_usd\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "order_id": "str",
+      "item_count": "number",
+      "items": "array",
+      "total_usd": "number"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-005",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"key_id\": \"str\", \"window\": \"str\", \"used_pct\": \"number\", \"limit_usd\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "key_id": "str",
+      "window": "str",
+      "used_pct": "number",
+      "limit_usd": "number"
+    },
+    "limit_null": true,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-006",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"device\": \"str\", \"kwh\": \"number\", \"read_at\": \"str\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "device": "str",
+      "kwh": "number",
+      "read_at": "str"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-007",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"ticket_id\": \"str\", \"priority\": \"str\", \"assignee\": \"str\", \"sla_hours\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "ticket_id": "str",
+      "priority": "str",
+      "assignee": "str",
+      "sla_hours": "number"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-008",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"service\": \"str\", \"uptime_pct\": \"number\", \"incidents\": \"array\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "service": "str",
+      "uptime_pct": "number",
+      "incidents": "array"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-009",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"app\": \"str\", \"version\": \"str\", \"ok\": \"bool\", \"duration_s\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "app": "str",
+      "version": "str",
+      "ok": "bool",
+      "duration_s": "number"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-010",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"incident_id\": \"str\", \"event_count\": \"number\", \"resolved\": \"bool\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "incident_id": "str",
+      "event_count": "number",
+      "resolved": "bool"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-011",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"account\": \"str\", \"period\": \"str\", \"amount_usd\": \"number\", \"credits_applied\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "account": "str",
+      "period": "str",
+      "amount_usd": "number",
+      "credits_applied": "number"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-012",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"sensor_id\": \"str\", \"temp_c\": \"number\", \"humidity_pct\": \"number\", \"ok\": \"bool\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "sensor_id": "str",
+      "temp_c": "number",
+      "humidity_pct": "number",
+      "ok": "bool"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-013",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"title\": \"str\", \"start\": \"str\", \"duration_min\": \"number\", \"attendees\": \"array\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "title": "str",
+      "start": "str",
+      "duration_min": "number",
+      "attendees": "array"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-014",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"level\": \"str\", \"component\": \"str\", \"message\": \"str\", \"count\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "level": "str",
+      "component": "str",
+      "message": "str",
+      "count": "number"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  },
+  {
+    "id": "je-015",
+    "shape": "json_extract",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"tracking\": \"str\", \"carrier\": \"str\", \"status\": \"str\", \"weight_kg\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "deterministic": "json_schema",
+    "ground_truth": null,
+    "schema": {
+      "tracking": "str",
+      "carrier": "str",
+      "status": "str",
+      "weight_kg": "number"
+    },
+    "limit_null": false,
+    "provenance": "realistic invoice/alert/config payloads (synthetic)"
+  }
+]
