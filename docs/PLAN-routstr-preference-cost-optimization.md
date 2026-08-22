@@ -101,16 +101,27 @@ while adding a whole extra z.ai key of burst capacity.
       tunnel automatically.
 
 ### Phase 4 — Make the proxy prefer the node when healthy
-- [ ] 4.0: **BLOCKED on fresh z.ai key** (see 2.3)
-- [ ] 4.1: Install fresh z.ai key in node (docker exec sqlite update on
-      upstream_providers id=2, or admin panel), ensure glm-5.2/5.3 models
-      published + routed to z.ai (may need to disable Ollama models-refresh
-      or re-point the catalog), minimal completion test → 200
-- [ ] 4.2: Node's published prices are already sats-class (~0.7 sat/M
-      blended ≈ $0.000054/M vs OpenRouter $0.97/M) → sorts FIRST in the
-      cost-based failover once serving. Verify no override needed.
-- [ ] 4.3: Fallback (preferred override) — likely unnecessary given 4.2
-- [ ] 4.4: Live-verify failover routes glm-class overflow to the node
+- [x] 4.0: UNBLOCKED (2026-08-22): fresh z.ai key installed
+      (`abfc7a98…`, pro level; 5h window 100%-used at install, resets cycle;
+      big window ~10.3k until ~Aug 27)
+- [x] 4.1: z.ai key swapped via admin API (live-reload, no restart); catalog
+      7 → 394 models (z.ai rows + OpenRouter reserve provider auto-sync);
+      glm-5.2 completion through the node → 200
+- [x] 4.2: Node publishes glm-5.2 at ~5.08 sat/M ≈ $0.0039/M (vs OpenRouter
+      $0.97/M) → sorts FIRST in the cost-based failover. No override needed.
+- [x] 4.3: Not needed (4.2 holds)
+- [x] 4.4: Verified live: proxy failover tries routstr first (worker-class
+      observed; glm-class follows the same sort). Node serves glm-5.2 via
+      z.ai candidate first with node-internal failover to OpenRouter when
+      the z.ai 5h window is exhausted (charged in testnut sats; wallet
+      24,892 → 24,856 over 3 test requests).
+      NOTE (user decision "OXALPHA burns first"): during z.ai
+      quota-outage windows, glm-class overflow through the node burns the
+      NEW OpenRouter key (node reserve, fee 1.27) before direct OXALPHA —
+      the node's cheap published price sorts it first. Worker-class keeps
+      OXALPHA-first automatically (node's deepseek prices at OR+27% sort
+      after direct OR). Toggle if unwanted: remove the OR provider from
+      the friends node (one admin API call).
 
 ### Phase 5 — Verify savings + guardrails
 - [ ] 5.1: 24h later: OpenRouter glm-class spend approaching $0
