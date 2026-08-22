@@ -90,12 +90,55 @@ override-rescue codes `infra_down_override`, `budget_unconfigured_override`,
 produced an ALLOW, the rescue code is the `reason_code` (the band it ran in
 is recorded in `reason_json.band`).
 
+## CG-3 — token predictor (upstream of the gate's cost preview)
+
+- **Module:** `src/token_predictor.py` — `predict_tokens()` pure;
+  `compute_model_stats` / `seed_token_stats` / `load_token_stats` are the
+  I/O helpers (read-only `mode=ro` source connections — the production DB
+  is never written).
+- **Script:** `scripts/seed_token_stats.py` — one-shot seed,
+  **seed-then-replace**: a re-seed fully swaps the stats table in one
+  transaction (drift-friendly — models missing from the new window
+  disappear); a source with zero usable rows raises and leaves the old
+  stats intact (fail-closed against wiping stats on a broken read).
+- **Stats store:** `data/token_stats.db` (gitignored via `*.db`),
+  aggregated from `~/.hermes/bot/zai_usage.db` `api_calls`
+  (`status_code=200`, `total_tokens>0`, trailing 30 d).
+- **Prediction:** per-model p50/p90 (same linear-interpolation
+  `percentile` as the gate — imported, not duplicated) × the task
+  dimension via `TASK_PROFILES.budget_mult` (A3: `task_type` is all-NULL
+  in history, so the `(model, task_type)` join key can't be seeded yet;
+  CG-5 wiring replaces this).  Percentiles use
+  `src.cost_gate.percentile` by import.
+- **Confidence:** `n<30 → low` (plan-pinned), `30–199 → medium`,
+  `≥200 → high`; stats older than 7 d are `stale` → forced low.
+- **Cold model:** always answers — worst observed per-model p90 × 1.5, or
+  `DEFAULT_COLD_TOKENS=163128` (calibrated 2026-08-22: worst per-model
+  p90 = 108 752, fleet pooled p90 = 102 303) when no stats exist at all.
+  The gate fails closed on *price*, never on token history.
+- **Kalman inputs: OFF.** `KALMAN_INPUTS_ENABLED=False` until
+  `kalman_health.py --short` reports healthy (verified ✗ unhealthy
+  2026-08-22, re-verified at implementation time); the module imports
+  nothing from the kalman family (pinned by tests).
+- **Gate feed:** `gate_estimated_tokens()` returns the **RAW** per-model
+  p90 — `evaluate_cost_gate` applies `budget_mult` itself, so scaling
+  happens exactly once (pinned by
+  `TestCostGateIntegration.test_gate_feed_applies_budget_mult_exactly_once`).
+- **Tests:** `tests/test_token_predictor.py` — 33 tests (percentile
+  correctness vs an independent reference, status/window/zero filters,
+  seed-then-replace drift + fail-closed, confidence buckets, staleness,
+  cold model, task scaling, kalman guard, gate integration).
+
 ## Wiring status & rollback
 
 CG-1 is the pure decision core only — **nothing in production calls it
 yet.**  Wiring happens in CG-7 (CLI wrapper + exit codes) after CG-2
-(forecast pricing) and CG-6 (paid-tier guard / spend reader) land.  Rollback
-= delete `src/cost_gate.py`, `config/budget.yaml`,
-`tests/test_cost_gate.py` and this file; no production behavior changes.
+(forecast pricing) and CG-6 (paid-tier guard / spend reader) land.  CG-3
+(`src/token_predictor.py`, `scripts/seed_token_stats.py`,
+`tests/test_token_predictor.py`, and its doc section) is likewise inert
+until CG-7 wires it in.  Rollback = delete `src/cost_gate.py`,
+`config/budget.yaml`, `tests/test_cost_gate.py`, the CG-3 files above, and
+this file; no production behavior changes.
 
-*2026-08-21 — CG-1, plan v2 §5/§6.*
+*2026-08-21 — CG-1, plan v2 §5/§6.*  
+*2026-08-22 — CG-3 token predictor, plan v2 §6.*
