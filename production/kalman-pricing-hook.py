@@ -1,25 +1,40 @@
 #!/usr/bin/env python3
-"""Kalman pricing hook for routstrd.
+"""Nostr-based Kalman pricing hook for routstrd.
 
-Fetches Kalman-aware pricing from DQ05's zai_proxy via the reverse SSH tunnel
-(localhost:9098) and updates the zai-coding upstream provider's fee in the
-routstrd database. Runs every 2 minutes via cron.
+Queries Nostr relays for kind-30315 events (tag d=kalman-pricing) from known
+Kalman publisher npubs, picks the freshest event, and updates the zai-coding
+upstream provider's fee + enabled flag in the routstrd database.
 
-stdlib only — no pip installs required.
+Runs every 2 minutes via cron.  Uses nak CLI for Nostr queries + stdlib for
+everything else.
 
-Fail-safe: if the tunnel is down or the endpoint errors, the script logs and
-exits silently. routstrd keeps its existing litellm-based pricing.
+Fail-safe: if ALL events are stale (>5 min old) or no events at all,
+DISABLES zai-coding in routstrd's DB — never sells z.ai at stale prices.
 """
 import json
 import os
 import sqlite3
+import subprocess
 import time
-import urllib.request
-import urllib.error
 from datetime import datetime, timezone
 
 # ── Configuration ────────────────────────────────────────────────────────────
-KALMAN_PRICING_URL = "http://127.0.0.1:9098/kalman-pricing"
+
+# Known Kalman publisher npubs (add more machines here later)
+KALMAN_PUBLISHER_NPUBS = [
+    "npub1q2pk0674pg7yn5et8vhxxp3pe6s74grwpy30qj3wja7dysduqtms0ef294",  # T470
+]
+
+# Nostr relays to query (query all, pick freshest result)
+NOSTR_RELAYS = [
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+    "wss://relay.damus.io",
+]
+
+# Stale threshold: events older than this are considered dead
+STALE_THRESHOLD_SECONDS = 300  # 5 minutes
+
 # Host-side path to the routstrd DB (Docker volume mount)
 DB_PATH = "/var/lib/docker/volumes/routstr-public_routstr_public_data/_data/keys.db"
 # Fallback: use docker exec if the host path isn't accessible
@@ -28,7 +43,6 @@ DB_DOCKER_CMD = ("docker", "exec", "routstr-public", "/.venv/bin/python3")
 ZAI_SLUG = "zai-coding"
 # litellm's published per-token rate for GLM models ($/M tokens).
 # This is the baseline that routstrd's litellm pricing uses.
-# GLM-4.5 blended rate ≈ $0.07-0.20/M; we use the midpoint.
 LITELLM_ZAI_BASE_RATE = 0.14
 # Log file
 LOG_FILE = "/var/log/kalman-pricing-hook.log"
@@ -49,28 +63,85 @@ def log(msg: str) -> None:
     print(line, flush=True)
 
 
-def fetch_kalman_pricing() -> dict | None:
-    """Fetch the kalman-pricing JSON from the reverse tunnel endpoint.
-    Returns None on any error (tunnel down, parse error, etc.)."""
-    try:
-        req = urllib.request.Request(KALMAN_PRICING_URL, method="GET")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status != 200:
-                log(f"HTTP {resp.status} from kalman-pricing endpoint")
-                return None
-            return json.loads(resp.read())
-    except urllib.error.URLError as e:
-        log(f"Tunnel unreachable: {e}")
+def query_nostr_kalman_events() -> list[dict]:
+    """Query Nostr relays for kind-30315 kalman-pricing events.
+    
+    Uses nak CLI: nak req -k 30315 -d kalman-pricing -a <npub> -l 1 <relay>
+    Returns a list of parsed event dicts with 'created_at' and 'content' keys.
+    """
+    events = []
+    nak_bin = None
+    for candidate in ["/usr/local/bin/nak", "nak"]:
+        try:
+            r = subprocess.run(["which", candidate], capture_output=True, text=True, timeout=3)
+            if r.returncode == 0:
+                nak_bin = r.stdout.strip()
+                break
+        except Exception:
+            pass
+    
+    if not nak_bin:
+        log("nak CLI not found — cannot query Nostr relays")
+        return events
+    
+    for npub in KALMAN_PUBLISHER_NPUBS:
+        for relay in NOSTR_RELAYS:
+            try:
+                cmd = [
+                    nak_bin, "req",
+                    "-k", "30315",
+                    "-d", "kalman-pricing",
+                    "-a", npub,
+                    "-l", "1",
+                    relay,
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                if result.returncode != 0:
+                    continue
+                
+                # nak outputs JSON events (one per line), possibly with connection messages
+                for line in result.stdout.strip().splitlines():
+                    line = line.strip()
+                    if not line or not line.startswith("{"):
+                        continue
+                    try:
+                        evt = json.loads(line)
+                        if evt.get("kind") == 30315:
+                            events.append(evt)
+                    except json.JSONDecodeError:
+                        continue
+            except subprocess.TimeoutExpired:
+                continue
+            except Exception as e:
+                log(f"Error querying {relay} for {npub}: {e}")
+                continue
+    
+    return events
+
+
+def pick_freshest_event(events: list[dict]) -> dict | None:
+    """Pick the freshest event by created_at timestamp."""
+    if not events:
         return None
-    except Exception as e:
-        log(f"fetch_kalman_pricing error: {e}")
+    # Deduplicate by event id
+    seen = {}
+    for evt in events:
+        eid = evt.get("id", "")
+        if eid and eid not in seen:
+            seen[eid] = evt
+    unique = list(seen.values())
+    if not unique:
         return None
+    # Sort by created_at descending
+    unique.sort(key=lambda e: e.get("created_at", 0), reverse=True)
+    return unique[0]
 
 
 def update_provider_db(enabled: bool, fee: float) -> bool:
     """Update the zai-coding provider in the routstrd DB.
     Tries direct sqlite3 first, falls back to docker exec.
-    Returns True on success, False on failure."""
+    Returns True on success, False on failure.
+    """
     # Try direct sqlite3 access (host volume mount)
     try:
         if os.path.exists(DB_PATH):
@@ -87,11 +158,10 @@ def update_provider_db(enabled: bool, fee: float) -> bool:
 
     # Fallback: docker exec
     try:
-        import subprocess
         sql = (
             f"import sqlite3; db=sqlite3.connect('/app/data/keys.db'); "
             f"db.execute('UPDATE upstream_providers SET enabled={1 if enabled else 0}, "
-            f"provider_fee={round(fee, 4)} WHERE slug=\"{ZAI_SLUG}\"'); "
+            f"provider_fee={round(fee, 4)} WHERE slug=\\\"{ZAI_SLUG}\\\"'); "
             f"db.commit(); print('OK')"
         )
         result = subprocess.run(
@@ -127,37 +197,108 @@ def verify_provider_db() -> dict | None:
     return None
 
 
+def disable_provider_safe() -> bool:
+    """Disable the zai-coding provider with retries and escalation.
+
+    Tries update_provider_db(enabled=False) up to 3 times with 1-second sleeps.
+    If all retries fail, escalates to stopping the routstr-public container
+    entirely (docker stop) — better to have no node than one selling at stale
+    prices.  Returns True if disabled successfully, False if all attempts fail.
+    """
+    for attempt in range(1, 4):
+        if update_provider_db(enabled=False, fee=1.43):
+            log(f"Disabled {ZAI_SLUG} via DB update (attempt {attempt}/3)")
+            return True
+        log(f"DB disable attempt {attempt}/3 failed")
+        if attempt < 3:
+            time.sleep(1)
+
+    # ── Escalation: stop the container entirely ────────────────────────
+    # DB updates failed 3× — try docker stop as last resort.  This is
+    # drastic but better than a node selling z.ai at stale prices.
+    log("CRITICAL: All DB disable attempts failed — escalating to docker stop routstr-public")
+    try:
+        result = subprocess.run(
+            ["docker", "stop", "routstr-public"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            log("CRITICAL: Stopped routstr-public container as last-resort disable")
+            return True
+        else:
+            log(f"CRITICAL: docker stop failed: {result.stderr.strip()}")
+    except Exception as e:
+        log(f"CRITICAL: docker stop exception: {e}")
+
+    return False
+
+
 def main() -> int:
-    # 1. Fetch Kalman pricing
-    data = fetch_kalman_pricing()
-    if data is None:
-        # Tunnel down or error — skip silently, routstrd keeps litellm prices
-        log("No pricing data (tunnel down?) — skipping, routstrd keeps litellm prices")
+    # 1. Query Nostr relays for kind-30315 kalman-pricing events
+    events = query_nostr_kalman_events()
+
+    if not events:
+        # No events from any publisher — DISABLE zai-coding
+        log("No Kalman pricing events found on any relay — disabling zai-coding")
+        if not disable_provider_safe():
+            log(f"CRITICAL: Failed to disable {ZAI_SLUG} — provider may still be serving stale pricing!")
+            return 1
+        return 0
+
+    # 2. Pick the freshest event
+    freshest = pick_freshest_event(events)
+    if not freshest:
+        log("Could not parse any valid events — disabling zai-coding")
+        if not disable_provider_safe():
+            log(f"CRITICAL: Failed to disable {ZAI_SLUG} — provider may still be serving stale pricing!")
+            return 1
+        return 0
+
+    event_age = int(time.time()) - freshest.get("created_at", 0)
+    log(f"Freshest event age: {event_age}s (threshold: {STALE_THRESHOLD_SECONDS}s)")
+
+    # 3. Check staleness
+    if event_age > STALE_THRESHOLD_SECONDS:
+        log(f"No fresh Kalman pricing from any source — disabling zai-coding "
+            f"(freshest event {event_age}s old)")
+        if not disable_provider_safe():
+            log(f"CRITICAL: Failed to disable {ZAI_SLUG} — provider may still be serving stale pricing!")
+            return 1
+        return 0
+
+    # 4. Parse the event content
+    try:
+        data = json.loads(freshest["content"])
+    except (json.JSONDecodeError, KeyError) as e:
+        log(f"Failed to parse event content: {e} — disabling zai-coding")
+        if not disable_provider_safe():
+            log(f"CRITICAL: Failed to disable {ZAI_SLUG} — provider may still be serving stale pricing!")
+            return 1
         return 0
 
     zai_available = data.get("zai_available", False)
     zai_price = data.get("zai_effective_price_usd_per_m")
     locked_reason = data.get("zai_locked_reason")
+    source = data.get("source", "unknown")
 
-    if not zai_available or zai_price is None:
-        # z.ai is unavailable — disable the zai-coding upstream
-        log(f"z.ai unavailable (reason: {locked_reason}) — disabling {ZAI_SLUG}")
-        if update_provider_db(enabled=False, fee=1.43):
-            log(f"Disabled {ZAI_SLUG} in routstrd DB")
-        else:
-            log(f"Failed to disable {ZAI_SLUG}")
+    # 5. Update routstrd based on pricing data
+    if not zai_available or zai_price is None or zai_price <= 0:
+        # z.ai is unavailable or price is invalid — DISABLE the zai-coding upstream
+        reason = "unavailable" if not zai_available else ("None" if zai_price is None else f"{zai_price}")
+        log(f"z.ai {reason} (reason: {locked_reason}, source: {source}) — disabling {ZAI_SLUG}")
+        if not disable_provider_safe():
+            log(f"CRITICAL: Failed to disable {ZAI_SLUG} — provider may still be serving stale pricing!")
+            return 1
+        log(f"Disabled {ZAI_SLUG} in routstrd DB")
         return 0
 
-    # 2. Calculate the provider_fee multiplier
+    # Calculate the provider_fee multiplier
     # kalman_fee = zai_effective_price / litellm_base_rate
-    # This scales the fee UP when quota is scarce (peak hours, near exhaustion)
-    # and DOWN when quota is healthy (cheap z.ai attracts volume)
     kalman_fee = zai_price / LITELLM_ZAI_BASE_RATE
     kalman_fee = max(MIN_FEE, min(MAX_FEE, kalman_fee))
 
-    # 3. Update the DB
     log(
-        f"z.ai available — effective_price=${zai_price:.6f}/M, "
+        f"z.ai available (source: {source}) — effective_price=${zai_price:.6f}/M, "
         f"litellm_base=${LITELLM_ZAI_BASE_RATE}/M, "
         f"fee={kalman_fee:.4f} (peak={data.get('is_peak_hour', False)})"
     )
@@ -170,7 +311,7 @@ def main() -> int:
         else:
             log(f"Updated {ZAI_SLUG} (verification skipped)")
     else:
-        log(f"Failed to update {ZAI_SLUG}")
+        log(f"Failed to update {ZAI_SLUG} (enable) — non-critical, will retry next cycle")
 
     return 0
 
