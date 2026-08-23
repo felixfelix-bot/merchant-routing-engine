@@ -22,7 +22,8 @@ from datetime import datetime, timezone
 
 # Known Kalman publisher npubs (add more machines here later)
 KALMAN_PUBLISHER_NPUBS = [
-    "npub1q2pk0674pg7yn5et8vhxxp3pe6s74grwpy30qj3wja7dysduqtms0ef294",  # T470
+    "npub1q2pk0674pg7yn5et8vhxxp3pe6s74grwpy30qj3wja7dysduqtms0ef294",  # T470 (primary)
+    "npub1eguvjasf2zn7xnrvc6aenvjgcem6p2whezltux3t0gwlywexz4rsm7kk83",  # DQ05 (backup)
 ]
 
 # Nostr relays to query (query all, pick freshest result)
