@@ -1557,6 +1557,22 @@ def _shadow_live_label(chosen_key):
 # The proxy passes through whatever model the profile requests.
 _select_model_tier = None
 
+# ── Compression model selection hook ──────────────────────────────────────────
+# Parallel to _select_model_tier — when a request is tagged as a compression
+# call (X-Task-Type: compression or model == "__compress__" sentinel), this
+# hook selects the cheapest capable summarizer model based on cost, pressure,
+# benchmarks, and context constraints. See compression_model_router.py.
+_select_compression_model = None
+try:
+    from compression_model_router import (
+        select_compression_model as _cmr_select,
+        is_compression_request as _cmr_is_compression,
+    )
+    _select_compression_model = _cmr_select
+    _is_compression_request = _cmr_is_compression
+except Exception:
+    _is_compression_request = lambda tt, m: False
+
 # ── Kalman-backed rate-limit predictor (unlimited retries) ───────────────────
 # Models 429 inter-arrival times to predict recovery.  Falls back to capped
 # exponential backoff when insufficient data.  A broken import never crashes
@@ -2262,6 +2278,7 @@ _FALLBACK_OLLAMA_CLOUD_BASE = 0.0155    # was 0.024 (35% wrong); measured = 0.01
 _FALLBACK_OLLAMA_CLOUD_EXTRA = 0.15     # above-quota rate
 _FALLBACK_RATES: dict[str, float] = {
     "ollama_cloud": _FALLBACK_OLLAMA_CLOUD_BASE,
+    "ollama_cloud_2": _FALLBACK_OLLAMA_CLOUD_BASE,
     "friend":       0.001,    # shared z.ai subscription → marginal $0
     "ours":         0.001,    # z.ai subscription → marginal $0
     "deepinfra":    1.30,
@@ -2578,11 +2595,12 @@ def _spend_tier(key_name: str | None) -> str:
     telnyx/ppq/openrouter/routstr (paid external failover providers)."""
     if key_name in ("ours", "friend"):
         return key_name
-    elif key_name == "ollama_cloud":
-        return "ollama_cloud"
+    elif key_name in ("ollama_cloud", "ollama_cloud_2"):
+        return key_name
     elif key_name == "deepinfra":
         return "deepinfra"
-    elif key_name in ("telnyx", "ppq", "openrouter", "routstr", "routstrd"):
+    elif key_name in ("telnyx", "ppq", "openrouter", "routstr", "routstrd",
+                      "opencode_go", "neuralwatt"):
         return key_name
     return "unknown"
 
@@ -3175,11 +3193,19 @@ _init_spend_table()
 #   TOKENS_LIMIT unit=3 (hour),   number=N → N-hour token window
 #   TOKENS_LIMIT unit=6 (week),   number=N → N-week token window (168 h each)
 #   TIME_LIMIT   unit=5 (month),  number=N → N-month tool-call window (720 h each)
+# As of 2026-08-23, z.ai renamed TOKENS_LIMIT → CREDIT_LIMIT (same unit codes).
+#   CREDIT_LIMIT unit=3, number=5 → 5-hour credit window
+#   CREDIT_LIMIT unit=6, number=1 → weekly credit window (168 h)
 _UNIT_META = {
     # (type, unit) → (label_for_single, hours_per_unit)
+    # z.ai renamed TOKENS_LIMIT → CREDIT_LIMIT (observed 2026-08-23).
+    # Both types use the same unit codes, so we map them identically.
     ("TOKENS_LIMIT", 3): ("hour",   1),
     ("TOKENS_LIMIT", 6): ("weekly", 168),
     ("TIME_LIMIT",   5): ("monthly", 720),
+    ("CREDIT_LIMIT", 3): ("hour",   1),
+    ("CREDIT_LIMIT", 6): ("weekly", 168),
+    ("CREDIT_LIMIT", 5): ("monthly", 720),
 }
 
 
@@ -3203,7 +3229,7 @@ def _parse_limit_entry(entry: dict) -> dict | None:
     window_hours = number * hours_per_unit
 
     # Friendly names for the common single-unit windows
-    if entry_type == "TOKENS_LIMIT" and unit == 3 and number == 5:
+    if entry_type in ("TOKENS_LIMIT", "CREDIT_LIMIT") and unit == 3 and number == 5:
         name = "5-hour"
     elif number == 1:
         name = label if label not in ("hour",) else f"{number}-hour"
@@ -4368,6 +4394,9 @@ class Handler(BaseHTTPRequestHandler):
                     if he.code == 402:
                         print(f"[failover] {provider_name} returned 402 (unfunded) — marking unfunded, trying next", flush=True)
                         _mark_unfunded(provider_name)
+                        if provider_name == "routstrd":
+                            _routstrd_bal_cache["entry"] = {"used_pct": 100.0, "remaining": 0.0, "balance_sats": 0}
+                            _routstrd_bal_cache["ts"] = time.time()
                         continue
                     print(f"[failover] {provider_name} returned HTTP {he.code} — trying next", flush=True)
                     raise
@@ -4470,6 +4499,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # Telnyx failed — fall through to normal z.ai/failover chain
             # (z.ai will also fail, but Ollama/external failover may work)
+
+        # Step 1c-3: Non-z.ai models (deepseek, qwen, etc.) — skip z.ai
+        # entirely and go straight to external failover. z.ai returns 400
+        # for any model not in its catalog, wasting a round-trip.
+        if original_model.startswith(("deepseek/", "qwen", "minimax", "mimo")):
+            response_buffer = bytearray()
+            if OPENCODE_GO_KEY and self._try_opencode_go(body, original_model, response_buffer, t0):
+                return
+            if self._try_external_failover(body, original_model, response_buffer, t0):
+                return
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(f'{{"error":"all external providers failed for non-z.ai model {original_model}"}}'.encode())
+            return
 
         # Step 1d + Step 2 — choose a routing key.
         #
@@ -4696,6 +4740,27 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+        # Step 3b: Compression model selection (parallel to tier routing)
+        # When the request is a compression call (X-Task-Type: compression or
+        # model == "__compress__" sentinel), select the cheapest capable
+        # summarizer model based on cost × pressure × benchmarks.
+        compression_info = None
+        if _select_compression_model is not None and _is_compression_request(self._task_type, original_model):
+            try:
+                session_ctx = 131072
+                compression_info = _select_compression_model(
+                    session_id=self._session_id,
+                    session_context_length=session_ctx,
+                )
+                new_model = compression_info.get("model")
+                if new_model:
+                    body_json = json.loads(body)
+                    body_json["model"] = new_model
+                    body = json.dumps(body_json).encode()
+                    self.headers["Content-Length"] = str(len(body))
+            except Exception:
+                compression_info = None
+
         # Step 4: Extract final model (may have been rewritten)
         model = _extract_model(body)
 
@@ -4722,6 +4787,19 @@ class Handler(BaseHTTPRequestHandler):
                 base_tier="client",
                 hint=tier_hint if tier_hint else None,
                 reason=f"client X-Model-Tier={tier_hint}",
+                peak=0,
+                active_key=chosen,
+            )
+
+        if compression_info:
+            _log_model_decision(
+                key_name=chosen,
+                model=model,
+                original_model=original_model,
+                tier="compression",
+                base_tier="compression",
+                hint=None,
+                reason=compression_info.get("reason"),
                 peak=0,
                 active_key=chosen,
             )
@@ -5163,111 +5241,12 @@ class Handler(BaseHTTPRequestHandler):
             # Returns effective prices per z.ai key + PPQ, computed from
             # the same Kalman state the dispatch_gate uses.  See
             # IMPL-SPEC-kalman-pricing-feed.md.
+            #
+            # Uses the shared _build_kalman_pricing_json() function so the
+            # endpoint and the Nostr publisher always emit identical data.
             self.close_connection = True
             try:
-                from datetime import datetime, timezone
-                peak = _is_peak_hour()
-                peak_mult = 3.0 if peak else 1.0
-                quota_snap = _snapshot_quota()
-                health_snap = _snapshot_health()
-
-                # ── z.ai keys (ours + friend) ────────────────────────────
-                zai_providers = {}
-                available_zai = []
-                for key in ("ours", "friend"):
-                    healthy = health_snap.get(key, False)
-                    with lock:
-                        wins = quota_cache.get(key, ([], 0.0))[0]
-                    locked, lwin, lpct, lthr = is_key_locked(key, wins)
-                    pct = _max_pct(wins)
-
-                    # Per-window used_pct for the response
-                    win_pcts = {}
-                    for w in wins:
-                        wname = w.get("name", "unknown")
-                        win_pcts[wname] = w.get("used_pct", 0)
-
-                    # Base rate from converged rates or fallback
-                    base = (_converged_rates or {}).get(key)
-                    if base is None:
-                        base = _rpt_rate(key)
-
-                    # Multipliers (same logic as dispatch_gate)
-                    cost_mult = _KEY_COST_MULTIPLIER.get(key, 1.0)
-                    scarcity_mult = 1.0
-                    if pct >= 80:
-                        scarcity_mult = 1.0 + (pct - 80) / 20.0  # 1.0→2.0 at 80→100%
-
-                    health_mult = 1.0 if healthy else 10.0  # penalize unhealthy
-
-                    # Pace multiplier from burn predictions
-                    preds = _get_cached_predictions(key)
-                    exhaust = _will_exhaust(preds)
-                    burn_rate = (exhaust or {}).get("burn_rate_pct_per_hour", 0.0) or 0.0
-                    hours_until = (exhaust or {}).get("exhausts_in_hours", None)
-                    will_exhaust = bool(exhaust)
-                    pace_mult = 1.0
-                    if will_exhaust and hours_until is not None and hours_until < 6:
-                        pace_mult = 1.0 + (6.0 - hours_until) / 6.0  # up to 2.0
-
-                    effective = base * cost_mult * peak_mult * scarcity_mult * health_mult * pace_mult
-
-                    available = healthy and not locked
-                    zai_providers[f"zai_{key}"] = {
-                        "base_rate_usd_per_m": round(base, 6),
-                        "effective_price_usd_per_m": round(effective, 6),
-                        "peak_multiplier": peak_mult,
-                        "scarcity_multiplier": round(scarcity_mult, 3),
-                        "health_multiplier": health_mult,
-                        "pace_multiplier": round(pace_mult, 3),
-                        "quota_used_pct": win_pcts,
-                        "locked": locked,
-                        "locked_window": lwin,
-                        "locked_threshold": lthr,
-                        "will_exhaust": will_exhaust,
-                        "hours_until_exhaustion": round(hours_until, 1) if hours_until else None,
-                        "burn_rate_tph": round(burn_rate, 1),
-                        "available": available,
-                    }
-                    if available:
-                        available_zai.append((key, effective))
-
-                # ── PPQ (fixed price for comparison) ──────────────────────
-                ppq_base = 0.28  # deepseek-v4-flash blended rate from PPQ
-                ppq_snap = quota_snap.get("ppq", {})
-                ppq_available = ppq_snap.get("used_pct", 0.0) < 100.0
-                zai_providers["ppq"] = {
-                    "base_rate_usd_per_m": ppq_base,
-                    "effective_price_usd_per_m": ppq_base,
-                    "available": ppq_available,
-                }
-
-                # ── Aggregate z.ai state ─────────────────────────────────
-                if available_zai:
-                    available_zai.sort(key=lambda x: x[1])
-                    zai_eff_price = available_zai[0][1]
-                    zai_available = True
-                    zai_locked_reason = None
-                else:
-                    zai_eff_price = None
-                    zai_available = False
-                    reasons = []
-                    for key in ("ours", "friend"):
-                        p = zai_providers.get(f"zai_{key}", {})
-                        if p.get("locked"):
-                            reasons.append(f"{key}:locked({p.get('locked_window')})")
-                        elif not p.get("available"):
-                            reasons.append(f"{key}:unhealthy")
-                    zai_locked_reason = "; ".join(reasons) if reasons else "no keys available"
-
-                result = {
-                    "timestamp": int(time.time()),
-                    "providers": zai_providers,
-                    "zai_effective_price_usd_per_m": round(zai_eff_price, 6) if zai_eff_price else None,
-                    "zai_available": zai_available,
-                    "zai_locked_reason": zai_locked_reason,
-                    "is_peak_hour": peak,
-                }
+                result = _build_kalman_pricing_json()
                 payload = json.dumps(result, indent=2).encode()
             except Exception as e:
                 payload = json.dumps(
@@ -5680,6 +5659,211 @@ def _oxalpha_usage_poller():
         time.sleep(300)
 
 
+# ── Nostr kind-30315 Kalman pricing publisher ────────────────────────────────
+# Background thread that publishes the /kalman-pricing endpoint data as a
+# public kind-30315 replaceable Nostr event every 30 seconds.  This replaces
+# the old reverse SSH tunnel — Nostr relays are the transport now, so any
+# machine on any network can subscribe.
+#
+# The publisher uses the `nak` CLI (available at ~/.local/bin/nak) to sign
+# and publish events.  Falls back gracefully: all exceptions are caught and
+# logged, never crashing the main proxy.
+_NOSTR_SEC_PATH = Path.home() / ".hermes" / "bot" / "kalman_npub.nsec"
+_NOSTR_RELAYS = [
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+    "wss://relay.damus.io",
+]
+_NOSTR_PUBLISH_INTERVAL = 30  # seconds
+_NOSTR_PUBLISHER_NPUB = "npub1q2pk0674pg7yn5et8vhxxp3pe6s74grwpy30qj3wja7dysduqtms0ef294"
+
+
+def _load_nostr_sec() -> str | None:
+    """Load the Nostr private key from disk.  Returns hex sec or None."""
+    try:
+        if _NOSTR_SEC_PATH.exists():
+            sec = _NOSTR_SEC_PATH.read_text().strip()
+            if len(sec) == 64:
+                return sec
+    except Exception:
+        pass
+    return None
+
+
+def _build_kalman_pricing_json() -> dict:
+    """Build the same JSON that /kalman-pricing returns, plus source field.
+    Extracted so the publisher thread can call it without HTTP self-request.
+    """
+    peak = _is_peak_hour()
+    peak_mult = 3.0 if peak else 1.0
+    quota_snap = _snapshot_quota()
+    health_snap = _snapshot_health()
+
+    zai_providers = {}
+    available_zai = []
+    for key in ("ours", "friend"):
+        healthy = health_snap.get(key, False)
+        with lock:
+            wins = quota_cache.get(key, ([], 0.0))[0]
+        locked, lwin, lpct, lthr = is_key_locked(key, wins)
+        pct = _max_pct(wins)
+
+        win_pcts = {}
+        for w in wins:
+            wname = w.get("name", "unknown")
+            win_pcts[wname] = w.get("used_pct", 0)
+
+        base = (_converged_rates or {}).get(key)
+        if base is None:
+            base = _rpt_rate(key)
+
+        cost_mult = _KEY_COST_MULTIPLIER.get(key, 1.0)
+        scarcity_mult = 1.0
+        if pct >= 80:
+            scarcity_mult = 1.0 + (pct - 80) / 20.0
+
+        health_mult = 1.0 if healthy else 10.0
+
+        preds = _get_cached_predictions(key)
+        exhaust = _will_exhaust(preds)
+        burn_rate = (exhaust or {}).get("burn_rate_pct_per_hour", 0.0) or 0.0
+        hours_until = (exhaust or {}).get("exhausts_in_hours", None)
+        will_exhaust = bool(exhaust)
+        pace_mult = 1.0
+        if will_exhaust and hours_until is not None and hours_until < 6:
+            pace_mult = 1.0 + (6.0 - hours_until) / 6.0
+
+        effective = base * cost_mult * peak_mult * scarcity_mult * health_mult * pace_mult
+
+        available = healthy and not locked
+
+        # Safety: if all windows are "unknown" (sentinel from _fetch_quota_windows
+        # when the API returned no parseable limits), we have NO real quota data.
+        # Treat the key as unavailable — do NOT publish "available" on false 0%.
+        quota_data_unavailable = bool(wins and all(w.get("name") == "unknown" for w in wins))
+        if quota_data_unavailable:
+            available = False
+            locked = True
+            lwin = "unknown_quota_data"
+
+        zai_providers[f"zai_{key}"] = {
+            "base_rate_usd_per_m": round(base, 6),
+            "effective_price_usd_per_m": round(effective, 6),
+            "peak_multiplier": peak_mult,
+            "scarcity_multiplier": round(scarcity_mult, 3),
+            "health_multiplier": health_mult,
+            "pace_multiplier": round(pace_mult, 3),
+            "quota_used_pct": win_pcts,
+            "locked": locked,
+            "locked_window": lwin,
+            "locked_threshold": lthr,
+            "will_exhaust": will_exhaust,
+            "hours_until_exhaustion": round(hours_until, 1) if hours_until else None,
+            "burn_rate_tph": round(burn_rate, 1),
+            "available": available,
+            "quota_data_unavailable": quota_data_unavailable,
+        }
+        if available:
+            available_zai.append((key, effective))
+
+    ppq_base = 0.28
+    ppq_snap = quota_snap.get("ppq", {})
+    ppq_available = ppq_snap.get("used_pct", 0.0) < 100.0
+    zai_providers["ppq"] = {
+        "base_rate_usd_per_m": ppq_base,
+        "effective_price_usd_per_m": ppq_base,
+        "available": ppq_available,
+    }
+
+    if available_zai:
+        available_zai.sort(key=lambda x: x[1])
+        zai_eff_price = available_zai[0][1]
+        zai_available = True
+        zai_locked_reason = None
+    else:
+        zai_eff_price = None
+        zai_available = False
+        reasons = []
+        for key in ("ours", "friend"):
+            p = zai_providers.get(f"zai_{key}", {})
+            if p.get("locked"):
+                reasons.append(f"{key}:locked({p.get('locked_window')})")
+            elif not p.get("available"):
+                reasons.append(f"{key}:unhealthy")
+        zai_locked_reason = "; ".join(reasons) if reasons else "no keys available"
+
+    return {
+        "timestamp": int(time.time()),
+        "source": "T470",
+        "providers": zai_providers,
+        "zai_effective_price_usd_per_m": round(zai_eff_price, 6) if zai_eff_price else None,
+        "zai_available": zai_available,
+        "zai_locked_reason": zai_locked_reason,
+        "is_peak_hour": peak,
+    }
+
+
+def _nostr_publish_kalman():
+    """Background thread: publish kalman pricing as kind-30315 every 30s."""
+    import subprocess as _sp
+
+    sec = _load_nostr_sec()
+    if not sec:
+        print("[nostr] No private key found at ~/.hermes/bot/kalman_npub.nsec — publisher disabled",
+              flush=True)
+        return
+
+    nak_bin = None
+    for candidate in [os.path.expanduser("~/.local/bin/nak"), "/usr/local/bin/nak", "nak"]:
+        try:
+            _r = _sp.run(["which", candidate], capture_output=True, text=True, timeout=3)
+            if _r.returncode == 0 or os.path.exists(candidate):
+                nak_bin = candidate if os.path.exists(candidate) else _r.stdout.strip()
+                break
+        except Exception:
+            pass
+    if not nak_bin:
+        print("[nostr] nak CLI not found — publisher disabled", flush=True)
+        return
+
+    print(f"[nostr] Kalman publisher thread started — npub={_NOSTR_PUBLISHER_NPUB}", flush=True)
+
+    while True:
+        try:
+            pricing = _build_kalman_pricing_json()
+            content = json.dumps(pricing, separators=(",", ":"))
+
+            # Build nak event command — publish to all relays in one call
+            # NOTE: pass the secret key via NOSTR_SECRET_KEY env var, NOT --sec
+            # CLI arg, so it doesn't appear in ps aux / /proc/*/cmdline.
+            env = os.environ.copy()
+            env["NOSTR_SECRET_KEY"] = sec
+            cmd = [
+                nak_bin, "event",
+                "--kind", "30315",
+                "--tag", "d=kalman-pricing",
+                "--tag", "t=routstr",
+                "--content", content,
+            ] + _NOSTR_RELAYS
+
+            result = _sp.run(cmd, capture_output=True, text=True, timeout=20, env=env)
+            if result.returncode == 0:
+                # Log a compact summary
+                zai_avail = pricing.get("zai_available", False)
+                zai_price = pricing.get("zai_effective_price_usd_per_m")
+                print(f"[nostr] Published kind-30315 — zai_available={zai_avail} "
+                      f"price={zai_price} ts={pricing.get('timestamp')}", flush=True)
+            else:
+                print(f"[nostr] nak event failed (rc={result.returncode}): "
+                      f"{result.stderr[:200]}", flush=True)
+        except _sp.TimeoutExpired:
+            print("[nostr] nak event timed out — will retry next cycle", flush=True)
+        except Exception as e:
+            print(f"[nostr] publisher error: {e}", flush=True)
+
+        time.sleep(_NOSTR_PUBLISH_INTERVAL)
+
+
 if __name__ == "__main__":
     t = threading.Thread(target=_refresh_loop, daemon=True)
     t.start()
@@ -5687,6 +5871,9 @@ if __name__ == "__main__":
     if _OXALPHA_TIER is not None and _OXALPHA_TIER.configured:
         _ox_poll = threading.Thread(target=_oxalpha_usage_poller, daemon=True)
         _ox_poll.start()
+    # Nostr kind-30315 Kalman pricing publisher
+    _nostr_thread = threading.Thread(target=_nostr_publish_kalman, daemon=True)
+    _nostr_thread.start()
     time.sleep(3)  # let first quota fetch complete
     print(f"zai_proxy on :{PORT}  quotas={ {n: _max_pct(v[0]) for n, v in quota_cache.items()} }")
     # Allow socket reuse to prevent "Address already in use" on restart
