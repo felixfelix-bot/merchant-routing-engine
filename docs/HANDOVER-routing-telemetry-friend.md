@@ -3,8 +3,7 @@
 **For:** Data analysis enthusiasts with a Hermes setup
 **From:** Felix
 **Date:** 2026-08-23
-**Repo:** https://github.com/felixfelix-bot/merchant-routing-engine
-**Branch:** `wt/glm53-quota-cleanup-t_da1b7c10`
+**Repo:** https://github.com/felixfelix-bot/merchant-routing-engine/tree/master/datasets/routing-telemetry
 
 ---
 
@@ -12,7 +11,7 @@
 
 The Merchant Routing Engine is a **cost-minimizing LLM API reverse proxy** that sits between your applications and multiple LLM providers. Every single API request is routed to the **cheapest viable provider** in real time, using Kalman filters to estimate costs and predict quota exhaustion.
 
-Think of it as an arbitrage engine for LLM tokens. You have multiple API keys and providers with different pricing structures (flat-rate subscriptions, per-token pricing, free promotional credits). The router picks the cheapest one for every request while respecting quality requirements and quota limits.
+Think of it as an arbitrage engine for LLM tokens. You have multiple API keys and providers with different pricing structures (flat-rate subscriptions, per-token pricing, free promotional credits, Cashu-metered self-hosted nodes). The router picks the cheapest one for every request while respecting quality requirements and quota limits.
 
 **Key innovation:** Instead of a hardcoded cascade ("try A first, then B, then C"), the router computes an **effective price** for every provider on every request and picks `argmin(effective_price)`. The effective price incorporates:
 
@@ -24,7 +23,7 @@ Think of it as an arbitrage engine for LLM tokens. You have multiple API keys an
 
 ## 2. Repository
 
-- **GitHub:** https://github.com/felixfelix-bot/merchant-routing-engine
+- **GitHub:** https://github.com/felixfelix-bot/merchant-routing-engine/tree/master/datasets/routing-telemetry
 - **Dataset location:** `datasets/routing-telemetry/` in the repo root
 - **Architecture docs:** `docs/KALMAN-ROUTING-ARCHITECTURE.md` (full technical deep-dive)
 - **ADRs:** `docs/adr/` directory (8 Architecture Decision Records)
@@ -38,61 +37,133 @@ cd merchant-routing-engine/datasets/routing-telemetry/
 
 ## 3. The Dataset
 
-The dataset contains **~11 days of production routing telemetry** (2026-08-12 to 2026-08-23 UTC) exported as 16 CSV files totaling ~74 MB and ~770K rows. See `datasets/routing-telemetry/README.md` for full column descriptions.
+The dataset contains **~4 weeks of production routing telemetry** (2026-07-27 to 2026-08-23 UTC) exported as a **gzipped SQLite database** with full DDL. This is a sanitized export — no API keys, session IDs, or free-text error messages are included.
+
+### Format
+
+| File | Description |
+|------|-------------|
+| `scrubbed.db.gz` | Gzipped SQLite database — the full dataset. Decompress with `gunzip` or open directly with `zcat \| sqlite3` |
+| `SCHEMA.sql` | Full DDL (all table definitions, indexes, constraints) |
+| `README.md` | Dataset documentation with sample queries |
+
+Load it:
+
+```bash
+# Decompress
+gunzip -k scrubbed.db.gz    # produces scrubbed.db
+
+# Or open in-memory without decompressing
+zcat scrubbed.db.gz | sqlite3 :memory:
+
+# Or use DuckDB / pandas directly
+python3 -c "import sqlite3, gzip; conn = sqlite3.connect('scrubbed.db'); print(conn.execute('SELECT COUNT(*) FROM api_calls').fetchone())"
+```
 
 ### Conventions
 
 - **Timestamps** are Unix epoch seconds (floating-point, UTC) unless otherwise noted
-- **Costs** are in **USD**
-- In `routing_shadow_decisions.csv`, **`agree=1`** means the live router and the shadow optimizer agreed on the same provider. `agree=0` means they diverged — these are the interesting rows.
+- **Costs** are in **USD** (corrected — see shadow tables note below)
+- In `routing_shadow_decisions`, **`agree=1`** means the live router and the shadow optimizer agreed on the same provider. `agree=0` means they diverged — these are the interesting rows.
 
-### File Summary
+### Table Summary
 
-| File | Rows | What It Contains |
-|------|------|-----------------|
-| `api_calls.csv` | 100,249 | Every API call: model, tokens, cost, status, duration, task type |
-| `provider_telemetry.csv` | 63,071 | Per-request latency, billed vs actual tokens, error types |
-| `routing_shadow_decisions.csv` | 158,859 | Live vs shadow routing decisions, agreement, cost comparison |
-| `routing_live_decisions.csv` | 17,060 | Live routing decisions with pace multipliers |
-| `routing_profit.csv` | 5,648 | Savings per routing decision vs next-best alternative |
-| `key_decisions.csv` | 411,622 | Key selection decisions with quota percentages |
-| `kalman_samples.csv` | 939 | Kalman filter state snapshots over time |
-| `daily_spend.csv` | 49 | Daily spend per quality tier |
-| `price_observations.csv` | 7,346 | Observed provider prices over time (Kalman inputs) |
-| `pressure_decisions.csv` | 16,839 | Quota pressure routing decisions |
-| `rate_limit_samples.csv` | 2,075 | Rate limit inter-arrival patterns |
-| `anomaly_events.csv` | 5,577 | Detected anomalies (rate limits, exhaustion, errors) |
-| `key_health.csv` | 6 | Current key health state (snapshot) |
-| `measured_rates.csv` | 6 | Measured sats/USD rates |
-| `ppq_daily_used.csv` | 6 | PPQ daily spend |
-| `token_stats.csv` | 8 | Model token statistics (p50, p90, mean, max) |
+| Table | Rows | What It Contains |
+|-------|------|-----------------|
+| `api_calls` | ~99k | Every proxied LLM call: timestamp, provider, model, token counts, cost, status |
+| `routing_profit` | ~5.6k | Consumer-mode savings ledger: effective price, next-best, savings |
+| `routing_live_decisions` | ~17k | Live vs shadow routing decisions (did the router agree with itself?) |
+| `routing_shadow_decisions` | ~158k | Shadow-mode routing comparisons (what WOULD have been chosen) |
+| `key_decisions` | ~410k | Every key-rotation decision: chosen key + reason + quota state |
+| `provider_telemetry` | ~63k | Per-provider health: response received/valid, latency, token mismatches |
+| `kalman_samples` | ~940 | Kalman filter state: burn rate, velocity, exhaustion prediction |
+| `daily_spend` | ~47 | Daily spend by provider tier |
+| `anomaly_events` | ~5.5k | Cost inefficiency anomalies, routing warnings |
+| `measured_rates` | 2 | Ground-truth per-token costs via wallet balance deltas |
+| `price_observations` | ~7.3k | Observed provider pricing snapshots |
 
-### Key Columns to Know
+See `SCHEMA.sql` for the complete DDL including all columns, indexes, and constraints.
 
-- **`api_calls.csv`**: `model`, `total_tokens`, `cost_usd`, `duration_ms`, `task_type`, `status_code` — this is the main fact table
-- **`routing_shadow_decisions.csv`**: `live_provider`, `shadow_provider`, `agree`, `live_cost`, `shadow_cost`, `divergence` — join with `api_calls` on timestamp to see full context
-- **`routing_profit.csv`**: `savings_per_1m`, `estimated_savings_usd`, `is_peak_hour` — directly answers "how much money did the router save?"
-- **`kalman_samples.csv`**: `burn_rate_tph`, `velocity_tph2`, `uncertainty`, `will_exhaust` — watch the filter converge over time
-- **`provider_telemetry.csv`**: `billed_tokens`, `actual_tokens`, `token_mismatch` — are providers billing honestly?
-- **`key_decisions.csv`**: `ours_pct`, `friend_pct`, `chosen_key`, `reason` — the key selection battleground
+### Sensitive Fields Removed
+
+The following fields were scrubbed from the dataset:
+
+- `api_calls.key_suffix` — dropped (was last 4 chars of API key)
+- `api_calls.session_id` — dropped (internal session hashes)
+- `api_calls.task_type` — dropped
+- `anomaly_events.detail` — dropped (kept `title` + `category`)
+- `key_health.last_failure_ts`, `backoff_until`, `backoff_seconds` — dropped
+- `error` / `error_type` fields — categorized to enums (`broken_pipe`, `timeout`, `dns_error`, `exhausted`, `none`, etc.)
+
+### Shadow Tables (Audit Trail)
+
+The `daily_spend_inflated_pre_rewrite`, `routing_profit_inflated_pre_rewrite`, and `api_calls_cost_inflated_pre_rewrite` tables preserve the **original sats-as-USD values** before a correction was applied. Routstrd and routstr publish pricing in sats (Lightning/Cashu); the code originally treated sats as USD, inflating recorded spend ~1300× for routstrd. The main tables now contain corrected USD values. The shadow tables are kept for auditability.
+
+### Sample Queries
+
+```sql
+-- Daily spend by provider (corrected)
+SELECT date, tier, ROUND(spend_usd, 4), call_count
+FROM daily_spend WHERE tier NOT IN ('ours','friend')
+ORDER BY date DESC, spend_usd DESC;
+
+-- When did the Kalman filter predict exhaustion?
+SELECT key, window, burn_rate_tph, exhausts_in_hours, will_exhaust, ts
+FROM kalman_samples WHERE will_exhaust = 1
+ORDER BY ts DESC LIMIT 20;
+
+-- Live vs shadow routing agreement rate
+SELECT
+  SUM(CASE WHEN agree = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS agree_pct,
+  COUNT(*) AS total
+FROM routing_live_decisions;
+
+-- Provider health (latency + error rate)
+SELECT provider,
+  ROUND(AVG(latency_ms)) AS avg_latency,
+  SUM(CASE WHEN response_received = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS response_rate,
+  SUM(CASE WHEN token_mismatch = 1 THEN 1 ELSE 0 END) AS mismatch_count
+FROM provider_telemetry
+GROUP BY provider ORDER BY avg_latency;
+
+-- Cost anomalies
+SELECT substr(title, 1, 80), category, COUNT(*)
+FROM anomaly_events
+GROUP BY category ORDER BY 3 DESC;
+```
+
+### License
+
+MIT — use freely.
 
 ## 4. Current Live Router Setup
 
 ### Provider Chain
 
-The router evaluates these providers in order of typical cost (cheapest first):
+The router evaluates these providers — it computes effective prices for all viable providers and picks the cheapest. The converged rates mean z.ai "ours" wins almost always when it has quota.
 
 | # | Provider | Pricing | Notes |
 |---|----------|---------|-------|
-| 1 | **z.ai "ours"** | $155/mo flat (€155/mo) | Primary. Amortized cost ~$0.001/M tokens. Cheapest by far. |
-| 2 | **z.ai "friend"** | Shared flat-rate | Secondary z.ai key. ~$0.029/M after convergence. |
-| 3 | **Ollama Cloud** | $100/mo flat | No peak-hour surcharge. ~$0.024/M. |
-| 4 | **PPQ** (api.ppq.ai) | $0.14/M tokens | Per-token provider. |
-| 5 | **OpenRouter** | $0.135/M tokens | Per-token provider. |
-| 6 | **DeepInfra** | $1.30/M tokens | Expensive per-token, last resort. |
-| 7 | **oxalpha** | Free promo | Free promotional credits. **Expires 2026-08-28.** |
+| 1 | **z.ai "ours"** | $155/mo flat | Primary. ~$0.001/M amortized |
+| 2 | **z.ai "friend"** | Shared flat-rate | ~$0.029/M |
+| 3 | **Ollama Cloud** | $100/mo flat | ~$0.024/M, no peak hours |
+| 4 | **OpenCode.ai** | $10/mo flat | GLM-5.2/5.3, Kimi, DeepSeek. Very cheap. |
+| 5 | **NeuralWatt** | $0.14/M per-token | deepseek-v4-flash, prompt caching $0.03/M |
+| 6 | **PPQ** | $0.14/M per-token | deepseek-v4-flash |
+| 7 | **OpenRouter** | $0.135/M per-token | deepseek-v4-flash |
+| 8 | **Telnyx** | per-token | Kimi K3, GLM-5.2, GPT-5, Claude, Gemini |
+| 9 | **DeepInfra** | $1.30/M per-token | Last resort per-token |
+| 10 | **routstrd** | Cashu/sats per-token | Self-hosted, Lightning-metered. Pricing in sats. |
+| 11 | **routstr** | Cashu/sats per-token | Self-hosted, Lightning-metered. |
+| 12 | **oxalpha** | Free promo (expires 2026-08-28) | stealth/ox-alpha on OpenRouter |
 
-The router doesn't use this order as a cascade — it computes effective prices for all viable providers and picks the cheapest. But the converged rates mean z.ai "ours" wins almost always when it has quota.
+### Provider Details (New Upstreams)
+
+**8. OpenCode.ai** — $10/month flat-rate subscription. Base URL: `https://opencode.ai/zen/go/v1`. Models: GLM-5.2, GLM-5.3, Kimi, DeepSeek. Very cheap flat-rate, positioned between z.ai keys and per-token providers. Portal at `https://opencode.ai`.
+
+**9. NeuralWatt** — per-token pricing. Base URL: `https://api.neuralwatt.com/v1`. Models: deepseek-v4-flash at $0.14/M tokens, with prompt caching at $0.03/M. Portal/playground at `https://portal.neuralwatt.com/playground/glm-5.2`.
+
+**10. routstrd** — self-hosted Cashu-metered inference node. Runs on VPS2. Pay-per-sat (Lightning/Cashu), not USD. Pricing in sats; the dataset originally treated sats as USD (inflating recorded spend ~1300×) — corrected in the main tables, original values preserved in `_inflated_pre_rewrite` shadow tables.
 
 ### Two Kalman Filter Families
 
@@ -100,7 +171,7 @@ The router doesn't use this order as a cascade — it computes effective prices 
    - State: `[base_rate, velocity]` — smoothed cost per million tokens and its trend
    - Inputs: Observed cost/M from billing cycles
    - Outputs: `base_rate` → used to compute `effective_price = base × peak × scarcity × health × pace`
-   - Per-token providers (PPQ, OpenRouter, DeepInfra) have fixed published prices — no Kalman needed for them
+   - Per-token providers (PPQ, OpenRouter, NeuralWatt, DeepInfra) have fixed published prices — no Kalman needed for them
 
 2. **ConsumptionKalman** (3-state constant-acceleration model)
    - State: `[burn_rate, velocity, acceleration]` — token consumption rate and its derivatives
@@ -131,12 +202,12 @@ Where:
 - **UTC 06:00–09:59** (Beijing 14:00–17:59)
 - Price **triples** (3.0× multiplier) for z.ai keys during peak
 - Applied as an **instant step function** — no smoothing, no Kalman input (ADR-003)
-- External per-token providers (PPQ, OpenRouter, etc.) have no peak window
+- External per-token providers (PPQ, OpenRouter, NeuralWatt, etc.) have no peak window
 
 ### Quality Tiers
 
 | Difficulty | Required Tier | Representative Model |
-|------------|---------------|---------------------|
+|------------|---------------|----------------------|
 | high | high | glm-5.2 |
 | medium | standard | glm-4.5-air |
 | low | low | glm-4.5-flash |
@@ -223,7 +294,7 @@ zai_proxy (port 9099) — THE ORCHESTRATOR
 | **ADR-003** | Deterministic Peak Multiplier | Peak hours (3×) are an instant step function applied AFTER the Kalman output, not smoothed into it. The Kalman tracks the smooth trend underneath. |
 | **ADR-004** | Effective Price Positivity | Every provider's effective price must be > 0. A $0.001/M floor prevents division-by-zero and free-tier exploitation. +∞ means unreachable. |
 | **ADR-005** | Three-Layer Actor Separation | Three layers: (1) Kalman prediction, (2) deterministic multipliers, (3) router argmin. Each layer is independently testable. |
-| **ADR-006** | Shadow Mode Validation | The optimizer runs in read-only parallel mode, logging what it WOULD have chosen alongside live decisions. Minimum 48h validation before going live. |
+| **ADR-006** | Shadow Mode Validation | The optimizer runs on read-only parallel mode, logging what it WOULD have chosen alongside live decisions. Minimum 48h validation before going live. |
 | **ADR-007** | Routster Marketplace Intelligence | Future: marketplace-aware routing for buy/sell on Routster (Phase 4, not yet implemented). |
 | **ADR-008** | Deterministic Multipliers Outside Kalman | Generalizes ADR-003: ALL step-change signals (peak, health, scarcity) are deterministic multipliers outside the Kalman. The Kalman only tracks smooth trends. |
 
@@ -240,19 +311,22 @@ cd merchant-routing-engine
 
 ### Step 2: Explore the Dataset
 
-The CSVs are in `datasets/routing-telemetry/`. Start with the smaller files:
+The dataset is a gzipped SQLite database. Load it and start querying:
 
 ```bash
-# Quick overview
-head -5 datasets/routing-telemetry/daily_spend.csv
-head -5 datasets/routing-telemetry/key_health.csv
-head -5 datasets/routing-telemetry/token_stats.csv
+# Decompress
+gunzip -k datasets/routing-telemetry/scrubbed.db.gz
 
-# The big ones
-wc -l datasets/routing-telemetry/*.csv
+# Quick overview
+sqlite3 datasets/routing-telemetry/scrubbed.db "SELECT COUNT(*) FROM api_calls;"
+sqlite3 datasets/routing-telemetry/scrubbed.db ".tables"
+sqlite3 datasets/routing-telemetry/scrubbed.db ".schema api_calls"
+
+# Or use DuckDB for fast analytical queries
+duckdb -c "SELECT * FROM 'datasets/routing-telemetry/scrubbed.db'.api_calls LIMIT 5;"
 ```
 
-Read `datasets/routing-telemetry/README.md` for full column descriptions.
+Read `datasets/routing-telemetry/README.md` for full documentation and `SCHEMA.sql` for the complete DDL.
 
 ### Step 3: Analysis Ideas
 
@@ -260,17 +334,17 @@ Here are some questions the dataset can answer:
 
 #### Routing Decision Agreement Rate
 - What percentage of the time did the live router agree with the shadow optimizer?
-- Has agreement improved over time? (Plot `agree` over `ts` in `routing_shadow_decisions.csv`)
+- Has agreement improved over time? (Plot `agree` over `ts` in `routing_shadow_decisions`)
 - What are the most common reasons for disagreement? (Group by `reason` where `agree=0`)
 
 #### Cost Savings Analysis
-- Total estimated savings: sum `estimated_savings_usd` in `routing_profit.csv`
+- Total estimated savings: sum `estimated_savings_usd` in `routing_profit`
 - Savings during peak vs off-peak: group by `is_peak_hour`
 - Which provider delivered the most savings? Group by `provider_used`
 - Plot `effective_price` vs `next_best_price` over time
 
 #### Kalman Convergence Visualization
-- Plot `burn_rate_tph` over time in `kalman_samples.csv` — watch it stabilize
+- Plot `burn_rate_tph` over time in `kalman_samples` — watch it stabilize
 - Plot `uncertainty` over time — it should decrease as the filter converges
 - Plot `velocity_tph2` — should approach zero at convergence
 - Compare convergence speed across different keys and windows
@@ -278,52 +352,41 @@ Here are some questions the dataset can answer:
 #### Peak-Hour Impact
 - How does the 3× multiplier affect routing decisions during UTC 06:00–09:59?
 - Does the router shift to non-z.ai providers during peak? (Check `live_provider` distribution by hour)
-- Cost comparison: peak vs off-peak in `api_calls.csv` (group by hour of `ts`)
+- Cost comparison: peak vs off-peak in `api_calls` (group by hour of `ts`)
 
 #### Provider Failover Patterns
 - When does the router move from z.ai to external providers?
 - What triggers failover? (Correlate `key_decisions.reason` with `routing_live_decisions.ts`)
-- How quickly does health recover? (Check `key_health.csv` and `anomaly_events.csv`)
+- How quickly does health recover? (Check `key_health` and `anomaly_events`)
 
 #### Token Billing Accuracy
-- Are providers billing honestly? Compare `billed_tokens` vs `actual_tokens` in `provider_telemetry.csv`
+- Are providers billing honestly? Compare `billed_tokens` vs `actual_tokens` in `provider_telemetry`
 - Which providers have the largest `token_mismatch`?
 - Is the mismatch consistent or sporadic?
 
 #### Quota Pressure Dynamics
-- How does the system behave under quota pressure? (Track `state` transitions in `pressure_decisions.csv`)
+- How does the system behave under quota pressure? (Track `state` transitions in `pressure_decisions`)
 - What models get served under pressure vs normal? (`requested_model` vs `would_serve_model`)
 - How often does interactive traffic get priority?
 
 #### Anomaly Patterns
-- What types of anomalies are most common? (Group by `category` in `anomaly_events.csv`)
+- What types of anomalies are most common? (Group by `category` in `anomaly_events`)
 - Are anomalies clustered in time? (Plot `ts` by `severity`)
 - What's the resolution rate? (`resolved` vs total)
+
+#### Sats-vs-USD Correction
+- Compare `daily_spend` with `daily_spend_inflated_pre_rewrite` — how much was the inflation?
+- Same for `routing_profit` vs `routing_profit_inflated_pre_rewrite`
+- What's the actual sats-to-USD rate that was applied?
 
 ### Step 4: Point Your Hermes at the Data
 
 If you have a Hermes setup, you can:
 
-1. Load the CSVs into a SQLite database for easy querying:
+1. Load the SQLite database and query it:
    ```bash
-   # Create a SQLite DB from the CSVs
-   python3 -c "
-   import sqlite3, csv, glob
-   conn = sqlite3.connect('routing_telemetry.db')
-   for csv_file in glob.glob('datasets/routing-telemetry/*.csv'):
-       table = csv_file.split('/')[-1].replace('.csv', '')
-       with open(csv_file) as f:
-           reader = csv.reader(f)
-           headers = next(reader)
-           cols = ', '.join([f'\"{h}\" TEXT' for h in headers])
-           conn.execute(f'CREATE TABLE IF NOT EXISTS {table} ({cols})')
-           conn.execute(f'DELETE FROM {table}')
-           placeholders = ', '.join(['?'] * len(headers))
-           conn.executemany(f'INSERT INTO {table} VALUES ({placeholders})', reader)
-           conn.commit()
-           print(f'Loaded {table}')
-   conn.close()
-   "
+   gunzip -k datasets/routing-telemetry/scrubbed.db.gz
+   sqlite3 datasets/routing-telemetry/scrubbed.db "SELECT * FROM daily_spend ORDER BY date DESC LIMIT 10;"
    ```
 
 2. Ask Hermes questions about the data:
@@ -345,9 +408,10 @@ From historical replay of 50,354 decisions / 527M tokens, the PriceKalman conver
 | Ollama Cloud | 0.500 | **0.024** |
 | PPQ | 0.140 | 0.140 (fixed) |
 | OpenRouter | 0.135 | 0.135 (fixed) |
+| NeuralWatt | 0.140 | 0.140 (fixed) |
 | DeepInfra | 1.300 | 1.300 (fixed) |
 
-The flat-rate providers (ours, friend, Ollama Cloud) converge to very low effective rates because their subscription cost is amortized over high token volume. Per-token providers have fixed published prices — no Kalman needed.
+The flat-rate providers (ours, friend, Ollama Cloud, OpenCode.ai) converge to very low effective rates because their subscription cost is amortized over high token volume. Per-token providers have fixed published prices — no Kalman needed. routstrd and routstr are priced in sats and measured via wallet balance deltas (see `measured_rates` table).
 
 ## 9. Production Deployment
 
@@ -356,6 +420,7 @@ The flat-rate providers (ours, friend, Ollama Cloud) converge to very low effect
 | **DQ05** | Primary proxy | 9099 |
 | **T470** | Secondary proxy | 9099 |
 | CVM Server | Dashboard/snapshot publisher | HTTP + Nostr |
+| **VPS2** | routstrd self-hosted inference node | Cashu-metered |
 
 The proxy runs as a persistent service on DQ05, with T470 as backup. All shadow/logging paths are wrapped in try/except and can never break production routing.
 
@@ -369,16 +434,17 @@ The proxy runs as a persistent service on DQ05, with T470 as backup. All shadow/
 | `src/price_kalman.py` | PriceKalman implementation |
 | `src/consumption_kalman.py` | ConsumptionKalman implementation |
 | `src/dispatch_gate.py` | Three-dimension dispatch gate |
-| `datasets/routing-telemetry/` | This dataset |
-| `datasets/routing-telemetry/README.md` | Full column-level dataset documentation |
+| `datasets/routing-telemetry/scrubbed.db.gz` | This dataset (gzipped SQLite) |
+| `datasets/routing-telemetry/SCHEMA.sql` | Full DDL for all tables |
+| `datasets/routing-telemetry/README.md` | Dataset documentation + sample queries |
 
 ---
 
 ## TL;DR
 
-This is a real production system that routes LLM API requests to the cheapest provider using Kalman filters. It's been running for ~11 days and generated ~770K rows of telemetry. The dataset lets you explore routing decisions, cost savings, Kalman convergence, token billing accuracy, and provider failover patterns. Clone the repo, load the CSVs, and start asking questions.
+This is a real production system that routes LLM API requests to the cheapest provider using Kalman filters. It's been running for ~4 weeks and generated ~99k API calls with ~410k key decisions. The dataset is a gzipped SQLite database with 11+ tables covering routing decisions, cost savings, Kalman convergence, token billing accuracy, and provider failover patterns. Clone the repo, decompress the DB, and start asking questions.
 
-**No API keys or secrets are included in this dataset.** All costs are in USD. Timestamps are Unix epoch seconds (UTC).
+**No API keys or secrets are included in this dataset.** All costs are in USD (corrected for sats-as-USD inflation). Timestamps are Unix epoch seconds (UTC). MIT licensed.
 
 ---
 
