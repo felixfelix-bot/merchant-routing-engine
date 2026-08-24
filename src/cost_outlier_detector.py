@@ -632,28 +632,34 @@ def detect_cost_outliers(
     # 5. Kalman composition — compare expected vs actual
     kalman = fetch_kalman_state(db_path)
     price = fetch_effective_price(db_path)
-    expected = compute_expected_cost(kalman["burn_rate_tph"], price)
 
-    disc = classify_discrepancy(actual, expected, ewma, baseline)
+    # Guard: skip Kalman composition when burn_rate_tph == 0.0.
+    # A zero burn rate means the Kalman filter has no data (stale/never
+    # collected). Computing expected = 0 × price = $0, then classifying
+    # actual_spend / $0.0001 = 18x/61x/79x/16600x is pure noise —
+    # these false "routing_inefficiency" alerts have no diagnostic value.
+    if kalman["burn_rate_tph"] > 0:
+        expected = compute_expected_cost(kalman["burn_rate_tph"], price)
+        disc = classify_discrepancy(actual, expected, ewma, baseline)
 
-    if disc["category"] != "normal":
-        message = (
-            f"🔍 KALMAN COMPOSITION: {disc['category'].replace('_', ' ').title()} — "
-            f"actual ${actual:.2f}/h vs expected ${expected:.4f}/h "
-            f"({disc['discrepancy_ratio']:.0f}x discrepancy; "
-            f"Kalman {kalman['burn_rate_tph']:.0f} tok/h × ${price:.2f}/M)"
-        )
+        if disc["category"] != "normal":
+            message = (
+                f"🔍 KALMAN COMPOSITION: {disc['category'].replace('_', ' ').title()} — "
+                f"actual ${actual:.2f}/h vs expected ${expected:.4f}/h "
+                f"({disc['discrepancy_ratio']:.0f}x discrepancy; "
+                f"Kalman {kalman['burn_rate_tph']:.0f} tok/h × ${price:.2f}/M)"
+            )
 
-        alerts.append({
-            "alert_type": "kalman_composition",
-            "actual": round(actual, 4),
-            "expected": round(expected, 4),
-            "discrepancy_category": disc["category"],
-            "discrepancy_ratio": disc["discrepancy_ratio"],
-            "burn_rate_tph": kalman["burn_rate_tph"],
-            "effective_price": price,
-            "calls": calls,
-            "message": message,
-        })
+            alerts.append({
+                "alert_type": "kalman_composition",
+                "actual": round(actual, 4),
+                "expected": round(expected, 4),
+                "discrepancy_category": disc["category"],
+                "discrepancy_ratio": disc["discrepancy_ratio"],
+                "burn_rate_tph": kalman["burn_rate_tph"],
+                "effective_price": price,
+                "calls": calls,
+                "message": message,
+            })
 
     return alerts

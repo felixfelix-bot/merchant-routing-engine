@@ -444,6 +444,117 @@ def test_detect_cost_outliers_kalman_composition():
         os.unlink(db)
 
 
+def _make_temp_db_zero_burn():
+    """Temp DB where kalman_samples.burn_rate_tph == 0.0 (no Kalman data).
+
+    This simulates the stale/zero Kalman state that causes false
+    'routing_inefficiency' alerts with absurd ratios (18x, 61x, 79x).
+    """
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    c = sqlite3.connect(path)
+    c.executescript("""
+        CREATE TABLE api_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            key_name TEXT,
+            model TEXT,
+            total_tokens INTEGER,
+            tier TEXT,
+            cost_usd REAL DEFAULT 0,
+            status_code INTEGER DEFAULT 200
+        );
+        CREATE TABLE kalman_samples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            key TEXT NOT NULL,
+            burn_rate_tph REAL,
+            uncertainty REAL,
+            exhausts_in_hours REAL,
+            will_exhaust INTEGER DEFAULT 0,
+            note TEXT
+        );
+        CREATE TABLE price_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            provider TEXT NOT NULL,
+            rate_per_m REAL NOT NULL,
+            is_measured INTEGER DEFAULT 0,
+            confidence REAL DEFAULT 1.0
+        );
+        CREATE TABLE daily_spend (
+            date TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            spend_usd REAL DEFAULT 0,
+            call_count INTEGER DEFAULT 0,
+            token_count INTEGER DEFAULT 0,
+            PRIMARY KEY (date, tier)
+        );
+    """)
+    now = time.time()
+    # 10 hours of normal spend + 1 hour spike
+    for h in range(10):
+        for _ in range(20):
+            c.execute(
+                "INSERT INTO api_calls (ts, key_name, model, total_tokens, tier, cost_usd, status_code) "
+                "VALUES (?, 'neuralwatt', 'glm-5.2', 50000, 'neuralwatt', 0.025, 200)",
+                (now - (10 - h) * 3600,),
+            )
+    for _ in range(100):
+        c.execute(
+            "INSERT INTO api_calls (ts, key_name, model, total_tokens, tier, cost_usd, status_code) "
+            "VALUES (?, 'neuralwatt', 'glm-5.2', 12000, 'neuralwatt', 0.0116, 200)",
+            (now - 3600,),
+        )
+    # Kalman sample with burn_rate_tph = 0.0 (stale/no data)
+    c.execute(
+        "INSERT INTO kalman_samples (ts, key, burn_rate_tph, uncertainty, exhausts_in_hours, will_exhaust, note) "
+        "VALUES (?, 'friend', 0.0, 0.0, NULL, 0, 'no_data')",
+        (now - 300,),
+    )
+    c.execute(
+        "INSERT INTO price_observations (ts, provider, rate_per_m, is_measured, confidence) "
+        "VALUES (?, 'neuralwatt', 2.21, 1, 1.0)",
+        (now - 3600,),
+    )
+    c.commit()
+    c.close()
+    return path
+
+
+def test_kalman_zero_burn_no_routing_inefficiency():
+    """When burn_rate_tph == 0.0, no routing_inefficiency alert should fire.
+
+    The false alerts with 18x/61x/79x ratios are actual_spend / $0.0001
+    — pure noise from division by near-zero. We must skip the Kalman
+    composition entirely when the baseline is zero.
+    """
+    db = _make_temp_db_zero_burn()
+    try:
+        alerts = detect_cost_outliers(db_path=db)
+        # There should be NO kalman_composition alert with routing_inefficiency
+        comp_alerts = [a for a in alerts if a["alert_type"] == "kalman_composition"]
+        for a in comp_alerts:
+            assert a.get("discrepancy_category") != "routing_inefficiency", (
+                f"False routing_inefficiency fired with burn_rate_tph=0.0: "
+                f"ratio={a.get('discrepancy_ratio')}x — should be skipped"
+            )
+    finally:
+        os.unlink(db)
+
+
+def test_classify_zero_expected_still_works():
+    """classify_discrepancy with expected=0 and actual>0 still returns
+    routing_inefficiency at the classify level — the guard is in
+    detect_cost_outliers, not in classify_discrepancy itself."""
+    result = classify_discrepancy(
+        actual=5.0, expected=0.0,
+        ewma=0.1, baseline={"mean": 0.1, "std": 0.05, "n": 100},
+    )
+    # classify_discrepancy itself is unchanged — the guard is upstream
+    assert result["category"] == "routing_inefficiency"
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
