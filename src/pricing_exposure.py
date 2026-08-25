@@ -451,7 +451,7 @@ def build_pricing_payload(
     kalman_convergence, providers}``."""
     now_ts = float(now_ts or time.time())
     green = kalman_convergence_green(kalman_verdict)
-    return {
+    payload = {
         "generated_ts": now_ts,
         "model": model,
         "horizon_min": horizon_min,
@@ -461,6 +461,24 @@ def build_pricing_payload(
         },
         "providers": dict(rows),
     }
+    # Sanitize non-JSON values (Infinity, -Infinity, NaN → null)
+    _sanitize_json(payload)
+    return payload
+
+
+def _sanitize_json(obj: Any) -> Any:
+    """Recursively replace Infinity/-Infinity/NaN with None for JSON compliance."""
+    if isinstance(obj, float):
+        if obj != obj or obj == float("inf") or obj == float("-inf"):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        for k, v in list(obj.items()):
+            obj[k] = _sanitize_json(v)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            obj[i] = _sanitize_json(v)
+    return obj
 
 
 # ── I/O helpers (cron collector + proxy endpoint) ────────────────────────────
