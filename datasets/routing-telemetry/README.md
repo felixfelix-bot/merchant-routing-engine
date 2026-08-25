@@ -87,6 +87,17 @@ FROM anomaly_events
 GROUP BY category ORDER BY 3 DESC;
 ```
 
+## Download
+
+The dataset is published as a GitHub Release asset (not committed to git
+history to keep clones lean — see ADR-010):
+
+**Release:** https://github.com/felixfelix-bot/merchant-routing-engine/releases/tag/routing-telemetry-2026-08-22
+
+Assets:
+- `scrubbed.db.gz` (14.9 MB) — SQLite database with all routing tables
+- `*.csv` — per-table CSV exports
+
 ## License
 
 MIT — use freely.
