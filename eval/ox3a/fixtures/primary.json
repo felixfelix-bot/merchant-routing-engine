@@ -74,7 +74,7 @@
   {
     "id": "cr-010",
     "shape": "code_review",
-    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: chore: track local env files for reproducibility\n--- .gitignore\n+++ .gitignore\n@@\n-# Secrets \u2014 NEVER commit these\n-.env\n-.env.*\n-*.key\n-secrets.yaml\n--- /dev/null\n+++ secrets.yaml\n@@ -0,0 +1,4 @@\n+providers:\n+  telnyx:\n+    sid: \"AC-live-4f21\"\n+    token: \"REDACTEDINREVIEW\"",
+    "prompt": "You are a senior reviewer on a routing-engine team. Review the change below and reply with EXACTLY this format:\nVERDICT: approve | request-changes | block\nREASONS:\n- <bullet 1>\n- <bullet 2>\n- <bullet 3>\n\nRules: 'block' only for policy/safety violations (secret leakage, spend-guard removal, compliance). 'request-changes' for real defects that must be fixed before merge. 'approve' for sound changes; nits go in bullets.\n\n--- CHANGE UNDER REVIEW ---\ncommit: chore: track local env files for reproducibility\n--- .gitignore\n+++ .gitignore\n@@\n-# Secrets — NEVER commit these\n-.env\n-.env.*\n-*.key\n-secrets.yaml\n--- /dev/null\n+++ secrets.yaml\n@@ -0,0 +1,4 @@\n+providers:\n+  telnyx:\n+    sid: \"AC-live-4f21\"\n+    token: \"REDACTEDINREVIEW\"",
     "deterministic": "verdict",
     "ground_truth": "block",
     "provenance": "sanitized excerpt, real repo commit history"
@@ -162,7 +162,7 @@
   {
     "id": "bs-006",
     "shape": "build_summary",
-    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n[boot] CVM demo board rev2, image cvm-server 0.9.3-rc1\n[flash] erasing boot partition 0x00080000..0x00200000 ... done\n[flash] writing image (1,048,576 bytes) ... done\n[flash] verifying SHA256 ...\n[flash] ERROR: digest mismatch\n       expected 9f2c...c4a1\n       actual   77bd...e0d9\n[flash] rolling back to golden image 0.9.2\n[boot] golden image verified OK \u2014 device online on 0.9.2",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n[boot] CVM demo board rev2, image cvm-server 0.9.3-rc1\n[flash] erasing boot partition 0x00080000..0x00200000 ... done\n[flash] writing image (1,048,576 bytes) ... done\n[flash] verifying SHA256 ...\n[flash] ERROR: digest mismatch\n       expected 9f2c...c4a1\n       actual   77bd...e0d9\n[flash] rolling back to golden image 0.9.2\n[boot] golden image verified OK — device online on 0.9.2",
     "deterministic": "outcome",
     "ground_truth": "failure",
     "provenance": "our own non-sensitive build/test/flash log shapes"
@@ -178,7 +178,7 @@
   {
     "id": "bs-008",
     "shape": "build_summary",
-    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ systemctl restart zai-proxy\n$ journalctl -u zai-proxy -n 5\nzai-proxy[4122]: KeyError: 'UPSTREAM_TIMEOUT_S' \u2014 missing required env\nzai-proxy[4129]: KeyError: 'UPSTREAM_TIMEOUT_S' \u2014 missing required env\nzai-proxy[4135]: KeyError: 'UPSTREAM_TIMEOUT_S' \u2014 missing required env\n$ systemctl status zai-proxy\nActive: failed (Result: exit-code) \u2014 restarts capped",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ systemctl restart zai-proxy\n$ journalctl -u zai-proxy -n 5\nzai-proxy[4122]: KeyError: 'UPSTREAM_TIMEOUT_S' — missing required env\nzai-proxy[4129]: KeyError: 'UPSTREAM_TIMEOUT_S' — missing required env\nzai-proxy[4135]: KeyError: 'UPSTREAM_TIMEOUT_S' — missing required env\n$ systemctl status zai-proxy\nActive: failed (Result: exit-code) — restarts capped",
     "deterministic": "outcome",
     "ground_truth": "failure",
     "provenance": "our own non-sensitive build/test/flash log shapes"
@@ -202,7 +202,7 @@
   {
     "id": "bs-011",
     "shape": "build_summary",
-    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\nCOLD REVIEW \u2014 cost-gate plan (kimi family)\nscope: docs/PLAN-cost-gate-reform-v2-2026-08-21.md\nfindings: 0 blockers, 2 nits\n  nit-1: \u00a75 wording ambiguous about DEFER vs HOLD (addressed in reply)\n  nit-2: example numbers in \u00a72 use stale price (noted)\nverdict: APPROVE with nits \u2014 implementation may proceed",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\nCOLD REVIEW — cost-gate plan (kimi family)\nscope: docs/PLAN-cost-gate-reform-v2-2026-08-21.md\nfindings: 0 blockers, 2 nits\n  nit-1: §5 wording ambiguous about DEFER vs HOLD (addressed in reply)\n  nit-2: example numbers in §2 use stale price (noted)\nverdict: APPROVE with nits — implementation may proceed",
     "deterministic": "outcome",
     "ground_truth": "no-failure",
     "provenance": "our own non-sensitive build/test/flash log shapes"
@@ -218,7 +218,7 @@
   {
     "id": "bs-013",
     "shape": "build_summary",
-    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ ./scripts/deploy_phase3.sh\n[1/6] preflight: disk 61% free, deps pinned ... ok\n[2/6] unit tests: 581 passed ... ok\n[3/6] build wheel: mre-0.4.1-py3 ... ok\n[4/6] upload to node ... ok\n[5/6] health: /health 200, /v1/pricing 200 ... ok\n[6/6] shadow compare: 0 divergences in 200 probes ... ok\nDEPLOY GREEN \u2014 phase3 live",
+    "prompt": "Summarize this build/log digest for an engineering executive. Reply with EXACTLY 5 bullet points, then a final line of the form 'OUTCOME: failure' or 'OUTCOME: no-failure' (no-failure = the build/run ultimately succeeded, warnings allowed).\n\n--- LOG DIGEST ---\n$ ./scripts/deploy_phase3.sh\n[1/6] preflight: disk 61% free, deps pinned ... ok\n[2/6] unit tests: 581 passed ... ok\n[3/6] build wheel: mre-0.4.1-py3 ... ok\n[4/6] upload to node ... ok\n[5/6] health: /health 200, /v1/pricing 200 ... ok\n[6/6] shadow compare: 0 divergences in 200 probes ... ok\nDEPLOY GREEN — phase3 live",
     "deterministic": "outcome",
     "ground_truth": "no-failure",
     "provenance": "our own non-sensitive build/test/flash log shapes"
@@ -362,7 +362,7 @@
   {
     "id": "je-001",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"invoice_id\": \"str\", \"vendor\": \"str\", \"total\": \"number\", \"currency\": \"str\", \"due_date\": \"str\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"invoice_id\": \"str\", \"vendor\": \"str\", \"total\": \"number\", \"currency\": \"str\", \"due_date\": \"str\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nINVOICE\nInvoice No: INV-2026-0841\nFrom: Nordwind Cloud Services GmbH\nTotal amount due: EUR 1,284.50\nPayment terms: net 30 — due 2026-09-15\nLate fee: 2% after due date.",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -378,7 +378,7 @@
   {
     "id": "je-002",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"alert_id\": \"str\", \"severity\": \"str\", \"service\": \"str\", \"metric_value\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"alert_id\": \"str\", \"severity\": \"str\", \"service\": \"str\", \"metric_value\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n[ALERT fired 2026-08-22T04:12:03Z]\nalert_id=al-9917 severity=critical\nservice=zai-proxy metric=p95_latency_s value=62.4\n(previous 24.1, threshold 60.0)\nNOTICE: this notification is automated — do not reply.",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -393,7 +393,7 @@
   {
     "id": "je-003",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"model\": \"str\", \"temperature\": \"number\", \"stream\": \"bool\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"model\": \"str\", \"temperature\": \"number\", \"stream\": \"bool\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n# generation config (v3)\nmodel = \"glm-5.3\"\ntemperature = 0.70\nstream = false\n# history: temperature was 0.40 until 2026-08-01\ntop_p = 0.95   # not extracted",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -407,7 +407,7 @@
   {
     "id": "je-004",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"order_id\": \"str\", \"item_count\": \"number\", \"items\": \"array\", \"total_usd\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"order_id\": \"str\", \"item_count\": \"number\", \"items\": \"array\", \"total_usd\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nORDER CONFIRMATION\nOrder #A-77321 — thank you!\n  1x Mechanical keyboard ......... $89.00\n  2x USB-C cable ................ $16.00\nShipping: $5.00 (not in item total)\nItems subtotal: $105.00\nUpdated 09:14: order originally listed 3 cables, corrected to 2.",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -422,7 +422,7 @@
   {
     "id": "je-005",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"key_id\": \"str\", \"window\": \"str\", \"used_pct\": \"number\", \"limit_usd\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"key_id\": \"str\", \"window\": \"str\", \"used_pct\": \"number\", \"limit_usd\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nOpenRouter key sk-or-v1-…e2af (display form)\ncurrent usage: $0.00 of limit\nlimit: null (no spend cap set)\n5h window: 12.4% used\nNOTE: 'limit: null' means NO numeric limit — extract the literal null.",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -437,7 +437,7 @@
   {
     "id": "je-006",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"device\": \"str\", \"kwh\": \"number\", \"read_at\": \"str\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"device\": \"str\", \"kwh\": \"number\", \"read_at\": \"str\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nSMART METER READING\nDevice: main-house-02\nConsumption this cycle: 412.7 kWh\nRead at: 2026-08-22T00:00:00Z\nEstimated next read: 2026-09-01.",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -451,7 +451,7 @@
   {
     "id": "je-007",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"ticket_id\": \"str\", \"priority\": \"str\", \"assignee\": \"str\", \"sla_hours\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"ticket_id\": \"str\", \"priority\": \"str\", \"assignee\": \"str\", \"sla_hours\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nTICKET #TCK-4402\nPriority: P2 → escalated to P1 at 08:30\nAssignee: oncall-primary (was: triage-bot)\nSLA: 4 business hours from escalation.",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -466,7 +466,7 @@
   {
     "id": "je-008",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"service\": \"str\", \"uptime_pct\": \"number\", \"incidents\": \"array\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"service\": \"str\", \"uptime_pct\": \"number\", \"incidents\": \"array\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nMONTHLY SLA REPORT — July 2026\nService: zai-proxy (production)\nUptime: 99.96%\nIncidents: [INC-2207-11 latency spike 18m, INC-2207-19 deploy rollback 42m]\nExcluded from SLA: scheduled maintenance window (2h).",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -480,7 +480,7 @@
   {
     "id": "je-009",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"app\": \"str\", \"version\": \"str\", \"ok\": \"bool\", \"duration_s\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"app\": \"str\", \"version\": \"str\", \"ok\": \"bool\", \"duration_s\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nDEPLOY RECORD\napp=mre-gateway version=0.4.1\nstatus=SUCCESS (post-deploy health 200)\nduration=214s\nattempt 2/2 (first attempt aborted pre-flight, 41s, not counted as deploy)",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -495,7 +495,7 @@
   {
     "id": "je-010",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"incident_id\": \"str\", \"event_count\": \"number\", \"resolved\": \"bool\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"incident_id\": \"str\", \"event_count\": \"number\", \"resolved\": \"bool\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nINCIDENT TIMELINE — INC-2288-03\n06:02 alert fired (p95 breach)\n06:05 ack by oncall\n06:11 mitigated (hold-queue drained)\n06:19 resolved; watch green 30m\ntimeline contains 7 events total; 2 were automated acks.",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -509,7 +509,7 @@
   {
     "id": "je-011",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"account\": \"str\", \"period\": \"str\", \"amount_usd\": \"number\", \"credits_applied\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"account\": \"str\", \"period\": \"str\", \"amount_usd\": \"number\", \"credits_applied\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nBILLING STATEMENT\nAccount: ops-infra-07\nPeriod: 2026-07\nAmount: $84.20\nCredits applied: $12.00 (promo)\nAmount due: $72.20",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -524,7 +524,7 @@
   {
     "id": "je-012",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"sensor_id\": \"str\", \"temp_c\": \"number\", \"humidity_pct\": \"number\", \"ok\": \"bool\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"sensor_id\": \"str\", \"temp_c\": \"number\", \"humidity_pct\": \"number\", \"ok\": \"bool\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nSENSOR PACKET\nid=SNSR-118 zone=rack-b11\ntemp=23.8C humidity=44.2%\nstatus: within limits (ok=true)\nrebooted once last week; reading unaffected.",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -539,7 +539,7 @@
   {
     "id": "je-013",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"title\": \"str\", \"start\": \"str\", \"duration_min\": \"number\", \"attendees\": \"array\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"title\": \"str\", \"start\": \"str\", \"duration_min\": \"number\", \"attendees\": \"array\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nCALENDAR INVITE\nTitle: Cost-gate weekly sync\nStarts: 2026-08-25T09:00:00Z\nDuration: 45 minutes\nAttendees: ops-team, felix, consultant-cw\n(OPTIONAL +1 guest not confirmed)",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -554,7 +554,7 @@
   {
     "id": "je-014",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"level\": \"str\", \"component\": \"str\", \"message\": \"str\", \"count\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"level\": \"str\", \"component\": \"str\", \"message\": \"str\", \"count\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n2026-08-22T07:41:02Z WARN live_router queue depth 14 (soft cap 16)\n2026-08-22T07:41:02Z WARN live_router queue depth 14 (repeat x23)\n2026-08-22T07:44:10Z INFO live_router queue drained\nExtract the WARNING line: level, component, its message text, and how many\ntimes it repeated in total (1 + 23).",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {
@@ -569,7 +569,7 @@
   {
     "id": "je-015",
     "shape": "json_extract",
-    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object \u2014 no prose, no code fences. Required schema:\n{\"tracking\": \"str\", \"carrier\": \"str\", \"status\": \"str\", \"weight_kg\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\n",
+    "prompt": "Extract the required fields from the text below into JSON. Reply with ONLY the JSON object — no prose, no code fences. Required schema:\n{\"tracking\": \"str\", \"carrier\": \"str\", \"status\": \"str\", \"weight_kg\": \"number\"}\nTypes must match exactly (string/number/boolean/array). Use the MOST RECENT value when several appear. Numbers are plain numbers (no currency symbols or thousands separators).\n\n--- TEXT ---\nSHIPMENT NOTICE\nTracking: RR-88-44120-9\nCarrier: NordPost\nStatus: in transit (updated 2026-08-21; earlier status 'label created' superseded)\nWeight: 3.4 kg\nContains: replacement fan module.",
     "deterministic": "json_schema",
     "ground_truth": null,
     "schema": {

@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import time
@@ -32,14 +31,6 @@ import urllib.request
 from pathlib import Path
 
 HOME = Path.home()
-# Resolve the routstrd CLI robustly: cron's PATH (/usr/bin:/bin) does not
-# include ~/.bun/bin, which made every invoice-creation attempt raise
-# FileNotFoundError and log "invoice creation FAILED" even though the mint
-# was healthy (2026-08-21). Prefer $ROUTSTRD_BIN, then PATH, then the
-# well-known bun install location.
-ROUTSTRD_BIN = (os.environ.get("ROUTSTRD_BIN")
-                or shutil.which("routstrd")
-                or str(HOME / ".bun" / "bin" / "routstrd"))
 COCOD_SOCK = HOME / ".cocod" / "cocod.sock"
 BOT_DIR = HOME / ".hermes" / "bot"
 API_BURN_DB = BOT_DIR / "api_burn.db"
@@ -101,16 +92,10 @@ def _save_state(state: dict) -> None:
 def _create_invoice(mint: str) -> str | None:
     """Fixed top-up invoice via the routstrd CLI. Returns bolt11 or None."""
     try:
-        # routstrd is a bun script with a `#!/usr/bin/env bun` shebang, so
-        # BOTH the routstrd path and bun itself must be resolvable. Cron's
-        # PATH (/usr/bin:/bin) has neither — augment it (2026-08-21).
-        bun_bin = str(HOME / ".bun" / "bin")
-        env = dict(os.environ)
-        env["PATH"] = f"{bun_bin}:{env.get('PATH', '/usr/bin:/bin')}"
         r = subprocess.run(
-            [ROUTSTRD_BIN, "wallet", "receive", "bolt11", str(TOPUP_SATS),
+            ["routstrd", "wallet", "receive", "bolt11", str(TOPUP_SATS),
              "--mint-url", mint],
-            capture_output=True, text=True, timeout=60, env=env)
+            capture_output=True, text=True, timeout=60)
         blob = (r.stdout or "") + (r.stderr or "")
         m = re.search(r"(lnbc[a-z0-9]+)", blob)
         return m.group(1) if m else None

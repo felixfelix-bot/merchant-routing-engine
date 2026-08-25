@@ -8,13 +8,20 @@ zai:
     ours:
       key_env: "ZAI_OUR_KEY"
       monthly_fee_usd: 155
-      # Cost formula: 155 / tokens_consumed_this_month * 1e6 = $/M
-      # Decreases as tokens accumulate (amortization)
+      entitlement_tokens_mo: 18450000000  # §0.5 provisional (provisional until measured)
+      # Cost formula (v2.1 §0.5): 155 / entitlement_tokens_mo * 1e6 = $/M baseline.
+      # Effective price = baseline × pressure(u_5h, u_week, u_month) × peak_mult.
+      # Decreases as the month progresses only in the realized (usage-amortized)
+      # view; the gate uses the entitlement baseline.
       quota_api: "https://api.z.ai/api/coding/paas/v4/quota"
       quota_windows: [5h, weekly, monthly]
     friend:
       key_env: "ZAI_API_KEY"
-      monthly_fee_usd: 80  # friend key costs $80/mo (CG-2 v2.1); NOT free
+      # CG-2 §0.5 v2.1: z.ai is NOT free. friend = $80/mo friend subscription.
+      # Pre-v2.1 this was 0 (free-tier artifact) which silently floored at
+      # $0.001/M — fixed 2026-08-22. Baseline = 80 / entitlement_tokens_mo.
+      monthly_fee_usd: 80
+      entitlement_tokens_mo: 18450000000  # §0.5 provisional estimate (~18.45B)
       penalty_pct: 21     # 21% premium vs our key (ADR-005)
       quota_api: "https://api.z.ai/api/coding/paas/v4/quota"
       quota_windows: [5h, weekly, monthly]

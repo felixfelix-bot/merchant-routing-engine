@@ -168,32 +168,34 @@ class TestColdStart:
 
 class TestZaiAmortized:
     def test_ours_amortized_rate(self):
-        """ours: annualized from trailing data.
+        """v2.1 §0.5: entitlement denominator — trailing-30d fallback (no capacity).
 
-        1B tokens over 30 days, $155/mo → annual_fee=$1860.
-        annualized_tokens = 1e9 * (365/30) = 12.167e9
-        rate = 1860 / (12.167e9 / 1e6) = 1860 / 12167 ≈ 0.153 $/M.
+        No capacity estimate injected → denominator = trailing-30d usage.
+        1B tokens within 30d, $155/mo → rate = 155 / (1e9 / 1e6) = 0.155 $/M.
+        This is the conservative (pricier) fallback until the collector injects a
+        smoothed capacity estimate; with it the baseline would drop to
+        ~$0.0084/M (155 / 18.45e9 * 1e6).
         """
         now = time.time()
-        # 1 billion tokens for 'ours' over 30 days (within trailing 365d window)
-        rows = [(now - 30 * 86400, "ours", "glm-5.2", 1_000_000_000)]
+        # 1 billion tokens for 'ours' 29 days ago (safely inside the 30d window;
+        # exactly 30d is excluded by sub-second cutoff drift)
+        rows = [(now - 29 * 86400, "ours", "glm-5.2", 1_000_000_000)]
         zai = _make_zai_db(api_calls_rows=rows)
         rp = _make_instance(zai_db=zai)
         rp.refresh()
         ob = rp.get_rate("ours")
         assert ob.source == SRC_ZAI_AMORTIZED
         assert ob.is_measured is False
-        # 1860 / (1e9 * 365/30 / 1e6) ≈ 0.1529
-        assert ob.rate_per_m == pytest.approx(0.1529, rel=0.01)
+        # 155 / (1e9 / 1e6) = 0.155
+        assert ob.rate_per_m == pytest.approx(0.155, rel=0.01)
 
-    def test_ours_trailing_uses_all_data_not_month(self):
-        """Trailing window includes data from previous months, not just current.
+    def test_ours_trailing_uses_30d_window(self):
+        """v2.1 §0.5: trailing-30d window (NOT the old 365d annualization).
 
-        Data: 1B tokens 60 days ago + 1B tokens 1 day ago = 2B total.
-        trailing_days ≈ 60, annualized_tokens = 2e9 * (365/60) = 12.17e9.
-        rate = 1860 / 12167 ≈ 0.153. With month-to-date (old behavior) only
-        the 1-day-ago record would count → 1B tokens → rate ≈ 0.155 (monthly).
-        The trailing approach gives a different (more stable) result.
+        Data: 1B tokens 60 days ago + 1B tokens 1 day ago. Only the 1-day-ago
+        record falls inside the 30-day window → SUM = 1B tokens. No capacity
+        estimate → denominator = 1B → rate = 155 / (1e9 / 1e6) = 0.155.
+        The 60-day-ago record is outside the 30d window and is excluded.
         """
         now = time.time()
         rows = [
@@ -205,13 +207,17 @@ class TestZaiAmortized:
         rp.refresh()
         ob = rp.get_rate("ours")
         assert ob.source == SRC_ZAI_AMORTIZED
-        # Both records are within 365d trailing → sum = 2B tokens over ~60 days
-        # annualized_tokens = 2e9 * (365/60) ≈ 12.167e9
-        # rate = 1860 / 12167 ≈ 0.1529
-        assert ob.rate_per_m == pytest.approx(0.1529, rel=0.02)
+        # Only the 1-day-ago 1B is within 30d → rate = 155 / 1000 = 0.155
+        assert ob.rate_per_m == pytest.approx(0.155, rel=0.02)
 
-    def test_friend_floored_at_min(self):
-        """friend: fee=0, so rate floored at MIN_EFFECTIVE_PRICE."""
+    def test_friend_subscription_baseline(self):
+        """v2.1 §0.5: friend is NOT free ($80/mo) — entitlement denominator.
+
+        No capacity estimate → trailing-30d denominator. 1B tokens within 30d,
+        $80/mo → rate = 80 / (1e9 / 1e6) = 0.08 $/M. Source is zai_amortized,
+        NOT cold-start, and NEVER floored at MIN_EFFECTIVE_PRICE (pre-v2.1 the
+        fee was 0 → the rate was silently floored; that bug is fixed).
+        """
         now = time.time()
         rows = [(now - 100, "friend", "glm-5.2", 1_000_000_000)]
         zai = _make_zai_db(api_calls_rows=rows)
@@ -219,7 +225,9 @@ class TestZaiAmortized:
         rp.refresh()
         ob = rp.get_rate("friend")
         assert ob.source == SRC_ZAI_AMORTIZED
-        assert ob.rate_per_m == MIN_EFFECTIVE_PRICE
+        # 80 / (1e9 / 1e6) = 0.08 — never the $0.001 floor.
+        assert ob.rate_per_m == pytest.approx(0.08, rel=0.01)
+        assert ob.rate_per_m > MIN_EFFECTIVE_PRICE * 10
 
     def test_month_boundary_guard(self):
         """Tokens below MIN_SAMPLE_TOKENS → cold-start (R3 mitigation)."""

@@ -85,6 +85,27 @@ class TestFixtureLoading:
             toks = len(it["prompt"]) // 4  # rough token estimate
             assert 700 <= toks <= 3400, f"{it['id']} ~{toks} tokens"
 
+    def test_json_extract_prompts_embed_source_text(self):
+        # regression (found while grading the 2026-08-22 campaign): the
+        # builder dropped je["text"] at prompt composition, shipping 15
+        # json_extract prompts whose --- TEXT --- block was empty.
+        # json_validity then measured behavior on missing input, not
+        # extraction quality. Campaign artifacts from that build remain
+        # valid evidence of the abort; fixtures are fixed for future runs.
+        fx = load_fixtures(FIXDIR)
+        marker = "--- TEXT ---\n"
+        n = 0
+        for it in fx["primary"]:
+            if it["shape"] != "json_extract":
+                continue
+            n += 1
+            assert marker in it["prompt"], f"{it['id']}: marker missing"
+            tail = it["prompt"].split(marker, 1)[1]
+            assert len(tail.strip()) >= 20, (
+                f"{it['id']}: source text after marker is empty "
+                f"({len(tail.strip())} chars)")
+        assert n == 15
+
 
 # ── sanitization (v1 §2.5) ───────────────────────────────────────────────────
 

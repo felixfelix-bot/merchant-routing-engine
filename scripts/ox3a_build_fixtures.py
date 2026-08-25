@@ -1032,7 +1032,7 @@ def build_all() -> dict:
         primary.append({
             "id": je["id"],
             "shape": "json_extract",
-            "prompt": JE_HEADER.format(schema=json.dumps(schema)),
+            "prompt": JE_HEADER.format(schema=json.dumps(schema)) + je["text"],
             "deterministic": "json_schema",
             "ground_truth": None,
             "schema": schema,
