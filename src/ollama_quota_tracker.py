@@ -105,13 +105,17 @@ def get_quota_status(
     db_path: str,
     config_path: Optional[str] = None,
     now: Optional[float] = None,
+    key_name: str = "ollama_cloud",
 ) -> dict:
-    """Compute the full quota status for Ollama Cloud.
+    """Compute the full quota status for an Ollama Cloud key.
 
     Args:
         db_path: Absolute path to zai_usage.db.
         config_path: Optional override for providers.yaml path.
         now: Override current time for testing.
+        key_name: Which Ollama Cloud key to query (default: "ollama_cloud").
+            Each subscription account gets its own quota window tracked
+            independently via the api_calls.key_name column.
 
     Returns:
         Dict with keys::
@@ -130,10 +134,10 @@ def get_quota_status(
     session_limit, weekly_limit = _load_limits(config_path)
 
     session_tokens = query_cumulative_tokens(
-        db_path, window_s=SESSION_WINDOW_S, now=now
+        db_path, key_name=key_name, window_s=SESSION_WINDOW_S, now=now
     )
     weekly_tokens = query_cumulative_tokens(
-        db_path, window_s=WEEKLY_WINDOW_S, now=now
+        db_path, key_name=key_name, window_s=WEEKLY_WINDOW_S, now=now
     )
 
     session_used_pct = (

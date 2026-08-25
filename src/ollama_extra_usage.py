@@ -32,17 +32,27 @@ _OLLAMA_API_URL = "https://ollama.com/api/usage"
 _OLLAMA_TIMEOUT_S = 2            # 2s timeout — mirrors cvm-server.ts AbortSignal.timeout(2000)
 _OLLAMA_CACHE_TTL_S = 30         # 30s cache — mirrors OLLAMA_CACHE_TTL = 30_000
 
-# Thread-safe cache state (mirrors cvm-server.ts ollamaApiCache + ollamaFetching)
+# Thread-safe per-key cache state (mirrors cvm-server.ts ollamaApiCache + ollamaFetching).
+# Each key gets its own cache entry so billing-API data doesn't leak between
+# subscription accounts.
 _ollama_cache_lock = threading.Lock()
-_ollama_cache: dict = {"at": 0.0, "data": None}
-_ollama_fetching = False
+_ollama_caches: dict[str, dict] = {}  # keyed by api_key suffix
+_ollama_fetching_keys: set[str] = set()
+
+
+def _ollama_cache_for(api_key: str) -> dict:
+    """Get or create the cache entry for a specific api_key."""
+    suffix = (api_key or "")[-8:]
+    if suffix not in _ollama_caches:
+        _ollama_caches[suffix] = {"at": 0.0, "data": None}
+    return _ollama_caches[suffix]
 
 
 def fetch_ollama_usage(
     api_key: Optional[str] = None,
     now: Optional[float] = None,
 ) -> Optional[dict]:
-    """Fetch usage data from ollama.com/api/usage with a 30s cache.
+    """Fetch usage data from ollama.com/api/usage with a 30s per-key cache.
 
     Mirrors the cvm-server.ts pattern:
     - 2s timeout on the HTTP request
@@ -50,6 +60,8 @@ def fetch_ollama_usage(
     - Cache timestamp updated on BOTH success and failure (prevents stampede
       when API is down — without this, every snapshot tick would re-fetch)
     - Returns parsed dict on success, None on failure
+    - Per-key cache: each Ollama Cloud subscription account has its own
+      cache entry (keyed by api_key suffix)
 
     Args:
         api_key: Ollama Cloud API key. If None, reads OLLAMA_CLOUD_API_KEY env var.
@@ -58,26 +70,22 @@ def fetch_ollama_usage(
     Returns:
         Parsed JSON dict from the API, or None if the fetch failed / timed out.
     """
-    global _ollama_fetching
-
     if now is None:
         now = time.time()
 
     if api_key is None:
         api_key = os.environ.get("OLLAMA_CLOUD_API_KEY", "")
 
+    cache_key = (api_key or "")[-8:]
+
     # Check cache under lock — fast path, no HTTP if cache is fresh
     with _ollama_cache_lock:
-        cached = _ollama_cache
-        # TTL applies to both success and failure — the timestamp is updated
-        # on both paths (mirrors cvm-server.ts stampede prevention). Even when
-        # data is None (failed fetch), we don't re-fetch within the TTL window.
+        cached = _ollama_cache_for(api_key)
         if cached["at"] > 0 and (now - cached["at"]) < _OLLAMA_CACHE_TTL_S:
             return cached["data"]
-        if _ollama_fetching:
-            # Another thread is already fetching — return stale cache or None
+        if cache_key in _ollama_fetching_keys:
             return cached["data"]
-        _ollama_fetching = True
+        _ollama_fetching_keys.add(cache_key)
 
     try:
         req = urllib.request.Request(
@@ -88,32 +96,27 @@ def fetch_ollama_usage(
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
                 with _ollama_cache_lock:
-                    _ollama_cache["at"] = time.time()
-                    _ollama_cache["data"] = data
+                    cached["at"] = time.time()
+                    cached["data"] = data
                 return data
             else:
-                # Non-OK — still update cache timestamp for TTL backoff
                 with _ollama_cache_lock:
-                    _ollama_cache["at"] = time.time()
+                    cached["at"] = time.time()
                 return None
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, json.JSONDecodeError, Exception):
-        # Network error, timeout, parse error — update cache timestamp to
-        # prevent stampede (mirrors cvm-server.ts catch block)
         with _ollama_cache_lock:
-            _ollama_cache["at"] = time.time()
+            cached["at"] = time.time()
         return None
     finally:
         with _ollama_cache_lock:
-            _ollama_fetching = False
+            _ollama_fetching_keys.discard(cache_key)
 
 
 def _reset_ollama_cache():
     """Reset cache state — for testing only."""
-    global _ollama_fetching
     with _ollama_cache_lock:
-        _ollama_cache["at"] = 0.0
-        _ollama_cache["data"] = None
-        _ollama_fetching = False
+        _ollama_caches.clear()
+        _ollama_fetching_keys.clear()
 
 
 @dataclass
