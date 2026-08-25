@@ -193,13 +193,18 @@ UNKNOWN_PROVIDER_FALLBACK: float = 1.0  # $/M
 # documents their provenance. Every entry here is stale the moment real data
 # arrives; the warnings logged when it is used make that visible.
 LAST_RESORT_RATES: dict[str, float] = {
-    "ours":               0.001,    # z.ai flat-rate subscription → marginal $0, floored
-    "friend":             0.001,    # shared z.ai subscription → marginal $0, floored
+    "ours":               0.03,     # z.ai amortized seed (ours $960/yr)
+    "friend":             0.015,    # z.ai amortized seed (friend $300/yr)
     "ollama_cloud":       0.0155,   # MEASURED included rate (pre-RP-3 observation)
     "ollama_cloud_extra": 0.15,     # above-quota rate (above PPQ $0.14/M so optimizer reroutes)
+    "ollama_cloud_2":     0.0155,   # second subscription, same economics as #1
+    "opencode_go":        0.0155,   # $10/mo flat-rate → marginal $0, floored
+    "neuralwatt":         0.21,     # deepseek-v4-flash blended: (0.14+0.28)/2 ≈ 0.21
     "ppq":                0.14,     # known list price
     "openrouter":         0.135,    # known list price
     "deepinfra":          1.30,     # known list price
+    "routstr":            0.53,     # daemon network catalog (cheapest node, Cashu-routed)
+    "routstrd":           0.53,     # local routstrd daemon — same network catalog
 }
 
 #: Per-model last-resort rates ($/M). Keyed by provider, then model name.
@@ -209,14 +214,11 @@ LAST_RESORT_RATES: dict[str, float] = {
 #: makes marginal cost ~$0 for every model. Entries prevent the optimizer from
 #: zero-weighting z.ai for GLM-5.3 when comparing against other providers.
 LAST_RESORT_RATES_PER_MODEL: dict[str, dict[str, float]] = {
-    # z.ai flat-rate subscription: glm-5.3 uses same PREFERENCE WEIGHT as glm-5.2
-    # ($0.001/M floor) since both models share the same subscription pool.
-    # This is NOT a real cost — it's a routing preference to keep z.ai eligible.
     "ours": {
-        "glm-5.3": 0.001,  # PREFERENCE WEIGHT — same subscription as glm-5.2
+        "glm-5.3": 0.03,  # same subscription, amortized rate
     },
     "friend": {
-        "glm-5.3": 0.001,  # PREFERENCE WEIGHT — same subscription as glm-5.2
+        "glm-5.3": 0.015,  # same subscription, amortized rate
     },
 }
 
@@ -228,12 +230,17 @@ LAST_RESORT_RATES_PER_MODEL: dict[str, dict[str, float]] = {
 #   3A z.ai   → 365 d (8760 h)   3B Ollama → 90 d (2160 h)
 #   3C paid   →  30 d (720 h)    (ppq / deepinfra / openrouter)
 PROVIDER_WINDOW_HOURS: dict[str, float] = {
-    "ours":         365 * 24,   # 8760 — z.ai amortization
-    "friend":       365 * 24,   # 8760 — z.ai amortization
-    "ollama_cloud": 90 * 24,    # 2160 — slow-moving subscription
-    "ppq":          30 * 24,    # 720  — pay-per-token
-    "deepinfra":    30 * 24,    # 720  — pay-per-token
-    "openrouter":   30 * 24,    # 720  — pay-per-token
+    "ours":           365 * 24,   # 8760 — z.ai amortization
+    "friend":         365 * 24,   # 8760 — z.ai amortization
+    "ollama_cloud":   90 * 24,    # 2160 — slow-moving subscription
+    "ollama_cloud_2": 90 * 24,    # 2160 — second subscription, same window
+    "opencode_go":    90 * 24,    # 2160 — flat-rate subscription
+    "neuralwatt":     30 * 24,    # 720  — pay-per-token
+    "ppq":            30 * 24,    # 720  — pay-per-token
+    "deepinfra":      30 * 24,    # 720  — pay-per-token
+    "openrouter":     30 * 24,    # 720  — pay-per-token
+    "routstr":        30 * 24,    # 720  — pay-per-token
+    "routstrd":       30 * 24,    # 720  — pay-per-token
 }
 
 #: Cold-start seed $/M. Returned by :func:`get_trailing_rate_with_seed` only
@@ -244,12 +251,16 @@ PROVIDER_WINDOW_HOURS: dict[str, float] = {
 #: concept, single source of truth per provider) and the seed table in
 #: docs/real-price-tracker-plan-v3.md.
 SEED_RATES: dict[str, float] = {
-    "ours":         0.001,
-    "friend":       0.001,
+    "ours":         0.03,     # z.ai amortized seed ($960/yr)
+    "friend":       0.015,    # z.ai amortized seed ($300/yr)
     "ollama_cloud": 0.0155,   # measured blended rate (pre-RP-3)
+    "ollama_cloud_2": 0.0155, # second subscription, same economics
+    "neuralwatt":   0.21,     # deepseek-v4-flash blended
     "ppq":          0.14,     # list price
     "openrouter":   0.135,    # list price
     "deepinfra":    1.30,     # all-time measured average (real)
+    "routstr":      0.53,     # daemon network catalog
+    "routstrd":     0.53,     # local routstrd daemon
 }
 
 #: Providers that must report a measured (non-seed) rate before the T6 gate
@@ -277,19 +288,31 @@ REQUIRED_RATE_PROVIDERS: tuple[str, ...] = (
 # rate is always populated from real data regardless of the row's convention.
 
 #: Annual budget ($) amortized over trailing-365d z.ai token volume.
-ZAI_ANNUAL_BUDGET: float = 300.0
+#: Combined fallback when per-provider budgets are not available.
+ZAI_ANNUAL_BUDGET: float = float(
+    os.environ.get("ZAI_ANNUAL_BUDGET", "1260.0")
+)
+
+#: Per-provider annual budgets ($) for accurate amortization.
+#: ours:   $80/mo plan = $960/yr (paid 2026-08-20)
+#: friend: friend's yearly plan = $300/yr
+ZAI_PROVIDER_BUDGETS: dict[str, float] = {
+    "ours":   float(os.environ.get("ZAI_OURS_BUDGET", "960.0")),
+    "friend": float(os.environ.get("ZAI_FRIEND_BUDGET", "300.0")),
+}
 
 #: Premium applied to the ``friend`` key so the optimizer prefers ``ours``.
-#: ``friend`` effective rate = ours base rate x this factor.
-ZAI_FRIEND_PREMIUM: float = 1.21
+#: With per-provider budgets this is largely redundant (each key's rate is
+#: computed from its own cost / own tokens) but kept as a tiebreaker.
+ZAI_FRIEND_PREMIUM: float = 1.0
 
 #: Seed $/M returned when fewer than ``ZAI_MIN_DATA_DAYS`` of data exist.
-#: Matches the observed z.ai folklore: ~21B tok/yr at $300 -> $0.0143/M.
-ZAI_SEED_RATE: float = 0.014
+#: Conservative midpoint between ours ($0.043/M) and friend ($0.015/M).
+ZAI_SEED_RATE: float = 0.03
 
 #: Minimum data span (days) required before the calculated rate is trusted.
-#: Below this the seed is returned to avoid a noisy cold-start number.
-ZAI_MIN_DATA_DAYS: float = 30.0
+#: 2 days at 38K calls/week gives sufficient volume for a stable estimate.
+ZAI_MIN_DATA_DAYS: float = 2.0
 
 #: Trailing window length (hours) for the amortized calculation (365 days).
 ZAI_WINDOW_HOURS: float = 365.0 * 24.0
@@ -525,19 +548,16 @@ def get_real_rate(
     # T4: z.ai flat-rate subscription. Subscription models (glm-5.2 etc.) have
     # ~$0 marginal cost_usd, so the cost_usd path returns None (no costed rows
     # in the window) or 0.0 (costed but free) for them. Fall back to the z.ai
-    # per-model amortization that splits metered models (kimi-k3 → real
-    # cost_usd, ~$7.53/M) from subscription models (glm-5.2 → shared-budget
-    # amortized rate, ~$0.014/M). This is what makes the two rates differ by
-    # >100× on the same ``ours`` key — the cost spread the blended rate hid.
-    # Only per-model lookups (model is not None) get the split; the provider-
-    # level rate (model=None) stays the plain cost_usd aggregate and is priced
-    # via get_zai_amortized_rate elsewhere.
+    # amortized rate (per-model split for model lookups, provider-level
+    # amortization for model=None) so the optimizer sees the TRUE cost.
     if (
         (rate is None or rate == 0.0)
-        and model is not None
         and provider in ZAI_PROVIDERS
     ):
-        rate = get_zai_per_model_rate(provider, model, db_path=db, _now=now)
+        if model is not None:
+            rate = get_zai_per_model_rate(provider, model, db_path=db, _now=now)
+        else:
+            rate = get_zai_amortized_rate(provider, db_path=db, _now=now)
 
     # Cache both hits and misses so an under-populated provider doesn't get
     # hammered on every request.
@@ -987,29 +1007,41 @@ def collect_rates(
 # ── z.ai amortized rate (Task T5) ────────────────────────────────────────────
 
 
-def _query_zai_window(db_path: str, since_ts: float) -> tuple[int, float, float]:
+def _query_zai_window(
+    db_path: str, since_ts: float, provider: str | None = None,
+) -> tuple[int, float, float]:
     """Aggregate the z.ai providers' tokens since ``since_ts``.
 
-    Matches every row whose ``key_name`` is a z.ai subscription key — the
-    canonical names (``ours``/``friend``) OR the legacy ``zai_*`` aliases that
-    the spec's ``provider LIKE 'zai%'`` denotes (see src/provider_names.py).
+    When ``provider`` is ``None`` (default): matches every row whose
+    ``key_name`` is a z.ai subscription key (combined pool, backward compat).
 
-    Returns ``(call_count, sum_total_tokens, min_ts)``. ``min_ts`` is the
-    earliest record in the window (used to measure the real data span); it is
-    ``0.0`` when there is no matching data. Never raises — on any DB error
-    returns ``(0, 0.0, 0.0)`` so callers fall through to the seed.
+    When ``provider`` is ``"ours"`` or ``"friend"``: matches only that
+    specific key (and its legacy aliases like ``zai_ours``/``zai_friend``).
+
+    Returns ``(call_count, sum_total_tokens, min_ts)``. Never raises.
     """
     try:
         conn = sqlite3.connect(db_path, timeout=2)
         try:
-            row = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), "
-                "COALESCE(MIN(ts), 0) "
-                "FROM api_calls "
-                "WHERE (key_name IN ('ours', 'friend') OR key_name LIKE 'zai%') "
-                "AND ts > ?",
-                (since_ts,),
-            ).fetchone()
+            if provider is not None:
+                legacy = f"zai_{provider}"
+                row = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), "
+                    "COALESCE(MIN(ts), 0) "
+                    "FROM api_calls "
+                    "WHERE (key_name = ? OR key_name = ?) "
+                    "AND ts > ?",
+                    (provider, legacy, since_ts),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(total_tokens), 0), "
+                    "COALESCE(MIN(ts), 0) "
+                    "FROM api_calls "
+                    "WHERE (key_name IN ('ours', 'friend') OR key_name LIKE 'zai%') "
+                    "AND ts > ?",
+                    (since_ts,),
+                ).fetchone()
         finally:
             conn.close()
     except Exception:
@@ -1026,40 +1058,14 @@ def get_zai_amortized_rate(
     db_path: str | None = None,
     _now: float | None = None,
 ) -> float:
-    """Amortized $/M for the z.ai flat-rate subscription over trailing 365 days.
+    """Amortized $/M for a z.ai flat-rate subscription key over trailing 365 days.
 
-    The z.ai keys (``ours``/``friend``) are a fixed subscription, so their real
-    per-token cost is the annual budget spread over trailing-365d token volume::
+    Each key's real per-token cost is its own annual budget spread over its
+    own trailing-365d token volume (annualized)::
 
-        zai_rate = ZAI_ANNUAL_BUDGET / (SUM(total_tokens for z.ai keys) / 1e6)
-
-    The ``friend`` key carries a ``ZAI_FRIEND_PREMIUM`` (1.21x) surcharge so the
-    optimizer prefers the primary ``ours`` key. When fewer than
-    ``ZAI_MIN_DATA_DAYS`` (30) days of data exist the function returns the
-    ``ZAI_SEED_RATE`` ($0.014/M, x1.21 for friend) rather than a noisy number.
-
-    Results are cached for ``ZAI_CACHE_TTL_SECONDS`` (24 h) — the rate is
-    recomputed daily, not per request (:func:`clear_cache` drops it). This is
-    the canonical base rate for the z.ai providers; the cost_usd-based
-    :func:`get_trailing_rate` cannot price them (their marginal cost is ~$0).
+        rate = ZAI_PROVIDER_BUDGETS[provider] / (annualized_tokens / 1e6)
 
     Thread-safe. Never raises; on any error it degrades to the seed rate.
-
-    Parameters
-    ----------
-    provider
-        ``"ours"`` (default) or ``"friend"``. Any other value is treated as
-        ``"ours"``.
-    db_path
-        Override the DB path (tests pass a temp DB).
-    _now
-        Injected clock for deterministic tests.
-
-    Returns
-    -------
-    float
-        $/M as a non-negative float. Always a float (the seed on cold start or
-        error).
     """
     now = _now if _now is not None else time.time()
     db = _resolve_db(db_path)
@@ -1075,16 +1081,22 @@ def get_zai_amortized_rate(
         if (now - computed_at) < ZAI_CACHE_TTL_SECONDS:
             return value
 
-    # Compute the base rate from trailing-365d z.ai token volume.
+    # Compute the base rate from THIS provider's trailing-365d token volume.
     since = now - ZAI_WINDOW_HOURS * 3600.0
-    _count, sum_tokens, min_ts = _query_zai_window(db, since)
+    _count, sum_tokens, min_ts = _query_zai_window(db, since, provider=provider)
 
-    # Data span = age of the oldest matching record. <30d (or no tokens) → seed.
+    # Data span = age of the oldest matching record.
     data_days = (now - min_ts) / 86400.0 if min_ts > 0 else 0.0
+    budget = ZAI_PROVIDER_BUDGETS.get(provider, ZAI_ANNUAL_BUDGET)
     if data_days < ZAI_MIN_DATA_DAYS or sum_tokens <= 0:
-        rate = ZAI_SEED_RATE * premium
+        # Cold start: scale seed by this provider's budget ratio.
+        budget_ratio = budget / ZAI_PROVIDER_BUDGETS.get("friend", 300.0)
+        rate = ZAI_SEED_RATE * budget_ratio * premium
     else:
-        base = ZAI_ANNUAL_BUDGET / (sum_tokens / 1e6)
+        # Annualize: if we have D days of data with T tokens,
+        # annualized volume = T * (365 / D).
+        annualized_tokens = sum_tokens * (365.0 / data_days)
+        base = budget / (annualized_tokens / 1e6)
         if base != base or base < 0:  # NaN / nonsensical guard → seed
             base = ZAI_SEED_RATE
         rate = base * premium
