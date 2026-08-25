@@ -1346,6 +1346,35 @@ def _query_telnyx_spent(db_path: str) -> tuple[Optional[float], Optional[str]]:
     return round(spent, 6), None
 
 
+def _fetch_telnyx_balance_api() -> tuple[Optional[float], Optional[str]]:
+    """Query the real Telnyx balance via GET /v2/balance.
+
+    Returns (balance_usd, error_str). Never raises — on any error returns
+    (None, "<error description>").
+    """
+    key = os.environ.get(TELNYX_KEY_ENV, "").strip()
+    if not key:
+        return None, "TELNYX_API_KEY not set"
+    try:
+        req = urllib.request.Request(
+            "https://api.telnyx.com/v2/balance",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+            balance = data.get("data", {}).get("balance")
+            if balance is not None:
+                return float(balance), None
+            return None, "balance field missing in response"
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}: {e.read().decode()[:200]}"
+    except Exception as exc:
+        return None, f"error: {exc}"
+
+
 # ── Telnyx public collector ───────────────────────────────────────────────────
 
 def collect_telnyx_balance(
@@ -1353,7 +1382,10 @@ def collect_telnyx_balance(
     *,
     db_path: Optional[str] = None,
 ) -> TelnyxBalance:
-    """Self-track Telnyx spend from the local api_calls table.
+    """Collect Telnyx balance from the real Telnyx balance API.
+
+    Queries GET https://api.telnyx.com/v2/balance to get the authoritative
+    account balance, then derives spend and usage_fraction from it.
 
     Parameters
     ----------
@@ -1361,25 +1393,27 @@ def collect_telnyx_balance(
         Funded budget in USD. If None, resolves from
         ``TELNYX_STARTING_BALANCE`` env (default 10.0).
     db_path
-        Path to the api_burn.db. If None, uses ``default_db_path()``.
+        Path to the api_burn.db (unused — balance comes from the API, but
+        kept for backward compatibility with the cron interface).
 
     Returns
     -------
     TelnyxBalance
         Spend, remaining, and usage_fraction. On any failure the ``error``
-        field names the problem and numeric fields are None. Never raises.
+        field names the problem while numeric fields are None. Never raises.
     """
     result = TelnyxBalance()
     result.starting = _resolve_telnyx_starting(starting)
-    db = db_path or default_db_path()
 
-    spent, err = _query_telnyx_spent(db)
-    if err is not None or spent is None:
+    balance, err = _fetch_telnyx_balance_api()
+    if err is not None or balance is None:
         result.error = err or "unknown error"
         return result
 
-    result.total_spent_usd = spent
-    result.remaining_usd = round(result.starting - spent, 6)
+    result.remaining_usd = round(balance, 6)
+    result.total_spent_usd = round(result.starting - balance, 6)
+    if result.total_spent_usd < 0:
+        result.total_spent_usd = 0.0
     result.usage_fraction = _telnyx_usage_fraction(
         result.remaining_usd, result.starting
     )
