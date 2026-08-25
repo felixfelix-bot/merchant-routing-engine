@@ -14,7 +14,7 @@ zai:
       quota_windows: [5h, weekly, monthly]
     friend:
       key_env: "ZAI_API_KEY"
-      monthly_fee_usd: 0  # shared key, no direct cost to us
+      monthly_fee_usd: 80  # friend key costs $80/mo (CG-2 v2.1); NOT free
       penalty_pct: 21     # 21% premium vs our key (ADR-005)
       quota_api: "https://api.z.ai/api/coding/paas/v4/quota"
       quota_windows: [5h, weekly, monthly]
