@@ -35,6 +35,7 @@ import sys
 import math
 import sqlite3
 import threading
+import logging
 import time
 from typing import Any
 
@@ -48,11 +49,11 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
-from consumption_kalman import ConsumptionKalman
-from routing_optimizer import RoutingOptimizer
-from provider_names import normalize_provider_name
-from pricing_engine import (
+from src.price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
+from src.consumption_kalman import ConsumptionKalman
+from src.routing_optimizer import RoutingOptimizer
+from src.provider_names import normalize_provider_name
+from src.pricing_engine import (
     pace_factor_multi,
     extra_usage_multiplier,
     EXTRA_USAGE_MULTIPLIER,
@@ -74,12 +75,12 @@ from pricing_engine import (
     TELNYX_CREDIT_PRESSURE_ASYMPTOTE,
     TELNYX_STARTING_BALANCE,
 )
-from quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
-from cpvo_calculator import CPVOCalculator
-from model_mapping import get_model
-from ollama_quota_tracker import get_quota_status, DEFAULT_SESSION_LIMIT
-from ollama_extra_usage import fetch_ollama_usage, get_extra_usage_status
-from real_price_tracker import (
+from src.quota_window_extractor import _KNOWN_WINDOW_NAMES, _ERROR_SENTINEL_PCT
+from src.cpvo_calculator import CPVOCalculator
+from src.model_mapping import get_model
+from src.ollama_quota_tracker import get_quota_status, DEFAULT_SESSION_LIMIT
+from src.ollama_extra_usage import fetch_ollama_usage, get_extra_usage_status
+from src.real_price_tracker import (
     get_real_rate,
     get_zai_amortized_rate,
     get_all_trailing_rates_per_model,
@@ -89,6 +90,8 @@ from real_price_tracker import (
 )
 
 __all__ = ["LiveRouter"]
+
+logger = logging.getLogger(__name__)
 
 # ── Kill switch (EU-R3): extra-usage pricing is disabled by default ──────────
 # Until shadow mode validates the extra-usage multiplier, the multiplier is
@@ -415,13 +418,18 @@ def _resolve_model_rate(
 
 # ── Quota totals (approximate, for scarcity factor) ──────────────────────────
 _QUOTA_TOTALS: dict[str, float] = {
-    "ours":         2_000_000,    # ~2M tokens per 5h window
-    "friend":       2_000_000,
-    "ollama_cloud": 500_000_000,  # 500M tokens per 5h session (EUv2-4)
-    "ppq":          float("inf"),  # pay-per-token, no hard quota
-    "openrouter":   float("inf"),
-    "deepinfra":    float("inf"),  # pay-per-token, no hard quota
-    "telnyx":       float("inf"),  # credit-based, no hard quota
+    "ours":           2_000_000,    # ~2M tokens per 5h window
+    "friend":         2_000_000,
+    "ollama_cloud":   500_000_000,  # 500M tokens per 5h session (EUv2-4)
+    "ollama_cloud_2": 500_000_000,  # second subscription, own quota window
+    "opencode_go":    500_000_000,  # $10/mo flat-rate, seed same as ollama
+    "neuralwatt":     float("inf"),  # pay-per-token, no hard quota
+    "ppq":            float("inf"),  # pay-per-token, no hard quota
+    "openrouter":     float("inf"),
+    "deepinfra":      float("inf"),  # pay-per-token, no hard quota
+    "telnyx":         float("inf"),  # credit-based, no hard quota
+    "routstr":        float("inf"),  # Cashu wallet, balance-probed
+    "routstrd":       float("inf"),  # local daemon, Cashu wallet balance-probed
 }
 
 # z.ai peak hours (UTC) — Ollama/PPQ/OpenRouter/DeepInfra have no peak
@@ -673,7 +681,7 @@ def _compute_credit_pressure(
 
 
 # All providers that are NOT z.ai — these are the failover candidates
-_EXTERNAL_PROVIDERS = ("ollama_cloud", "ppq", "openrouter", "deepinfra", "telnyx")
+_EXTERNAL_PROVIDERS = ("ollama_cloud", "ollama_cloud_2", "opencode_go", "neuralwatt", "ppq", "openrouter", "deepinfra", "telnyx", "routstr", "routstrd")
 
 # ── CPVO cache (Phase 2.5.4) ─────────────────────────────────────────────────
 # Effective-rate lookups query the telemetry DB; cache them so a hot failover
@@ -736,6 +744,11 @@ class LiveRouter:
         self._db_path = db_path
         if converged_rates is not None:
             rates = dict(converged_rates)
+            # Merge any providers from _DEFAULT_CONVERGED_RATES that are missing
+            # from the historical rates (e.g. new providers with no spend yet).
+            for _name, _rate in _DEFAULT_CONVERGED_RATES.items():
+                if _name not in rates:
+                    rates[_name] = _rate
         elif _DYNAMIC_RATES_ENABLED:
             rates = _resolve_dynamic_base_rates(db_path)
         else:
@@ -1007,7 +1020,8 @@ class LiveRouter:
                     quota_state, health_state, peak,
                     failure_counts, pace_windows, task_type, model,
                 )
-        except Exception:
+        except Exception as e:
+            logger.warning("select_failover failed: %s: %s", type(e).__name__, e, exc_info=True)
             return ((None, None), (None, None))
 
     def select_primary(
@@ -1052,7 +1066,8 @@ class LiveRouter:
                 if pick:
                     return (pick, pick_model)
                 return (None, None)
-        except Exception:
+        except Exception as e:
+            logger.warning("select_primary failed: %s: %s", type(e).__name__, e, exc_info=True)
             return (None, None)
 
     def record_request(
@@ -1335,11 +1350,15 @@ class LiveRouter:
 
             # Determine model tier and peak config
             if name in ("ours", "friend"):
-                tier = "high"
+                # Tier "standard" — z.ai competes on price with ollama_cloud
+                # and paid externals rather than being structurally preferred.
+                # NOTE: "standard" not "medium" — "medium" is a difficulty
+                # name, not a tier name. TIER_RANK accepts: low, standard, high.
+                tier = "standard"
                 prov_model = "glm-5.2"
                 prov_peak = _ZAI_PEAK
                 prov_peak_mult = 3.0
-            elif name == "ollama_cloud":
+            elif name in ("ollama_cloud", "ollama_cloud_2"):
                 # ── RP-PRICING: When continuous pressure is ON, keep ollama at
                 # "high" tier — rerouting is driven by PRICE (the pressure
                 # factor), not by tier lowering. The optimizer reroutes GLM-5.2

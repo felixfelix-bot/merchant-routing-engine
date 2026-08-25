@@ -1,0 +1,7 @@
+provider,model,sats_per_M,usd_per_M,btc_usd,sats_spent,prompt_tokens,completion_tokens,measured_at,method,error
+routstrd,glm-5.2,1.0,0.00077011,77011.0,,0,0,1787437313.2808888,published_rate,
+routstr,glm-5.2,780.0,0.6006858,77011.0,,0,0,1787437313.280971,published_rate,
+routstr,glm-5.2,,,,,,,1787437684.1867344,live_probe,chat: HTTP Error 401: Unauthorized
+routstrd,glm-5.2,,,,,,,1787437684.2118433,live_probe,balance_before: HTTP Error 405: Method Not Allowed
+routstr,glm-5.2,,,,,,,1787437704.0052943,live_probe,balance_before: timed out
+routstrd,glm-5.2,,,,,,,1787437704.0292757,live_probe,balance_before: HTTP Error 405: Method Not Allowed

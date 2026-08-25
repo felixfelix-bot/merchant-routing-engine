@@ -167,7 +167,7 @@ class TestGetModelsForProvider:
         models = get_models_for_provider("ours", model_map=MODEL_MAP)
         assert models == {
             "coding": "glm-5.2",
-            "reasoning": "glm-4.5",
+            "reasoning": "glm-5.3",
             "chat": "glm-4.5-air",
             "simple": "glm-4.5-flash",
         }

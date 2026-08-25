@@ -37,9 +37,9 @@ import sqlite3
 import threading
 import time
 from dataclasses import dataclass, field, replace
-from typing import Any, Final
+from typing import Any, Final, Mapping
 
-from price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
+from src.price_kalman import MIN_EFFECTIVE_PRICE, PriceKalman
 
 __all__ = [
     "RateObservation",
@@ -95,7 +95,10 @@ DEFAULT_COLD_START_RATES: Final[dict[str, float]] = {
 
 # z.ai monthly fees (from config/providers.yaml). The optimizer applies the
 # 21% friend premium (ADR-005) on top; we keep base rates honest here.
-_ZAI_FEES: Final[dict[str, float]] = {"ours": 155.0, "friend": 0.0}
+# CG-2 §0.5 v2.1: z.ai is NOT free. friend = $80/mo friend subscription.
+# This is the constant fallback; the canonical source is config/providers.yaml
+# (zai.keys.<k>.monthly_fee_usd) via load_zai_fees().
+_ZAI_FEES: Final[dict[str, float]] = {"ours": 155.0, "friend": 80.0}
 _OLLAMA_MONTHLY_FEE: Final = 100.0
 
 # Published list prices (fallback when no measured data and no cold-start)
@@ -398,11 +401,17 @@ class RealtimePricing:
         burn_db_path: str = "~/.hermes/bot/api_burn.db",
         providers_yaml: str | None = None,
         cold_start_rates: dict[str, float] | None = None,
+        capacity_estimates: Mapping[str, float] | None = None,
     ) -> None:
         self._zai_db = os.path.expanduser(zai_db_path)
         self._burn_db = os.path.expanduser(burn_db_path)
         self._providers_yaml = providers_yaml
         self._cold_start = dict(cold_start_rates) if cold_start_rates else dict(DEFAULT_COLD_START_RATES)
+        # CG-2 §0.5: smoothed monthly capacity estimates per z.ai key, injected
+        # by the collector from burn_predictor.predict_exhaustion (monthly
+        # window). Empty until the collector runs — the denominator then falls
+        # back to trailing-30d usage (conservative).
+        self._capacity_estimates: dict[str, float] = dict(capacity_estimates or {})
 
         self._lock = threading.RLock()
         self._kalmans: dict[tuple[str, str | None], PriceKalman] = {}
@@ -584,31 +593,35 @@ class RealtimePricing:
     # ── Per-source collectors (private) ──────────────────────────────────
 
     def _measure_zai_amortized(self) -> dict[tuple[str, str | None], RateObservation]:
-        """z.ai flat-rate: annualized cost from trailing data (up to 365d).
+        """z.ai flat-rate: subscription-amortized cost (CG-2 §0.5 v2.1).
 
-        Uses ALL available data (trailing 365 days, or less if the DB is
-        younger). This replaces the old month-to-date approach, which reset
-        monthly and was noisy at month boundaries. The trailing window gives
-        a smoother base rate that converges as more data accumulates.
+        Baseline = monthly_fee ÷ max(smoothed capacity estimate, trailing-30d
+        usage) — the entitlement denominator. The smoothed capacity estimate
+        comes from ``self._capacity_estimates`` (injected by the collector from
+        ``burn_predictor.predict_exhaustion``'s monthly window); until it is
+        available the denominator falls back to trailing-30d usage
+        (conservative — pricier z.ai, §0.5 fallback rule).
 
-        Query:  SELECT key_name, SUM(total_tokens), MIN(ts) FROM api_calls
-                WHERE key_name IN ('ours','friend') AND ts >= trailing_cutoff
-                GROUP BY key_name
-        Annualized: annual_fee / (trailing_tokens * (365/trailing_days) / 1e6)
+        Fees are read from ``config/providers.yaml`` (``zai.keys.<k>
+        .monthly_fee_usd``) via ``load_zai_fees``; ``_ZAI_FEES`` is the
+        constant fallback. A fee of zero is the pre-v2.1 free-tier artifact —
+        it is flagged as a cold-start observation (source !=
+        ``'zai_amortized'``) and must NEVER silently yield the ``$0.001``
+        floor again.
 
-        Source: 'zai_amortized' (is_measured=False). friend gets fee=0 → floored
-        at MIN_EFFECTIVE_PRICE.
+        Source: ``'zai_amortized'`` (is_measured=False).
         """
+        from src.pricing_exposure import entitlement_denominator, load_zai_fees
+
         now = time.time()
-        trailing_cutoff = now - 365 * 86400  # 365-day trailing window
+        trailing_cutoff = now - 30 * 86400  # 30-day trailing window (§0.5)
         result: dict[tuple[str, str | None], RateObservation] = {}
 
         try:
             conn = sqlite3.connect(self._zai_db, timeout=2)
             try:
                 rows = conn.execute(
-                    "SELECT key_name, COALESCE(SUM(total_tokens), 0), "
-                    "MIN(ts) "
+                    "SELECT key_name, COALESCE(SUM(total_tokens), 0) "
                     "FROM api_calls "
                     "WHERE key_name IN ('ours', 'friend') AND ts >= ? "
                     "GROUP BY key_name",
@@ -620,20 +633,30 @@ class RealtimePricing:
             _log.debug("zai amortized query failed", exc_info=True)
             return result
 
-        for key_name, tokens, min_ts in rows:
+        inventory = load_zai_fees(self._providers_yaml)
+        for key_name, tokens in rows:
             tokens = int(tokens or 0)
-            monthly_fee = _ZAI_FEES.get(key_name, 0.0)
-            annual_fee = monthly_fee * 12.0
-            # Require minimum sample to avoid cold-start explosion.
-            if tokens < self.MIN_SAMPLE_TOKENS:
+            inv = inventory.get(key_name)
+            monthly_fee = inv["monthly_fee_usd"] if inv else _ZAI_FEES.get(key_name, 0.0)
+
+            # v2.1: fee=0 is a free-tier config artifact → flag cold start, never
+            # the $0.001 floor via the amortization path.
+            if not monthly_fee or monthly_fee <= 0:
                 result[(key_name, None)] = self._cold_start_obs(key_name, now)
                 continue
-            # Compute trailing_days from the actual data span.
-            # min_ts is the earliest record in the trailing window.
-            trailing_days = max(1.0, (now - float(min_ts or now)) / 86400.0)
-            # Annualize: extrapolate trailing tokens to a full 365-day year.
-            annualized_tokens = tokens * (365.0 / trailing_days)
-            rate = _floor_rate(annual_fee / (annualized_tokens / 1e6))
+
+            capacity = self._capacity_estimates.get(key_name)
+            denom_tokens, denom_source = entitlement_denominator(
+                capacity, float(tokens) if tokens else None
+            )
+
+            # Require a usable denominator (trailing sample or capacity estimate)
+            # to avoid cold-start explosion; fall back to cold start otherwise.
+            if (tokens < self.MIN_SAMPLE_TOKENS) and not capacity:
+                result[(key_name, None)] = self._cold_start_obs(key_name, now)
+                continue
+
+            rate = _floor_rate(monthly_fee / (denom_tokens / 1e6))
             result[(key_name, None)] = RateObservation(
                 provider=key_name,
                 model=None,
@@ -642,7 +665,7 @@ class RealtimePricing:
                 is_measured=False,
                 confidence=_confidence(tokens, False),
                 sample_tokens=tokens,
-                sample_cost_usd=annual_fee,
+                sample_cost_usd=monthly_fee,
                 ts=now,
             )
         return result

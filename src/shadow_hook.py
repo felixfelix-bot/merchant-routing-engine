@@ -73,11 +73,14 @@ _SEED_COSTS = {
 
 # Quota totals (approximate, for scarcity factor)
 _QUOTA_TOTALS = {
-    "friend":       2_000_000,
-    "ollama_cloud": 500_000_000,  # 500M tokens per 5h session window
-    "ppq":          float("inf"),  # pay-per-token, no hard quota
-    "openrouter":   float("inf"),
-    "deepinfra":    float("inf"),  # pay-per-token, no hard quota
+    "friend":          2_000_000,
+    "ollama_cloud":     500_000_000,  # 500M tokens per 5h session window
+    "ollama_cloud_2":  500_000_000,  # same plan as #1
+    "opencode_go":     500_000_000,  # estimated (unknown real quota)
+    "neuralwatt":      float("inf"),  # pay-per-token, no hard quota
+    "ppq":             float("inf"),
+    "openrouter":      float("inf"),
+    "deepinfra":       float("inf"),  # pay-per-token, no hard quota
 }
 
 # z.ai peak hours (UTC) — Ollama/PPQ/OpenRouter/DeepInfra have no peak

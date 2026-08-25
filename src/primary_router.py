@@ -42,12 +42,12 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from price_kalman import PriceKalman, peak_multiplier
-from consumption_kalman import ConsumptionKalman
-from routing_optimizer import RoutingOptimizer
-from provider_names import normalize_provider_name
-from pricing_engine import pace_factor, pace_factor_multi
-from quota_window_extractor import extract_quota_windows
+from src.price_kalman import PriceKalman, peak_multiplier
+from src.consumption_kalman import ConsumptionKalman
+from src.routing_optimizer import RoutingOptimizer
+from src.provider_names import normalize_provider_name
+from src.pricing_engine import pace_factor, pace_factor_multi
+from src.quota_window_extractor import extract_quota_windows
 
 __all__ = ["PrimaryRouter"]
 
@@ -63,12 +63,17 @@ _SEED_COSTS = {
 }
 
 _QUOTA_TOTALS = {
-    "ours":         2_000_000,
-    "friend":       2_000_000,
-    "ollama_cloud": 500_000_000,
-    "ppq":          float("inf"),
-    "openrouter":   float("inf"),
-    "deepinfra":    float("inf"),
+    "ours":           2_000_000,
+    "friend":         2_000_000,
+    "ollama_cloud":   500_000_000,
+    "ollama_cloud_2": 500_000_000,
+    "opencode_go":    500_000_000,
+    "neuralwatt":     float("inf"),
+    "ppq":            float("inf"),
+    "openrouter":     float("inf"),
+    "deepinfra":      float("inf"),
+    "routstr":        float("inf"),
+    "routstrd":       float("inf"),
 }
 
 _ZAI_PEAK = (6, 10)
