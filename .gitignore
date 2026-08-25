@@ -54,3 +54,5 @@ htmlcov/
 demo/test-results/
 demo/node_modules/
 eval/ox3a/results/
+datasets/routing-telemetry/*.csv
+datasets/routing-telemetry/*.gz
