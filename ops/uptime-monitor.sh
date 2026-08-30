@@ -58,9 +58,10 @@ probe_one() { # probe_one <json-endpoint> -> exit 0 = up
     local __id; __id=$(printf '%s' "$ep" | python3 -c 'import json,sys;print(json.loads(sys.argv[1])["id"])' "$ep")
     "$PROBE" "$__id" >/dev/null 2>&1; return $?
   fi
+  # Decode endpoint fields WITHOUT eval: python emits tab-separated values, we read
+  # them into separate variables. No shell re-evaluation of endpoint content.
   local kind host port path
-  # shellcheck disable=SC2034
-  eval "$(printf '%s' "$ep" | python3 -c 'import json,sys;e=json.loads(sys.argv[1]);print("kind=%r;host=%r;port=%r;path=%r"%(e["kind"],e["host"],e.get("port",0),e.get("path","")))' "$ep")"
+  IFS=$'\t' read -r kind host port path <<<"$(printf '%s' "$ep" | python3 -c 'import json,sys;e=json.loads(sys.argv[1]);print("\t".join(map(str,[e["kind"],e["host"],e.get("port",0),e.get("path","")])))' "$ep")"
   case "$kind" in
     tcp) nc -zw5 "$host" "$port" >/dev/null 2>&1; return $? ;;
     https)
@@ -162,9 +163,9 @@ NEW_UNBLOCKED=$(printf '%s' "$OUT" | python3 -c 'import json,sys;print(1 if json
 NEED_UNBLOCK=$(printf '%s' "$OUT" | python3 -c 'import json,sys;print(1 if json.loads(sys.argv[1])["need_unblock"] else 0)' "$OUT")
 ALERTS=$(printf '%s' "$OUT" | python3 -c 'import json,sys;print("\n".join(json.loads(sys.argv[1])["alerts"]))' "$OUT")
 
-# persist state
+# persist state (atomic: write temp file, fsync, rename)
 STATE_FILE="$STATE_FILE" NEW_EPS="$NEW_EPS" NEW_CONFIRM="$NEW_CONFIRM" NEW_UNBLOCKED="$NEW_UNBLOCKED" python3 - <<'PY'
-import json,os,time
+import json,os,time,tempfile
 sf=os.environ["STATE_FILE"]
 d={}
 if os.path.exists(sf):
@@ -175,7 +176,10 @@ d["box_confirm"]=int(os.environ["NEW_CONFIRM"])
 d["box_unblocked"]=bool(int(os.environ["NEW_UNBLOCKED"]))
 d["updated"]=int(time.time())
 os.makedirs(os.path.dirname(sf),exist_ok=True)
-json.dump(d,open(sf,"w"))
+fd,tmp=tempfile.mkstemp(dir=os.path.dirname(sf),prefix=".uptime.",suffix=".tmp")
+with os.fdopen(fd,"w") as f:
+    json.dump(d,f); f.flush(); os.fsync(f.fileno())
+os.replace(tmp,sf)
 PY
 
 # kanban auto-unblock on box revival (bootstrap behavior preserved)
