@@ -65,7 +65,8 @@ the **buy-side market engine** that decides where each request goes.
 │      src/consumption_kalman.py  → token burn    (ConsumptionKalman)      │
 │      config/providers.yaml      → endpoints, key_env, quota windows      │
 └─────────────────────────────────────────────────────────────────────────┘
-        │ keys from ~/.hermes/profiles/manager/.env (never committed)
+        │ keys from ~/.hermes/profiles/manager/.env, ~/.hermes/.env, or
+        │ ~/.hermes/bot/.env (first that exists; never committed)
         ▼
    12 upstream providers: ours+friend (z.ai), ollama_cloud, ollama_cloud_2,
    opencode_go, neuralwatt, deepinfra, ppq, openrouter, telnyx, routstr, routstrd
@@ -114,6 +115,9 @@ test suite needs `pytest`:
 
 ```bash
 python3 -m pip install --user numpy pytest   # Python 3.10+ recommended
+# optional: pyyaml — only needed for the oxalpha promo tier (see Step 3);
+# without it that tier is silently disabled, everything else still works.
+python3 -m pip install --user pyyaml
 ```
 
 ### 2. Copy the runtime files to a host directory
@@ -132,6 +136,24 @@ cp config/providers.yaml ~/.hermes/bot/config/
 # from there), or copy src/price_kalman.py + src/consumption_kalman.py next
 # to the proxy and put that dir on PYTHONPATH.
 ```
+
+> **⚠️ Safety — do NOT overwrite a live proxy.** On the reference machine
+> `~/.hermes/bot/` already holds a **running production proxy**; copying over
+> it would clobber the live service. If you are reproducing on a machine that
+> already runs one, use a **sandbox HOME** instead so nothing running is
+> touched:
+>
+> ```bash
+> export HOME="$HOME/sandbox-home"          # isolated HOME for this repro
+> mkdir -p "$HOME/.hermes/bot/config"
+> cp flat_router.py "$HOME/.hermes/bot/"
+> cp production/zai_proxy.py "$HOME/.hermes/bot/"
+> cp config/providers.yaml "$HOME/.hermes/bot/config/"
+> ```
+>
+> All subsequent steps in this guide use `~/.hermes/bot/`; if you set a sandbox
+> `HOME`, substitute `$HOME/.hermes/bot/` everywhere below (keys, flags, state
+> file, and the sqlite DB all live under that directory).
 
 ### 3. Provide your keys (names only — values are yours)
 
@@ -195,12 +217,30 @@ StandardError=journal
 WantedBy=default.target
 ```
 
+> **Note for strangers.** The `ExecStart` above points at the reference
+> machine's deployment venv (`%h/.hermes/hermes-agent/venv/bin/python`), which
+> you will not have. The **canonical way to run this on a fresh box is the
+> direct-run alternative** below (`python3 ~/.hermes/bot/zai_proxy.py`), using
+> whatever Python 3.10+ interpreter you installed the deps into. The systemd
+> unit is shown for reference-box parity only; adapt the `ExecStart` path to
+> your own venv if you want to run it as a service.
+
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now zai-proxy.service
 # or just run it directly:
 python3 ~/.hermes/bot/zai_proxy.py     # listens on 127.0.0.1:9099
 ```
+
+**Port override.** The proxy listens on `127.0.0.1:9099` by default. To run a
+second instance alongside a live one (or any non-default port), set the `PORT`
+environment variable:
+
+```bash
+PORT=9199 python3 ~/.hermes/bot/zai_proxy.py   # listens on 127.0.0.1:9199
+```
+
+The reference systemd unit does not set `PORT`, so it keeps the 9099 default.
 
 ### 5. Smoke test
 
@@ -291,8 +331,18 @@ curl -sD- -o /dev/null http://localhost:9099/v1/chat/completions \
        "messages":[{"role":"user","content":"hi"}]}' | grep -i x-provider
 #   → X-Provider changes (e.g. zai:friend), request still 200
 
-# 3. the ordered candidate list is in the journal:
-journalctl --user -u zai-proxy.service --since '-2 min' | grep flat_router
+# 3. the ordered candidate list is in the key_decisions table (sqlite):
+python3 - <<'EOF'
+import sqlite3, time, os
+db = os.path.expanduser("~/.hermes/bot/zai_usage.db")
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+for ts, key, reason in con.execute(
+        "SELECT ts, chosen_key, reason FROM key_decisions "
+        "ORDER BY ts DESC LIMIT 6"):
+    print(f"{time.strftime('%H:%M:%S', time.localtime(ts))}  "
+          f"chosen={key:8s}  {reason}")
+con.close()
+EOF
 #   → reason="flat_router: friend -> ollama_cloud -> ..." (ours absent)
 
 # 4. restore
@@ -301,7 +351,7 @@ rm ~/.hermes/bot/.key_disabled_ours
 
 The response body's `model` field echoes the model the winning provider
 actually served; the `X-Provider` header and the `flat_router: a -> b -> c`
-journal line are the authoritative routing record.
+row in the `key_decisions` table are the authoritative routing record.
 
 ## Relationship to routstr
 
