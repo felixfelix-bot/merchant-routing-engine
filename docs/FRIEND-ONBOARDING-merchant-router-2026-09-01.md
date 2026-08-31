@@ -116,9 +116,24 @@ Each of these is documented in depth in the repo (and in our internal skills); t
 
 ## §7 Dead code & stale names (2026-09-01 sweep)
 
-**SWEEP RESULTS PENDING — background audit in flight, will be filled in.**
+**Sweep complete 2026-09-01** (full audit of `production/zai_proxy.py` 7,383 L + live copy + `flat_router.py`; internal report banked). Headline: **oxalpha is double-dead, ≈198 lines** — (a) its only routing hook lives inside `_try_external_failover`, reachable only on the old path behind `.disable_flat_router`; the flat router dispatches externals via `_try_external_single`, which has no oxalpha hook; (b) the promo key 401s upstream (live log: `key DEAD … poller + failover DISABLED`). A missing `pyyaml` also silently disables the tier (one log line, fail-closed by design; moot — live venv has pyyaml). Stale: `providers.yaml` still declares `failover.enabled: true` for the dead key.
 
-Context you need regardless: the codebase grew from an older two-key architecture (z.ai primary keys + OpenRouter "oxalpha" eval-tier failover, `best_key()` era) into the flat market router (live since 2026-08-24). The old path survives as a *rollback safety net* behind the `.disable_flat_router` marker — that is intentional and documented. Separately: the "oxalpha" model name is stale branding — what we called OX-alpha on OpenRouter turned out to be **GLM-5.3** under the hood. Any oxalpha-specific tier/eval logic that is still reachable is a removal candidate; the full sweep table lands here when the audit returns.
+Removal candidates, safest first (all line refs = repo copy):
+
+| # | Item | Lines | Verdict |
+|---|------|-------|---------|
+| 1 | `_weekly_pct` (L4257-4263) | 7 | DEAD — 0 callers, superseded by per-window `is_key_locked` |
+| 2 | `_check_spend_cap` stub (L3802-3809) | 8 | DEAD — 0 callers, deactivated 2026-08-20 |
+| 3 | Legacy backoff aliases `_BACKOFF_BASE/CAP_SECONDS` (L907-909) | 3 | DEAD — 0 external refs |
+| 4 | `_clear_ollama_paywall_flag` (L977-984) | 8 | DEAD — 0 callers; paywall flag auto-expires Mondays anyway |
+| 5 | oxalpha cluster (L569-613 tier, L5165-5258 serve, L5384-5393 hook, L7115-7156 poller, L7370-7374 starter) + `providers.yaml` oxalpha block | ~198 | DEAD — remove as ONE unit (cross-refs); operator approval; loses free-tier revival path if a new promo key ever appears |
+| 6 | Global spend-cap dead branch (L5665-5681 + stub L3811-3818) | ~25 | Dead branch — **recommend KEEP**: re-activatable runaway-loop circuit breaker |
+
+**DO-NOT-REMOVE (all verified against live):** the `best_key()` chain + old path (≈910 L) — rollback safety net behind `.disable_flat_router`, AND pinned live by `/tier` (consumed by `throttled_daemon.sh`), `/quota`, and `_refresh_loop`. `WORKER_FALLBACK_MODEL` (L781) — definition-only safety net since the Aug-25 silent-substitution fix, kept deliberately. **False-dead trap:** `_try_zai_key`, `_try_telnyx`, `_try_external_single`, `shadow_compare`, `_opencode_go_quota_fraction` look uncalled inside `zai_proxy.py` but are dispatched dynamically/cross-module by `flat_router.py` (L816/834/840/673, and zai_proxy L5735 on the live flat path) — removing any of them breaks the live router.
+
+**Confirmed gone** (0 matches): `_OLLAMA_ONLY_MODELS`, `_MODEL_COSTS`, semantic cache, local-ollama cascade. No commented-out code blocks >10 L. Endpoints `/v1/pricing` and `/spend` have no found consumers (read-only, harmless). `flat_router.py` itself: no dead code.
+
+**Known drift:** repo copy is 2 freshbox-fix hunks ahead of the deployed proxy (`bot/.env` 3rd key path + env-overridable `PORT`, merged as 3b20482). Benign; syncing the deployed copy is a separate decision.
 
 ## §8 Link index (all curl-verified 2026-09-01)
 
