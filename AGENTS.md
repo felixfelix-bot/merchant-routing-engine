@@ -26,6 +26,6 @@ python3 -m py_compile src/*.py
 ## Key Constraints
 
 - NEVER commit API keys (`.env`, `config.yaml` are in .gitignore)
-- The production proxy (`~/.hermes/bot/zai_proxy.py`) is the source of truth until Phase 2
+- The production proxy (`production/zai_proxy.py`) is the source of truth — it imports `flat_router.select_provider`; LiveRouter (Kalman-based) runs as the primary
 - All changes to production must have a revert plan (see `docs/migration-plan.md`)
-- z.ai flat rate is always the primary provider — paid providers are last resort only
+- All providers are equal (no z.ai preference) — routing picks the cheapest healthy provider (see `flat_router.py`)
