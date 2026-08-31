@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""flat_router.py — Phase 1 flat router: select_provider() in SHADOW MODE.
+"""flat_router.py — flat router: select_provider() as the PRIMARY router.
 
 Implements the flat-hierarchy provider selection described in
 ~/.hermes/profiles/manager/state/flat-router-design.md (§2).
 
-This module runs ALONGSIDE the existing best_key() routing — it does NOT
-replace it. select_provider() is called in shadow mode to log what it
-WOULD have chosen, so operators can compare the two strategies.
+This module REPLACES the old best_key() routing as the primary path
+(Phase 3 full cutover, 2026-08-24). The old best_key() chain in
+production/zai_proxy.py is retained as the ROLLBACK path: touch
+~/.hermes/bot/.disable_flat_router to fall back to it.
 
 Key design principles:
   - All providers are equal (no z.ai preference).
@@ -17,7 +18,7 @@ Key design principles:
 
 Author: Hermes Agent (manager profile)
 Date: 2026-08-24
-Phase: 1 (shadow only — no routing change)
+Phase: 3 (primary router; best_key() retained as rollback only)
 """
 from __future__ import annotations
 

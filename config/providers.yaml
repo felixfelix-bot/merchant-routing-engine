@@ -118,10 +118,10 @@ external:
 # ADDITIVE entry (OX-1, docs/PLAN-oxalpha-promo-2026-08-21.md §2.1, Felix
 # approved 2026-08-21 D1–D6). Nothing above this block changes. Delete this
 # block + restart proxy to fully remove the tier (plan §6). Guard logic lives
-# in src/promo_tier.py (pure, tested). OX-2 STATUS (2026-08-22): the generic
-# FAILOVER path is now wired per the EMERGENCY operator directive (task
-# t_2ed46556) — free bleed-stop candidate in front of the paid chain; the
-# alias/opt-in paths stay disabled pending OX-3b rung-1 flip + Felix D7.
+# in src/promo_tier.py (pure, tested). OX-2 STATUS (2026-09-01): the proxy
+# failover wiring was removed (promo key 401-dead upstream; routing hook was
+# unreachable with the flat router primary — see the 2026-09-01 dead-code
+# sweep). The OX-1 guard + eval fixtures remain live and contract-tested.
 oxalpha:
   base_url: "https://openrouter.ai/api/v1"
   key_env: "OPENROUTER_OXALPHA_KEY"     # NEW $0-spend-limit key (plan §2.4/D6); main OPENROUTER_API_KEY stays dormant
@@ -136,20 +136,13 @@ oxalpha:
   allowlist_task_types: [vision, bulk_summarize, shadow_eval]
   rate_limit_backoff_s: [60, 120, 300]   # 429 backoff, then circuit breaker 5 fails / 300 s (plan §2.6)
 
-  # ── OX-2 proxy wiring (2026-08-22, task t_2ed46556) ──────────────────────
-  # EMERGENCY directive (2026-08-22 ~16:00): the proxy failover chain burns
-  # PAID openrouter tokens whenever z.ai 429s. oxalpha now serves as a FREE
-  # failover candidate AFTER the z.ai keys and BEFORE any paid provider.
-  # PromoTierGuard-wrapped; fail-closed on absent/invalid key (401 -> fall
-  # through to the paid chain, zero regression). Decision logic:
-  # src/oxalpha_tier.py (pure, contract-tested).
-  failover:
-    enabled: true           # EMERGENCY: live. false -> proxy skips tier entirely.
-    model: "stealth/ox-alpha"
-    reasoning_effort: low
-    max_completion_tokens: 8192
-    upstream_timeout_s: 90
-    single_attempt: true    # never internally retried; falls through on error
+  # ── OX-2 proxy wiring — REMOVED (2026-09-01 dead-code sweep) ─────────────
+  # The `failover:` sub-block is dead config: the promo key 401s upstream
+  # and the only routing hook lived on the old-path failover, unreachable
+  # with the flat router primary. src/oxalpha_tier.py (pure, contract-tested)
+  # defaults failover.enabled=True when the block is absent — revive by
+  # re-adding it if a new promo key is ever issued.
+
   # Acceleration plan §4 (armed, NOT live until the OX-3b rung-1 flip):
   preferred_for:
     enabled: false          # OX-3b flips true + names rung-1 digester lanes

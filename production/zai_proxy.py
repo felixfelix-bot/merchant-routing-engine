@@ -560,57 +560,9 @@ def _load_external_keys():
                     keys["opencode_go"] = line.split("=",1)[1].split("#")[0].strip().strip("'").strip('"')
                 elif line.startswith("NEURALWATT_API_KEY=") and "neuralwatt" not in keys:
                     keys["neuralwatt"] = line.split("=",1)[1].split("#")[0].strip().strip("'").strip('"')
-                elif line.startswith("OPENROUTER_OXALPHA_KEY=") and "oxalpha" not in keys:
-                    keys["oxalpha"] = line.split("=",1)[1].split("#")[0].strip().strip("'").strip('"')
     return keys
 
 _EXTERNAL_KEYS = _load_external_keys()
-
-# ── oxalpha promo tier (OX-2, 2026-08-22) ──────────────────────────────────
-# Import + construct the tier from repo src.oxalpha_tier (pure, contract-tested).
-# Fail-closed: any import/config error -> tier absent -> zero regression.
-# NOTE: Must be AFTER _EXTERNAL_KEYS = _load_external_keys() — the tier needs the key.
-_OXALPHA_TIER = None
-_oxalpha_key_alive = True  # validated at startup; False → poller/failover skip
-try:
-    from src.oxalpha_tier import OxalphaTier, load_tier_from_config
-    from src.promo_tier import PromoTierGuard
-    import yaml as _yaml_ox
-    _ox_cfg_path = os.path.expanduser("~/.hermes/bot/config/providers.yaml")
-    _ox_cfg = {}
-    if os.path.exists(_ox_cfg_path):
-        with open(_ox_cfg_path) as _f:
-            _ox_full = _yaml_ox.safe_load(_f) or {}
-        _ox_cfg = _ox_full.get("oxalpha") or {}
-        _ox_strategy = _ox_full.get("strategy") or {}
-    else:
-        _ox_strategy = {}
-    _ox_key = _EXTERNAL_KEYS.get("oxalpha", "")
-    _OXALPHA_TIER = load_tier_from_config(_ox_cfg, _ox_strategy, _ox_key)
-    # Validate the oxalpha key (OpenRouter /api/v1/key). A 401 means the
-    # promo key is dead/expired — disable the poller and failover attempts
-    # so we don't spam 401 every 5 min in the logs. One INFO at startup
-    # instead of an error loop.  Re-checking happens on process restart.
-    _oxalpha_key_alive = True
-    if _ox_key:
-        try:
-            _ox_probe = urllib.request.Request(
-                "https://openrouter.ai/api/v1/key",
-                headers={"Authorization": f"Bearer {_ox_key}", "User-Agent": "Mozilla/5.0"},
-            )
-            with urllib.request.urlopen(_ox_probe, timeout=10) as _r:
-                if _r.status != 200:
-                    raise OSError(f"HTTP {_r.status}")
-        except Exception as _ke:
-            _oxalpha_key_alive = False
-            print(f"[oxalpha] key DEAD ({_ke}) — poller + failover DISABLED "
-                  f"to avoid 401 spam every 5 min. Promo key suffix=...{_ox_key[-4:]}", flush=True)
-    print(f"[oxalpha] tier loaded — failover_enabled={_OXALPHA_TIER.failover_enabled} "
-          f"configured={_OXALPHA_TIER.configured} key={'present' if _ox_key else 'ABSENT'} "
-          f"alive={_oxalpha_key_alive}", flush=True)
-except Exception as _ox_e:
-    print(f"[oxalpha] tier DISABLED — {_ox_e}", flush=True)
-    _OXALPHA_TIER = None
 
 # Ollama Cloud — primary provider (same tier as z.ai, not just failover)
 OLLAMA_CLOUD_KEY = _EXTERNAL_KEYS.get("ollama_cloud", "")
@@ -904,10 +856,6 @@ _DEAD_KEY_BACKOFF_SECONDS = 3600
 # Medium flat backoff.
 _SERVER_ERROR_BACKOFF_SECONDS = 30
 
-# Legacy aliases — kept so any external script referencing them still resolves.
-_BACKOFF_BASE_SECONDS = 30
-_BACKOFF_CAP_SECONDS    = 3600
-
 # Log a KEY_DEAD anomaly after this many consecutive failures of any type —
 # surfaces persistently-failing keys (e.g. a cancelled subscription) to dashboards.
 _KEY_DEAD_THRESHOLD     = 7
@@ -972,15 +920,6 @@ def _ollama_paywall_active(key_name: str = "ollama_cloud") -> bool:
         return time.time() < float(flag.read_text().strip())
     except Exception:
         return False
-
-
-def _clear_ollama_paywall_flag(key_name: str = "ollama_cloud") -> None:
-    """Clear the per-key paywall flag (Monday reset confirmed by a probe)."""
-    try:
-        flag = _OLLAMA_PAYWALL_FLAGS.get(key_name, _OLLAMA_PAYWALL_FLAG)
-        flag.unlink(missing_ok=True)
-    except Exception:
-        pass
 
 
 def _is_manually_disabled(name: str) -> bool:
@@ -4254,15 +4193,6 @@ def _refresh_loop():
         time.sleep(CACHE_TTL)
 
 
-def _weekly_pct(windows: list[dict]) -> int:
-    """Return the ``weekly`` window's used_pct, falling back to max_pct when no
-    weekly window is present (e.g. the friend key sometimes lacks one)."""
-    for w in windows:
-        if w.get("name") == "weekly":
-            return w.get("used_pct", 0)
-    return _max_pct(windows)
-
-
 def _best_unlocked():
     """Choose the best key using **per-window** lock thresholds.
 
@@ -5162,101 +5092,6 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return False
 
-    def _serve_via_oxalpha(self, body: bytes, response_buffer: bytearray, t0: float) -> bool:
-        """Attempt a single request to the oxalpha free promo tier.
-
-        Single attempt, 90s timeout, forced model=stealth/ox-alpha.
-        On ANY error (429/timeout/5xx/402) falls through to the paid chain.
-        Returns True on success (response already sent), False otherwise.
-        """
-        if not _OXALPHA_TIER or not _OXALPHA_TIER.failover_eligible():
-            return False
-        # Dead promo key (validated at startup) — skip, don't burn a
-        # 401 round-trip on every failover attempt.
-        if not _oxalpha_key_alive:
-            return False
-        _ox_key = _EXTERNAL_KEYS.get("oxalpha", "")
-        if not _ox_key:
-            return False
-        try:
-            body_json = json.loads(body) if body else {}
-        except Exception:
-            return False
-        req_body = _OXALPHA_TIER.build_request_body(body_json)
-        fwd = json.dumps(req_body).encode()
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        hdrs = {
-            "Authorization": f"Bearer {_ox_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://hermes.local",
-            "X-Title": "Hermes Agent (oxalpha promo)",
-            "User-Agent": "Mozilla/5.0",
-        }
-        print(f"[failover] trying oxalpha model=stealth/ox-alpha cost=$0.00/M (FREE promo)", flush=True)
-        try:
-            req = urllib.request.Request(url, data=fwd, method="POST", headers=hdrs)
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                self.send_response(resp.status)
-                for h, v in resp.headers.items():
-                    if h.lower() not in ("transfer-encoding", "connection"):
-                        self.send_header(h, v)
-                self.send_header("X-Failover-Provider", "oxalpha")
-                self.end_headers()
-                while True:
-                    chunk = resp.read(4096)
-                    if not chunk:
-                        break
-                    response_buffer.extend(chunk)
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-                # Parse usage for spend tracking + cost guard
-                ext_usage = _parse_usage(bytes(response_buffer))
-                ext_tokens = int(ext_usage.get("total_tokens") or 0)
-                ext_cost_usd, ext_cost_source = _extract_cost("openrouter", bytes(response_buffer), ext_tokens)
-                # Observe cost — any cost > 0 kills the tier (no re-enable)
-                if ext_cost_usd is not None and ext_cost_usd > 0:
-                    _OXALPHA_TIER.observe_response_cost(ext_cost_usd)
-                    print(f"[oxalpha] SPEND DETECTED — cost=${ext_cost_usd:.6f} — tier KILLED", flush=True)
-                _OXALPHA_TIER.note_success()
-                _record_spend("oxalpha", "stealth/ox-alpha", ext_tokens, actual_cost=ext_cost_usd)
-                if _LIVE_ROUTER is not None:
-                    try:
-                        _LIVE_ROUTER.record_request(provider="oxalpha", tokens=ext_tokens)
-                    except Exception:
-                        pass
-                _log_api_call(
-                    key_name="oxalpha", key_suffix=_ox_key[-4:],
-                    model="stealth/ox-alpha",
-                    prompt_tokens=int(ext_usage.get("prompt_tokens") or 0),
-                    completion_tokens=int(ext_usage.get("completion_tokens") or 0),
-                    total_tokens=ext_tokens,
-                    tier="oxalpha", status_code=resp.status, error=None,
-                    duration_ms=int((time.time() - t0) * 1000),
-                    cost_usd=ext_cost_usd, cost_source=ext_cost_source,
-                    cache_hit=0,
-                    session_id=getattr(self, "_session_id", None),
-                    task_type=getattr(self, "_task_type", None),
-                )
-                _log_key_decision(chosen_key="oxalpha", reason="zai_exhausted_oxalpha_free_failover")
-                return True
-        except urllib.error.HTTPError as he:
-            if he.code == 429:
-                delay = _OXALPHA_TIER.note_429()
-                # Log ALL rate-limit headers for empirical discovery
-                rl_headers = {k: v for k, v in he.headers.items() if k.lower().startswith("x-ratelimit") or k.lower() == "retry-after"}
-                print(f"[failover] oxalpha returned 429 — backoff {delay}s — headers={rl_headers} — trying next", flush=True)
-            elif he.code == 402:
-                _OXALPHA_TIER.note_http_status(402)
-                print(f"[failover] oxalpha returned 402 — tier disabled for promo remainder — trying next", flush=True)
-            else:
-                _OXALPHA_TIER.note_failure()
-                print(f"[failover] oxalpha returned HTTP {he.code} — trying next", flush=True)
-            return False
-        except Exception as e:
-            _OXALPHA_TIER.note_failure()
-            print(f"[failover] oxalpha exception: {type(e).__name__}: {e} — trying next", flush=True)
-            return False
-
     def _try_external_single(self, provider_name: str, body: bytes,
                               model: str | None,
                               response_buffer: bytearray, t0: float) -> bool:
@@ -5381,16 +5216,6 @@ class Handler(BaseHTTPRequestHandler):
         Returns True on success (response already sent),
         False on failure (caller should send error response).
         """
-        # ── OX-2 EMERGENCY: oxalpha free-tier attempt BEFORE any paid provider ──
-        # Positioned after z.ai keys (the only way this function is reached)
-        # and before every paid candidate. Single attempt, 90s timeout.
-        # ANY error falls through to the paid chain — zero regression.
-        # Skipped entirely when the promo key was validated dead at startup.
-        if _OXALPHA_TIER is not None and _OXALPHA_TIER.failover_eligible() \
-                and _oxalpha_key_alive:
-            if self._serve_via_oxalpha(body, response_buffer, t0):
-                return True
-            # oxalpha failed — fall through to paid chain below
 
         # ── FIX: Silent model substitution bug (2026-08-25) ──────────────────
         # Previously, ANY non-glm-5.2/5.3 model was silently replaced with
@@ -5702,13 +5527,10 @@ class Handler(BaseHTTPRequestHandler):
         #   4. On failure: mark key failure, try next candidate
         #   5. If all candidates fail: send 503
         #
-        # Special cases handled before this point:
-        #   - Ollama-only models (kimi-k2.7-code, etc.) → routed to ollama above
-        #   - Telnyx-direct models (kimi-k3) → routed to telnyx above
-        #   - Non-z.ai models (deepseek/*, qwen, etc.) → routed to external above
-        # The flat router handles these naturally via PROVIDER_MODELS, but the
-        # early exits above are kept for backward compatibility (they skip the
-        # candidate evaluation overhead for these known-special cases).
+        # Special cases: ollama-only models, telnyx-direct models, and
+        # non-z.ai models are NOT special-cased above — the flat router
+        # handles them naturally via PROVIDER_MODELS. The old best_key()
+        # rollback path keeps its own special-case handling.
 
         _FLAT_ROUTER_DISABLE_FLAG = os.path.expanduser(
             "~/.hermes/bot/.disable_flat_router")
@@ -7112,50 +6934,6 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-# ── oxalpha 5-min usage-delta poller (OX-2 §4.3) ────────────────────────────
-# Polls /api/v1/key for cumulative usage. Kill on cumulative INCREASE.
-# First sample = baseline (never a kill). State in ~/.hermes/bot/.oxalpha_usage_state.json
-def _oxalpha_usage_poller():
-    import json as _json
-    _state_path = os.path.expanduser("~/.hermes/bot/.oxalpha_usage_state.json")
-    _key = _EXTERNAL_KEYS.get("oxalpha", "")
-    if not _key:
-        return
-    # Dead key (validated at startup, OpenRouter 401) — no point polling.
-    # Single startup log already emitted; skip the 5-min error loop.
-    if not _oxalpha_key_alive:
-        return
-    while True:
-        try:
-            if _OXALPHA_TIER is None or not _OXALPHA_TIER.configured:
-                time.sleep(300)
-                continue
-            req = urllib.request.Request(
-                "https://openrouter.ai/api/v1/key",
-                headers={"Authorization": f"Bearer {_key}", "User-Agent": "Mozilla/5.0"},
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = _json.loads(resp.read())
-            new_usage = float(data.get("usage", 0) or 0)
-            # Load previous state
-            prev = None
-            if os.path.exists(_state_path):
-                try:
-                    with open(_state_path) as f:
-                        prev = _json.loads(f.read()).get("cumulative_usage")
-                except Exception:
-                    prev = None
-            kill = _OXALPHA_TIER.decide_usage_kill(prev, new_usage)
-            if kill is not None:
-                print(f"[oxalpha] USAGE DELTA KILL — prev={prev} new={new_usage} delta={new_usage - (prev or 0):.6f}", flush=True)
-            # Save state
-            with open(_state_path, "w") as f:
-                _json.dump({"cumulative_usage": new_usage}, f)
-        except Exception as _e:
-            print(f"[oxalpha] usage poller error: {_e}", flush=True)
-        time.sleep(300)
-
-
 # ── Nostr kind-30315 Kalman pricing publisher ────────────────────────────────
 # Background thread that publishes the /kalman-pricing endpoint data as a
 # public kind-30315 replaceable Nostr event every 30 seconds.  This replaces
@@ -7367,11 +7145,6 @@ def _nostr_publish_kalman():
 if __name__ == "__main__":
     t = threading.Thread(target=_refresh_loop, daemon=True)
     t.start()
-    # OX-2: start oxalpha usage-delta poller
-    # (skipped when the key was validated dead at startup — see _oxalpha_key_alive)
-    if _OXALPHA_TIER is not None and _OXALPHA_TIER.configured and _oxalpha_key_alive:
-        _ox_poll = threading.Thread(target=_oxalpha_usage_poller, daemon=True)
-        _ox_poll.start()
     # Nostr kind-30315 Kalman pricing publisher
     _nostr_thread = threading.Thread(target=_nostr_publish_kalman, daemon=True)
     _nostr_thread.start()
