@@ -484,7 +484,8 @@ except Exception as _pte:
 def _load_keys():
     """Load keys from the manager .env (gitignored, never in repo)."""
     keys = {}
-    for ep in [Path.home()/".hermes/profiles/manager/.env", Path.home()/".hermes/.env"]:
+    for ep in [Path.home()/".hermes/profiles/manager/.env", Path.home()/".hermes/.env",
+               Path.home()/".hermes/bot/.env"]:
         if ep.exists():
             for line in ep.read_text(errors="ignore").splitlines():
                 line = line.strip()
@@ -519,7 +520,7 @@ _KEY_COST_MULTIPLIER = {"ours": 1.0, "friend": 1.21, "ollama_cloud": 1.0, "ollam
 UPSTREAM   = "https://api.z.ai/api/coding/paas/v4"
 QUOTA_URL  = "https://api.z.ai/api/monitor/usage/quota/limit"
 CACHE_TTL  = 300                                # 5 min
-PORT       = 9099
+PORT       = int(os.environ.get("PORT", "9099"))
 STATE_FILE = Path.home() / ".hermes" / "bot" / "zai_proxy_state.json"
 
 # ── external failover providers ─────────────────────────────────────────────

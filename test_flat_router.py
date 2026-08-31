@@ -987,5 +987,100 @@ class TestGlm53Verbatim:
             f"glm-5.3 missing from /v1/models: {ids}"
 
 
+# ── Fresh-box doc-repair tests (defects from deleg_5e172db2) ────────────────
+# Defect 1: _load_keys() must read ~/.hermes/bot/.env (the doc's example
+# writes ALL keys there), not just profiles/manager/.env + ~/.hermes/.env.
+# Defect 2: PORT must be overridable via the PORT env var (default 9099) so a
+# stranger can run a second instance alongside a live one.
+
+class TestFreshboxDocRepair:
+    """Regression tests for REPRODUCE.md fresh-box defects 1 & 2."""
+
+    @staticmethod
+    def _load_worktree_proxy():
+        """Load the worktree copy of production/zai_proxy.py (not the deployed
+        ~/.hermes/bot copy, which is first on sys.path)."""
+        import importlib.util
+        from pathlib import Path
+        src = Path(__file__).parent / "production" / "zai_proxy.py"
+        spec = importlib.util.spec_from_file_location(
+            "zai_proxy_freshbox_test", str(src))
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_load_keys_reads_bot_env(self):
+        """_load_keys() must load ZAI_OUR_KEY/ZAI_API_KEY from ~/.hermes/bot/.env
+        (the doc's Step 3 writes all keys there)."""
+        import tempfile
+        from pathlib import Path
+
+        zai_proxy = self._load_worktree_proxy()
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            bot = home / ".hermes" / "bot"
+            bot.mkdir(parents=True)
+            (bot / ".env").write_text(
+                "ZAI_OUR_KEY=sk-ours-bot\nZAI_API_KEY=sk-friend-bot\n"
+            )
+            with patch.object(zai_proxy.Path, "home", return_value=home):
+                keys = zai_proxy._load_keys()
+        assert keys.get("ours") == "sk-ours-bot", \
+            f"ours key not loaded from bot/.env: {keys}"
+        assert keys.get("friend") == "sk-friend-bot", \
+            f"friend key not loaded from bot/.env: {keys}"
+
+    def test_load_keys_prefers_manager_env(self):
+        """_load_keys() must still prefer profiles/manager/.env over bot/.env
+        (first-of ordering preserved)."""
+        import tempfile
+        from pathlib import Path
+
+        zai_proxy = self._load_worktree_proxy()
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            mgr = home / ".hermes" / "profiles" / "manager"
+            mgr.mkdir(parents=True)
+            (mgr / ".env").write_text("ZAI_OUR_KEY=sk-ours-mgr\n")
+            bot = home / ".hermes" / "bot"
+            bot.mkdir(parents=True)
+            (bot / ".env").write_text("ZAI_OUR_KEY=sk-ours-bot\n")
+            with patch.object(zai_proxy.Path, "home", return_value=home):
+                keys = zai_proxy._load_keys()
+        assert keys.get("ours") == "sk-ours-mgr", \
+            f"manager/.env should win over bot/.env: {keys}"
+
+    def test_port_defaults_to_9099(self):
+        """PORT must default to 9099 when the PORT env var is unset."""
+        import os
+        old = os.environ.get("PORT")
+        if old is not None:
+            os.environ.pop("PORT", None)
+        try:
+            mod = self._load_worktree_proxy()
+            assert mod.PORT == 9099, \
+                f"PORT default should be 9099, got {mod.PORT}"
+        finally:
+            if old is not None:
+                os.environ["PORT"] = old
+
+    def test_port_reads_env_override(self):
+        """PORT must be overridable via the PORT env var (defect 2)."""
+        import os
+
+        old = os.environ.get("PORT")
+        os.environ["PORT"] = "9199"
+        try:
+            mod = self._load_worktree_proxy()
+            assert mod.PORT == 9199, \
+                f"PORT env override should be 9199, got {mod.PORT}"
+        finally:
+            if old is None:
+                os.environ.pop("PORT", None)
+            else:
+                os.environ["PORT"] = old
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
