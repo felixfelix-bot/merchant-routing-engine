@@ -26,7 +26,7 @@ the **buy-side market engine** that decides where each request goes.
 | File | Role |
 |---|---|
 | `flat_router.py` | The flat router itself: `select_provider()`, 5-tier effective pricing, per-provider Kalman wiring, canonicalization, dispatch |
-| `test_flat_router.py` | 73-test pytest suite for the router (model filter, health gate, cost ordering, Kalman update, rollback) |
+| `test_flat_router.py` | 77-test pytest suite for the router (model filter, health gate, cost ordering, Kalman update, rollback) |
 | `production/zai_proxy.py` | The full production proxy (~7.4k lines, stdlib-only HTTP server on :9099) that imports `flat_router` as a sibling |
 | `src/price_kalman.py` | Per-provider price Kalman filter (state: `[base_rate, velocity]`) |
 | `src/consumption_kalman.py` | Per-provider token-burn Kalman filter (state: `[burn_rate, velocity, acceleration]`) |
@@ -302,12 +302,12 @@ they land with a later phase.
 
 ## Verification
 
-**Run the router's test suite in-repo** (73 tests: model filtering, health
+**Run the router's test suite in-repo** (77 tests: model filtering, health
 gating, cost ordering, Kalman updates, canonicalization, rollback):
 
 ```bash
 cd merchant-routing-engine
-python3 -m pytest test_flat_router.py -q     # → 73 passed
+python3 -m pytest test_flat_router.py -q     # → 77 passed
 ```
 
 **Failure-injection recipe** — prove the market actually re-routes when the
