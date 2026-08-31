@@ -40,7 +40,7 @@ A single Python proxy (`production/zai_proxy.py`, stdlib HTTP server, port 9099)
 | Tier | Providers | Price basis |
 |---|---|---|
 | T1 quota | z.ai ours + friend | sunk cost, $0.001 floor × time-decay toward weekly reset — unused quota is wasted quota, so it gets *cheaper* as reset approaches |
-| T2 balance | NeuralWatt | base rate × (1 + depletion penalty) × NW correction factor (3.6% overcount correction) |
+| T2 balance | NeuralWatt | base rate × (1 + depletion penalty) × NW correction factor (3.6× token-overcounting correction) |
 | T3 flat | OpenCode Go $10/mo | $0.001 floor — marginal cost really is ~$0 |
 | T4 included | Ollama Cloud ×2 | $0.001 floor, scarcity from session/weekly quota |
 | T5 per-token | DeepInfra, PPQ, Telnyx, OpenRouter, routstr×2 | Kalman-measured real $/M |
