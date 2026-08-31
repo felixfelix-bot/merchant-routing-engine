@@ -2,6 +2,10 @@
 
 Kalman filter-based routing and failover engine for LLM API providers. Manages cost optimization, key health tracking, provider funding tracking, and intelligent failover across multiple API providers.
 
+## Reproduce the routing engine
+
+Full flat-market routing system reproducible from this repo: [REPRODUCE.md](REPRODUCE.md)
+
 ## Quick Start
 
 ```bash
