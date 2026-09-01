@@ -30,7 +30,7 @@ from src.ollama_extra_usage import (
     get_extra_usage_status,
     get_status_with_fallback,
     _reset_ollama_cache,
-    _ollama_cache,
+    _ollama_caches,
     _OLLAMA_CACHE_TTL_S,
 )
 
@@ -421,8 +421,9 @@ class TestFetchOllamaUsage:
             fetch_ollama_usage(api_key="test-key", now=base_time)
 
         # Cache timestamp should be set even on failure
-        assert _ollama_cache["at"] == base_time
-        assert _ollama_cache["data"] is None
+        # (per-key cache: entries keyed by api_key suffix — 12d6dd8 refactor)
+        assert _ollama_caches["test-key"]["at"] == base_time
+        assert _ollama_caches["test-key"]["data"] is None
 
     @patch("src.ollama_extra_usage.urllib.request.urlopen")
     def test_fetch_failure_then_second_call_within_ttl_does_not_fetch(self, mock_urlopen):
@@ -461,7 +462,7 @@ class TestFetchOllamaUsage:
 
         result = fetch_ollama_usage(api_key="test-key")
         assert result is None
-        assert _ollama_cache["at"] > 0  # Timestamp updated for backoff
+        assert _ollama_caches["test-key"]["at"] > 0  # Timestamp updated for backoff
 
     @patch("src.ollama_extra_usage.urllib.request.urlopen")
     def test_fetch_sets_authorization_header(self, mock_urlopen):
