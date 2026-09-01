@@ -255,6 +255,7 @@ SEED_RATES: dict[str, float] = {
     "friend":       0.015,    # z.ai amortized seed ($300/yr)
     "ollama_cloud": 0.0155,   # measured blended rate (pre-RP-3)
     "ollama_cloud_2": 0.0155, # second subscription, same economics
+    "ollama_cloud_3": 0.0155, # third subscription (stoic_herschel_499, monthly-budget plan, 2026-09-02)
     "neuralwatt":   0.21,     # deepseek-v4-flash blended
     "ppq":          0.14,     # list price
     "openrouter":   0.135,    # list price
