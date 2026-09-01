@@ -54,8 +54,8 @@ but unvetted (no verdict yet — needs consultant pass before anything else).
 - Revisit triggers: (a) >128K-context demand materializes at volume [T4];
   (b) ollama flat subs die → need per-token fallback catalog [T3];
   (c) Scale-tier pricing drops below lane economics [T3].
-- Evidence: ~/reports/consultant-{a,b}-featherless-2026-09-02.md;
-  ~/.merchant-routing/reports/provider-hunt/2026-09-02.md
+- Evidence: docs/provider-hunt/2026-09-02/ (consultant-a-cost-featherless.md,
+  consultant-b-ops-featherless.md, scout-report.md)
 
 ### Standard Compute (standardcompute.com) — PARKED 2026-09-02
 - API: `api.stdcmpt.com/v1` (OpenAI-compatible, 200 unauth)
@@ -66,7 +66,7 @@ but unvetted (no verdict yet — needs consultant pass before anything else).
   models so the flat router can't price a call; "unlimited" = fixed budget with
   /fair-use page.
 - Revisit triggers: they add model pinning + non-Claude catalog [T4].
-- Evidence: ~/.merchant-routing/reports/provider-hunt/2026-09-02.md
+- Evidence: docs/provider-hunt/2026-09-02/scout-report.md
 
 ### Morph (morphllm.com) — PARKED 2026-09-02
 - API: `api.morphllm.com/v1` (endpoint live, auth required — no unauth listing)
@@ -75,7 +75,7 @@ but unvetted (no verdict yet — needs consultant pass before anything else).
   signup — violates our no-signup verification bar. OpenRouter listings are
   narrow code-edit models, not the advertised GLM-5.3/Kimi-K3 catalog.
 - Revisit triggers: unauthenticated /v1/models or public flat pricing appears [T3].
-- Evidence: ~/.merchant-routing/reports/provider-hunt/2026-09-02.md
+- Evidence: docs/provider-hunt/2026-09-02/scout-report.md
 
 ### Plugsky (plugsky.com) — PARKED 2026-09-02
 - API: `api.plugsky.com/v1` (OpenAI-compatible, unauth listing works)
@@ -89,7 +89,7 @@ but unvetted (no verdict yet — needs consultant pass before anything else).
 - Why parked: no catalog overlap + trust insufficient for production dispatch.
 - Revisit trigger: ONLY as $0 free-tier gateway to eval Nemotron 3 Ultra 550B
   (model-eval question, not router) [T4].
-- Evidence: ~/reports/plugsky-canary-2026-09-02.md
+- Evidence: docs/provider-hunt/2026-09-02/plugsky-canary.md
 
 ### Yolo-Auto — PARKED 2026-09-02 (from transcript reality-check)
 - One model only: Qwen3.8-27B FP8, 256K ctx, $19/mo. No catalog overlap with
