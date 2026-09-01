@@ -134,4 +134,5 @@ Prior release (superseded, historical): `routing-telemetry-2026-08-22`
 
 ## License
 
-MIT — use freely.
+License: GPL-3.0 — same as the repo `LICENSE`. Use freely under its
+terms.
