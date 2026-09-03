@@ -1,10 +1,23 @@
 """Tests for src/quality_floor.py (Workstream B step 1-2)."""
 
 import datetime as _dt
+import importlib.util as _ilu
+import os as _os
 
 import pytest
 
-from src import quality_floor as qf
+# ── Pin the repo's quality_floor module ──────────────────────────────────────
+# When this file runs in the same pytest process as test_flat_router.py,
+# flat_router's path bootstrap has already imported `src` from ~/.hermes/bot
+# (a namespace package) and cached it in sys.modules, so a bare
+# `from src import quality_floor` resolves to the wrong package. Load the repo's
+# quality_floor.py by explicit path instead — the source of truth for this
+# module.
+_QF_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                         "src", "quality_floor.py")
+_qf_spec = _ilu.spec_from_file_location("quality_floor", _QF_PATH)
+qf = _ilu.module_from_spec(_qf_spec)
+_qf_spec.loader.exec_module(qf)
 
 
 # ── ewma stub behavior ───────────────────────────────────────────────────────

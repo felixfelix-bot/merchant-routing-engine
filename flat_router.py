@@ -171,6 +171,19 @@ PROVIDER_MODELS: dict[str, set[str]] = {
         "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro",
         "minimax-m3",
     },
+    # ollama_cloud_3 (stoic_herschel_499) — new $20/mo MONTHLY-budget credit-pool
+    # subscription (no 5h session windows; limits.monthly only). Same Ollama
+    # catalog as oc/oc2 (19 models verified 2026-09-02). Tier T4 "included" but
+    # with a MONTHLY window: delist guard ~90% monthly instead of the 60% weekly
+    # (exhaustion has ~30-day dead-time penalty). See plan Phase A/C.
+    "ollama_cloud_3": {
+        "glm-5.2", "glm-5.3", "glm-5.3-flash", "kimi-k3", "kimi-k2.7-code",
+        "gpt-oss:120b", "gpt-oss:20b", "gemma4:31b", "qwen3.5:397b",
+        "glm-5.1", "kimi-k2.6", "minimax-m2.7", "mistral-large-3:675b",
+        "nemotron-3-nano:30b", "nemotron-3-super", "nemotron-3-ultra",
+        "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro",
+        "minimax-m3",
+    },
     # OpenCode Go — flat-rate $10/mo, native glm-5.3, 29 models.
     # deepseek stays in SLASHED canonical form (FR-1 direction).
     "opencode_go": {
@@ -234,6 +247,7 @@ _SEED_RATES: dict[str, float] = {
     "friend":        0.082,   # 0.068 * 1.21
     "ollama_cloud":  0.40,
     "ollama_cloud_2": 0.40,
+    "ollama_cloud_3": 0.40,
     "opencode_go":   0.40,
     "neuralwatt":    2.21,
     "deepinfra":     1.30,
@@ -264,6 +278,7 @@ PROVIDER_TIER: dict[str, str] = {
     "opencode_go":    "flat",
     "ollama_cloud":   "included",
     "ollama_cloud_2": "included",
+    "ollama_cloud_3": "included",
     "deepinfra":      "per_token",
     "ppq":            "per_token",
     "telnyx":         "per_token",
@@ -369,7 +384,7 @@ _ZAI_KEYS = frozenset({"ours", "friend"})
 
 # Names that are flat-rate / included (no balance tracking)
 _FLAT_RATE_PROVIDERS = frozenset({
-    "ollama_cloud", "ollama_cloud_2", "opencode_go",
+    "ollama_cloud", "ollama_cloud_2", "ollama_cloud_3", "opencode_go",
 })
 
 
@@ -675,8 +690,14 @@ def compute_effective_price(
                     else:
                         # ollama_cloud: use session used_pct
                         _oc_status = _zp._get_ollama_quota_status(provider)
-                        scarcity = max(_oc_status.get("session_used_pct", 0),
-                                       _oc_status.get("weekly_used_pct", 0)) / 100.0
+                        if provider == "ollama_cloud_3":
+                            # BUG B-sc fix: oc3 is monthly-only (session/weekly
+                            # are always 0), so scarcity must use monthly_used_pct
+                            # or oc3 gets zero scarcity pricing until 100% used.
+                            scarcity = _oc_status.get("monthly_used_pct", 0) / 100.0
+                        else:
+                            scarcity = max(_oc_status.get("session_used_pct", 0),
+                                           _oc_status.get("weekly_used_pct", 0)) / 100.0
                     if scarcity > 0.01:
                         burn_share = _zp._compute_model_burn_share(provider, model)
                         # Burn premium: big burners on scarce providers pay more
@@ -803,6 +824,28 @@ def _get_failure_count(name: str) -> int:
     return 0
 
 
+# ── Exhaust soft-preference (Felix: ALERTS-NOT-BLOCKS) ───────────────────────
+# Reads the latest kalman_samples row per key and inflates effective_cost for
+# lanes predicted to exhaust their quota soon. SOFT only — never removes a
+# lane, never touches the pressure FSM. See src/exhaust_weight.py for the
+# formula (ALPHA=0.5, HORIZON=6h) and graceful-degradation guarantees.
+
+def _apply_exhaust_weight(name: str, cost: float) -> float:
+    """Multiply a lane's effective cost by its exhaust soft-preference weight.
+
+    Returns ``cost`` unchanged (×1.0) when the lane is not predicted to exhaust,
+    the sample is stale, or the DB is unreadable. Never raises.
+    """
+    if not math.isfinite(cost):
+        return cost  # inf/NaN already sort to the end; don't touch them
+    try:
+        from exhaust_weight import exhaust_multiplier
+        mult = exhaust_multiplier(name)
+        return cost * mult
+    except Exception:
+        return cost  # never raise into routing
+
+
 # ── _dispatch_to_provider() — maps provider name to dispatch method ─────────
 
 def _make_dispatch_fn(name: str) -> Callable | None:
@@ -818,7 +861,7 @@ def _make_dispatch_fn(name: str) -> Callable | None:
         return _dispatch_zai
 
     # ollama_cloud → _try_ollama_cloud_any
-    if name in ("ollama_cloud", "ollama_cloud_2"):
+    if name in ("ollama_cloud", "ollama_cloud_2", "ollama_cloud_3"):
         def _dispatch_ollama(handler, body, model, buffer, t0):
             # Pass an accurate reason so _try_ollama_cloud()'s self-log does
             # NOT emit the legacy "zai_both_keys_exhausted_ollama_fallback" /
@@ -969,6 +1012,13 @@ def select_provider(
 
             # 3. Cost evaluation (via Kalman / shadow optimizer)
             cost = _get_effective_cost(name, model_id, difficulty)
+
+            # 3b. Exhaust soft-preference (Felix: ALERTS-NOT-BLOCKS) — lanes
+            # predicted to exhaust their quota within HORIZON hours get their
+            # effective cost inflated so they sort lower in the cheapest-first
+            # ordering. SOFT only: never removes a lane, never touches the
+            # pressure FSM. Degrades to ×1.0 (no effect) on any DB failure.
+            cost = _apply_exhaust_weight(name, cost)
 
             # 4. Build dispatch function
             dispatch_fn = _make_dispatch_fn(name)
