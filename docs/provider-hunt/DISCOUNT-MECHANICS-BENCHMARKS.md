@@ -65,3 +65,48 @@ $1.40/$4.40 (web -33% display price NOT charged on API). $1 trial credit is
 card-gated; $25 min top-up. Entity: Atlas Cloud AI Inc (NY/Delaware), domain
 2024-04-18, no disclosed funding. Method note: pricing readable from
 `api.atlascloud.ai/v1/models` inline `pricing` field — no auth, no signup needed.
+## Prompt-caching / warm-context vetting pass (2026-09-04, .bin#4)
+
+Source: pasted AI-conversation "Warm-Context KV Speedup" (llama.cpp slots + cloud
+prompt caching). Verdicts below manager-verified or consultant-verified with live
+fetches; load-bearing numbers re-checked against live pages.
+
+REAL (verified):
+- z.ai GLM-5.3: **Input $1.4 / Cached Input $0.26 / Output $4.4** (0.186× input);
+  GLM-5.3-Flash **$0.15/$0.03** (promo to Sep 9: $0.075/$0.015); cached storage
+  "Limited-time Free". Source: docs.z.ai/guides/overview/pricing (live fetch).
+- z.ai context caching is **automatic** ("no manual configuration required"),
+  implicit prefix matching; cached tokens billed at discounted rate; responses
+  expose `usage.prompt_tokens_details.cached_tokens`. Source: docs.z.ai/guides/capabilities/cache.md.
+- Anthropic: cache write 1.25× (5m) / 2× (1h), cache read **0.1×** base input;
+  `cache_control` explicit + new automatic mode. docs.anthropic.com.
+- OpenAI: automatic caching, cached reads **0.1× (90% off, not 50%)** on GPT-5.6+;
+  threshold 1,024 tok (GPT-5.6+), 2,048 older. platform.openai.com.
+- Google Gemini: implicit caching default-on for 2.5+; e.g. 2.5 Flash cached
+  $0.075/M (+$0.50/M/hr storage) through 2026-12-31. ai.google.dev.
+- llama.cpp `llama-server`: `--slot-save-path`, `POST /slots/{id}?action=save|restore`,
+  `cache_prompt` (default TRUE) — all in master README (ggml-org/llama.cpp
+  tools/server/README.md :222/:587/:1150-1174). CPU-only, no GPU caveat.
+- Caches are per-provider/org, NOT portable (Anthropic+OpenAI docs; no export).
+- LiteLLM real OSS gateway (github BerriAI/litellm).
+
+PARTIAL:
+- "Warm context is NOT an ollama feature": ollama HAS in-memory prefix reuse while
+  warm (`prompt_eval_cached_count` in API response; keep_alive) — but NO disk
+  persistence (PR #16836 OLLAMA_SLOT_SAVE_PATH closed UNMERGED 2026-06; follow-ups
+  #17247/#17278 open). Accurate only for the persistence half.
+
+OUR-STACK FIT (economics, 7d lane volumes from zai_usage.db):
+- ours (z.ai coding plan) 443.6M in — cached tier exists on PAYG, but our lanes
+  are CREDIT-metered subscription: whether credits burn at cached rate = UNKNOWN →
+  probe queued (extends QS-3 Part 1B harness). If yes at ~0.19× and ~50-70%
+  prefix-hit → effective quota ~1.8-2.3× on biggest lane.
+- neuralwatt 74.2M in — cached already banked (94% lifetime via own meter).
+- ollama flat lanes ~1.07B in — flat rate, caching moves $0.
+- opencode_go 12.1M in — trivial exposure.
+- Proxy gap: `cache_hit` column 0 for ALL lanes 7d despite live parsing of
+  `prompt_tokens_details.cached_tokens` (zai_proxy.py :3842/:5341) — upstreams
+  may not report per-call, or field mismatch; NW billing corrected via meter
+  bridge. Visibility task queued with probe.
+- Local llama-server warm-KV: NOT a cost lever (no local lane; T470-class CPU
+  prefill hopeless at p99 181K). Offline-resilience only.
