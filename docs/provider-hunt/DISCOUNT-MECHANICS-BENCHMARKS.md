@@ -49,3 +49,19 @@ first, and only re-probe live if the number is dated >30 days.
 - QS-3 (t_fd9bafa4): live -flex probe — measures the real 0.65× factor + glm-5.3-flex existence.
 - Provider-hunt rotation seeds (commit f984054): kWh metering, deferred queues, off-peak
   tiers, batch discounts — hunt cron now searches for these daily.
+
+## ToS-toxic providers — verified 2026-09-03 (Atlas Cloud consultant pass)
+
+Do NOT re-vet these; the policy clauses kill automated routing regardless of price.
+Browser-read of JS-rendered ToS (curl gets MDX shells — always use the browser for these).
+
+| Provider | Killer clause (verbatim) | Price verdict at our mix |
+|---|---|---|
+| Atlas Cloud (atlascloud.ai) | Privacy §3: "you will not access the Services through automated or non-human means"; AUP §2: "thin wrapper for raw resale is strictly prohibited" | NOT-COMPETITIVE: DS-V4-Flash $0.14/$0.28, eff $0.1414/M = 1.65% ABOVE ppq $0.1391 (break-even only >2% cache-hit); 17× ollama. GLM-5.2@1M ctx $1.40/M in = premium capability, not cost lane |
+
+Verified-real Atlas numbers (for any future price benchmarking only): DS-V4-Flash
+$0.14 in/$0.28 out/$0.028 cache-hit, 1M ctx; kimi-k2.5 $0.49/$2.50; GLM-5.2
+$1.40/$4.40 (web -33% display price NOT charged on API). $1 trial credit is
+card-gated; $25 min top-up. Entity: Atlas Cloud AI Inc (NY/Delaware), domain
+2024-04-18, no disclosed funding. Method note: pricing readable from
+`api.atlascloud.ai/v1/models` inline `pricing` field — no auth, no signup needed.

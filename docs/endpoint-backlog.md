@@ -105,6 +105,30 @@ but unvetted (no verdict yet — needs consultant pass before anything else).
 
 *(hunt cron appends here; entries auto-expire to DEAD after 60d without vetting)*
 
+### Atlas Cloud (atlascloud.ai) — LEAD→DEAD 2026-09-03 (consultant pass: ToS-toxic)
+- API: `https://api.atlascloud.ai/v1` (OpenAI-compatible, 117 models, unauth /v1/models works)
+- Type: per-token pay-as-you-go, $1 free credit w/ payment method (card-gated), $25 min top-up, credits expire 365d
+- Prices: DeepSeek-V4-Flash $0.14/$0.28 per M, cache-hit $0.028/M (eff $0.1414/M — 1.65% ABOVE ppq $0.1391), GLM-5.3-Flash $0.15/$0.50, GLM-5.2 $1.40/$4.40 (web shows -33% but API charges official), Kimi-K3 $3.00/$15.00, kimi-k2.5 $0.49/$2.50. No flat sub.
+- Overlap: 36 models in glm/kimi/deepseek/qwen families incl. GLM-5.2 @ 1M ctx — best overlap seen, moot
+- DEAD REASON (ops-architect consultant, browser-read ToS 2026-09-03): Privacy §3 verbatim "you will not access the Services through automated or non-human means" — Featherless-class killer; AUP §2 "thin wrapper for raw resale is strictly prohibited" + §7 "build a competitive product". AUP grants API access but Privacy boilerplate bans automated use — docs contradict, unusable for a routing fleet either way.
+- Entity ATLAS CLOUD AI INC (NY addr / Delaware law), domain 2024-04-18, no disclosed funding, media-gen aggregator first (video/image), SOC2/HIPAA claims unvalidated. "400+ models" = 417 across ALL modalities, only 117 LLM on /v1/models — not inflated.
+- Verdict: DEAD — ToS kills automated routing even at internal scale; price never beat ppq anyway (needs >2% cache-hit to break even).
+
+### LLM7 (llm7.io) — LEAD→PARK 2026-09-03
+- API: `https://api.llm7.io/v1` (45 models on /v1/models, but chat requires API key)
+- Type: unknown — /pricing and /terms both 404
+- Overlap: glm-5.3, glm-5.3-flash, deepseek-v4-flash, kimi-k3, gpt-5.x (suspicious)
+- Red flags: keyless claim false (auth error on chat completions); no public pricing or ToS; GPT-5.x listings suspicious
+- Verdict: PARK — cannot verify pricing or ToS without signup; dead policy pages
+
+### Novita AI (novita.ai) — LEAD→PARK 2026-09-03
+- API: `api.novita.ai/v1` (endpoint unverified — JSON parse fail)
+- Type: per-token, referral credits ($10 signup)
+- Prices: DeepSeek V4 Flash $0.14/M in, V3.2 $0.269/M, R1 $0.70/M
+- Overlap: DeepSeek family on pricing page
+- Red flags: API endpoint not verified; GPU marketplace not API-focused; referral credit model
+- Verdict: PARK — DeepSeek pricing matches ppq but API unverified and referral model unsuitable for production
+
 ## INCUMBENTS (reference — not candidates)
 
 ollama_cloud (grandfathered $25/mo flat, ~$0.0083/M eff — THE bar to beat) ·
