@@ -79,6 +79,9 @@ When z.ai quota exhausts, internal fallback candidates: Neuralwatt glm-5.3 ($0.0
 | z.ai `reasoning_effort` | REAL — `max`/`high`/`low`, default `max`, GLM-5.2+ | docs.z.ai/guides/overview/concept-param.md |
 | GLM-5.3 thinking can be disabled | FALSE — forced thinking; effort CAN go `low` | docs.z.ai/guides/capabilities/thinking-mode.md |
 | Spot GPU 60–80% off | REAL on Vast ("Saves 50–80%", documented); TensorDock "80%" = homepage marketing | docs.vast.ai rental-types |
+| Self-host fits (live HF cards, 2026-09-04) | VERIFIED: GLM-5.3 = 753B (FP8 751GB → 8×H200); Kimi K3 = 2.78T/104B-act (MXFP4 1.36TB → 8×B200 tight); DS-V4-Flash = 284B/13B-act (8-bit 283GB → 8×H100 or 2×H200); DS-V4-Pro 1.6T needs B300 class | HF safetensors; portal.neuralwatt.com/pricing |
+| GPU rental vs NW (8×H100/H200 spot $10–16/hr, live) | HARD NO at spiky util — needs ≥5.5k tok/s sustained to beat our $0.75/M energy-leg rate; only Vast + Hyperstack even offer spot+API; 9–10 min TB-weight cold starts fatal to dispatcher spin-up | consultant fetches 2026-09-04 |
+| NW token-leg vs energy-leg | VERIFIED: token-leg GLM-5.3 $4.5/M out ≈ 45× the $10/kWh energy leg (~$0.10/M); our lane rides the cheap leg — margin collapses if NW converges pricing | portal.neuralwatt.com/pricing |
 | z.ai cached input 0.186×, automatic, `cached_tokens` reported | VERIFIED-LIVE | docs.z.ai pricing; our probe 97.7% hit |
 | z.ai coding-plan credits discount cached tokens | OPEN — inline probe inconclusive (integer-credit quota API); 16k-prefix re-probe queued (QS-3 Part 1D) | — |
 | z.ai off-peak 50% credits (weekends) | VERIFIED (coding-plan terms) | z.ai coding-plan page |
