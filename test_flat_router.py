@@ -1082,5 +1082,77 @@ class TestFreshboxDocRepair:
                 os.environ["PORT"] = old
 
 
+# ── Legacy-label relabel (2026-09-03) ────────────────────────────────────────
+# The flat router dispatches ollama via _try_ollama_cloud_any WITHOUT a reason,
+# so _try_ollama_cloud()'s self-log emitted the legacy
+# "zai_both_keys_exhausted_ollama_fallback" / "peak_hour_ollama_primary" label
+# even though select_provider() HAD already run (market argmin). That label
+# implied a routing bypass that does not exist. The dispatch closure now passes
+# reason="flat_router_dispatch_ollama" so the self-log is accurate.
+
+
+class TestOllamaDispatchReasonRelabel:
+    """The flat-router ollama dispatch must pass an accurate reason so the
+    legacy bypass label is never emitted from the flat-router path."""
+
+    def test_dispatch_closure_passes_flat_router_reason(self):
+        """_make_dispatch_fn('ollama_cloud') must call _try_ollama_cloud_any
+        with reason='flat_router_dispatch_ollama' (not the legacy default)."""
+        from flat_router import _make_dispatch_fn
+
+        captured = {}
+
+        class _FakeHandler:
+            def _try_ollama_cloud_any(self, body, model, buffer, t0,
+                                      reason=None):
+                captured["reason"] = reason
+                return True
+
+        fn = _make_dispatch_fn("ollama_cloud")
+        assert fn is not None
+        ok = fn(_FakeHandler(), b"{}", "glm-5.3", bytearray(), 0.0)
+        assert ok is True
+        assert captured["reason"] == "flat_router_dispatch_ollama", \
+            f"expected flat_router_dispatch_ollama, got {captured['reason']!r}"
+
+    def test_all_ollama_keys_relabeled(self):
+        """ollama_cloud and ollama_cloud_2 must carry the accurate reason."""
+        from flat_router import _make_dispatch_fn
+
+        for name in ("ollama_cloud", "ollama_cloud_2"):
+            captured = {}
+
+            class _FakeHandler:
+                def _try_ollama_cloud_any(self, body, model, buffer, t0,
+                                          reason=None):
+                    captured["reason"] = reason
+                    return True
+
+            fn = _make_dispatch_fn(name)
+            assert fn is not None, f"no dispatch fn for {name}"
+            fn(_FakeHandler(), b"{}", "glm-5.3", bytearray(), 0.0)
+            assert captured["reason"] == "flat_router_dispatch_ollama", \
+                f"{name} reason = {captured['reason']!r}"
+
+    def test_legacy_label_not_in_flat_router_dispatch(self):
+        """The flat-router dispatch closure must pass an explicit reason kwarg
+        (so _try_ollama_cloud's legacy default is never used from this path)."""
+        import inspect
+        from flat_router import _make_dispatch_fn
+        src = inspect.getsource(_make_dispatch_fn)
+        assert "reason=" in src, \
+            "flat-router ollama dispatch must pass an explicit reason kwarg"
+
+    def test_rollback_path_still_uses_legacy_label(self):
+        """The .disable_flat_router rollback path calls _try_ollama_cloud_any
+        with NO reason, so _try_ollama_cloud() still self-logs the legacy
+        label there. Verify the legacy label string still exists in
+        _try_ollama_cloud (it is the rollback safety net's label)."""
+        import zai_proxy
+        src = open(zai_proxy.__file__).read()
+        assert "zai_both_keys_exhausted_ollama_fallback" in src, \
+            "legacy label must remain for the rollback path"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

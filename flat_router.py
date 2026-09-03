@@ -820,7 +820,15 @@ def _make_dispatch_fn(name: str) -> Callable | None:
     # ollama_cloud → _try_ollama_cloud_any
     if name in ("ollama_cloud", "ollama_cloud_2"):
         def _dispatch_ollama(handler, body, model, buffer, t0):
-            return handler._try_ollama_cloud_any(body, model, buffer, t0)
+            # Pass an accurate reason so _try_ollama_cloud()'s self-log does
+            # NOT emit the legacy "zai_both_keys_exhausted_ollama_fallback" /
+            # "peak_hour_ollama_primary" label. Those labels imply a bypass of
+            # the flat-router market argmin, but this dispatch runs AFTER
+            # select_provider() already chose ollama as the cheapest healthy
+            # candidate. The legacy label is reserved for the .disable_flat_router
+            # rollback path (which calls _try_ollama_cloud_any with no reason).
+            return handler._try_ollama_cloud_any(
+                body, model, buffer, t0, reason="flat_router_dispatch_ollama")
         return _dispatch_ollama
 
     # opencode_go → _try_opencode_go
