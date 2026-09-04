@@ -4370,10 +4370,11 @@ def _check_sustained_down():
                 print(f"\n{'='*60}", flush=True)
                 print(alert_text, flush=True)
                 print(f"{'='*60}\n", flush=True)
-                # 3. Voice notification
+                # 3. Voice notification (natural Piper voice via say.sh;
+                #    espeak-ng fallback inside the wrapper guarantees audibility)
                 try:
                     import subprocess as _sp
-                    _sp.Popen(["espeak-ng",
+                    _sp.Popen(["/home/c03rad0r/.hermes/voices/say.sh",
                                f"Alert: key {name} has been unavailable for "
                                f"{down_duration/60:.0f} minutes"],
                               stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)

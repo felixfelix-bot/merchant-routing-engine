@@ -125,7 +125,9 @@ def _surface(invoice: str, network_sats: int) -> None:
 
 def _espeak(msg: str) -> None:
     try:
-        subprocess.run(["espeak-ng", msg], timeout=20, check=False)
+        # Natural Piper voice (en_US-ryan-high); espeak-ng fallback inside wrapper
+        subprocess.run(["/home/c03rad0r/.hermes/voices/say.sh", msg],
+                       timeout=60, check=False)
     except Exception:
         pass
 
