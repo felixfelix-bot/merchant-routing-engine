@@ -19,12 +19,13 @@ first, and only re-probe live if the number is dated >30 days.
 | kWh metering | Neuralwatt | $10/kWh PAYG; Pro $100/13.33 kWh; our meter via balance-tracker: **415.7M tok = 6.85 kWh** (16.5 Wh/M blended, 94% cached) | Only kWh-metered provider found; overage $7.50/kWh |
 | Spot GPU | Spheron | 8×H200 $20.56/hr spot vs $38.32 on-demand; 8×B200 $31.20/hr (their GLM-5.3 page) | Self-hosting math dies vs our ollama ~$0.0083/M |
 | Spot GPU | RunPod | H100 from $1.99/hr (runpod.io/pricing) | FluidStack unverified (JS-blocked) |
+| service_tier:flex | DeepInfra | **0.8× base price** (`rate_per_service_tier_flex=0.8`, pricing page + API catalog live-verified 2026-09-04); priority tier 1.5×. Per-model — flex on DS-V4-Flash-0731/GLM-5.2/GLM-5.3, **null for GLM-5.3-Flash/Kimi-K3**. "occasional unavailability" tradeoff | CORRECTION: 09-02 pass listed this as FABRICATED — verdict wrong, overturned 2026-09-04 by two-consultant live re-check (catalog metadata + pricing page both document it). Lesson: 09-02 consultant likely read docs page only, not API catalog metadata |
+| Cache metering | DeepInfra | cached input 0.10–0.20× per model (DS-V4-Flash-0731 $0.08/$0.016, Kimi-K3 0.10×, GLM-5.2 0.1867× == z.ai ratio); response exposes `usage.prompt_tokens_details.cached_tokens` + `cache_write_tokens` — matches our zai_proxy parser | Catalog `discount` flags exist but billing effect UNVERIFIED (GLM-5.2 0.35, GLM-5.3-Flash 0.5) — probe before pricing in |
 
 ## Fabricated mechanics (never re-verify these — 2× confirmed false)
 
 - **OpenRouter `:floor`** — zero `:floor` variants in 421 models. Real variants: `:batch`, `:nitro`.
   (Invented twice by the same AI-mode source on 2026-09-02.)
-- **DeepInfra "flex 0.8×"** — they have a Batch API, no flex tier.
 - **DeepSeek "50% batch"** — actually off-peak time-of-day pricing, not batch.
 - **Azure Foundry DeepSeek "spot-equivalent $0.145/M"** — unverified (JS-blocked pages), likely fiction.
 - **DeepSeek "cache-hit $0.003625/M"** — real cache-hit rate is **$0.022/M Pro off-peak** ($0.044 peak), not $0.003625. The "$0.435/$0.87 base" is also wrong — real Pro off-peak is $0.66/$1.98.

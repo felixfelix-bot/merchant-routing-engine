@@ -129,6 +129,14 @@ but unvetted (no verdict yet — needs consultant pass before anything else).
 - Red flags: API endpoint not verified; GPU marketplace not API-focused; referral credit model
 - Verdict: PARK — DeepSeek pricing matches ppq but API unverified and referral model unsuitable for production
 
+### DeepInfra (deepinfra.com) — LEAD 2026-09-04 (scout-approve + TWO-CONSULTANT PASS = GO w/ conditions)
+- Two-consultant verdict (cost economist + ops architect, both live-fetched 2026-09-04): ALL scout pricing claims REAL from DeepInfra's own catalog/pricing page. **Flex tier 0.8× REAL** (`rate_per_service_tier_flex=0.8` in live API catalog + pricing page "0.8x base price") — per-model: applies to DS-V4-Flash-0731/GLM-5.2/GLM-5.3, null for GLM-5.3-Flash/Kimi-K3. **09-02 "fabricated flex" verdict OVERTURNED** (correction logged in DISCOUNT-MECHANICS-BENCHMARKS.md).
+- New find scout missed: GLM-5.3-Flash carries `discount:0.5` → $0.075/$0.25/$0.015 = matches z.ai promo. GLM-5.2 `discount:0.35` (billing effect unverified — probe before pricing in).
+- Ops: NO automation/anti-agent clause (unlike Atlas). Internal 22-worker fleet = normal use; **routstr public upstream = BLOCKED by §11(a)(viii) resale clause**. 200 concurrent req/model default; 100% 90d API uptime (status.deepinfra.com); founded Sep 2022; $107M Series B verified (500 Global et al). Card or prepay required before API use. Cache telemetry exposes `usage.prompt_tokens_details.cached_tokens` — EXACT field our zai_proxy parser (:3842/:5341) expects, zero parser changes. `reasoning_effort` enum none…max + `reasoning.enabled`; `service_tier` param; model strings `vendor/model`.
+- Economics vs our 2.95B tok/30d (99% in): DS-V4-Flash-0731 beats ppq at ALL h (even h=0: $0.08 < $0.1391) — $57/mo flex @h=0.9 vs ppq $406/mo. Kimi-K3 $4,998/mo, GLM-5.2 $1,370/mo at same volume = non-starters for bulk, but Kimi-K3 cached eff $0.5415 beats telnyx $2.70 in for input-heavy. $25 ollama flat lane unbeatable by ANY metered provider.
+- GO conditions: (1) internal-fleet-only, hard-block routstr upstream; (2) bounded billing probe for discount flags + 181K-ctx truncation + flex 429 behavior under spiky load; (3) Felix creates account (virtual CC, min top-up) — buy step is his.
+- Evidence: ~/.merchant-routing/reports/provider-hunt/2026-09-04.md (scout + consultant verdicts appended)
+
 ## INCUMBENTS (reference — not candidates)
 
 ollama_cloud (grandfathered $25/mo flat, ~$0.0083/M eff — THE bar to beat) ·
