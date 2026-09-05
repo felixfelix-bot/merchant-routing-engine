@@ -198,7 +198,10 @@ PROVIDER_MODELS: dict[str, set[str]] = {
     # kimi-k2.7-code: LIVE (2026-08-30) — $0.95/M in, $4.00/M out; cheaper
     # paid code rung than kimi-k3 ($3.00/$15.00).
     "neuralwatt": {
-        "glm-5.2", "glm-5.3", "kimi-k3", "kimi-k2.7-code",
+        # glm-5.3 REMOVED (2026-09-05) — NW glm-5.3 endpoint intermittently
+        # streams degenerate token-spam (77k+ completion tokens, HTTP 200).
+        # NW deepseek/glm-5.2/kimi lanes are coherent; only glm-5.3 collapses.
+        "glm-5.2", "kimi-k3", "kimi-k2.7-code",
         "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro",
         "deepseek/gemma-4-31b",
     },
@@ -367,6 +370,19 @@ def _is_key_healthy(name: str) -> bool:
     if fn is not None:
         return fn(name)
     return True
+
+
+def _is_pair_garbage_demoted(name: str, model: str) -> bool:
+    """Check if THIS (provider, model) pair is demoted by the garbage
+    circuit-breaker. Resolves from zai_proxy; fails OPEN (returns False, i.e.
+    NOT demoted) on any resolution error so routing is never blocked."""
+    fn = _resolve("_garbage_cb_pair_demoted")
+    if fn is not None:
+        try:
+            return bool(fn(name, model))
+        except Exception:
+            return False
+    return False
 
 
 def _is_provider_funded(name: str) -> bool:
@@ -996,6 +1012,13 @@ def select_provider(
                 # Exact match only — model translation happens at dispatch time.
                 # (glm-5.3 is served verbatim on ollama since 2026-08-29; no
                 # downgrade-to-5.2 substitution exists anymore.)
+                continue
+
+            # 1a. Garbage circuit-breaker (per-(provider, model)): if THIS
+            # (provider, model) pair was demoted for degenerate oversized
+            # output (24h TTL), skip it from rotation while the provider stays
+            # eligible for OTHER models. Fails OPEN (never blocks routing).
+            if _is_pair_garbage_demoted(name, model_id):
                 continue
 
             # 1b. Phantom-catalog guard — if a fresh live-catalog snapshot for

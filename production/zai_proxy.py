@@ -148,6 +148,49 @@ _key_down_since: dict[str, float] = {}
 _key_alerted: dict[str, bool] = {}
 _KEY_SUSTAINED_DOWN_THRESHOLD = 900.0  # 15 minutes
 
+# ── Garbage circuit-breaker (per-(provider, model) demotion, task t_b7725426) ─
+# NeuralWatt's glm-5.3 endpoint intermittently streams degenerate token-spam
+# (e.g. 77,366 completion tokens / 727s, HTTP 200, no coherent stop) when z.ai
+# keys exhaust and routing falls through to NW's glm-5.3. Existing guardrails
+# are too coarse: the daily-cap / "drop neuralwatt until UTC midnight"
+# mechanism drops the WHOLE provider, and the key-health backoff reacts only to
+# HTTP errors (a 200 with garbage output defeats it).
+#
+# This breaker detects degenerate oversized completions PER (provider, model)
+# and demotes ONLY that pair from rotation for GARBAGE_CB_TTL_SECONDS (24h),
+# alerting once per trip, while sibling lanes on the same provider stay
+# eligible. It is keyed like _zai_key_health but with a composite (provider,
+# model) key. Restart-safe: the state is module-local and cold-starts EMPTY
+# (optimistic — never blocks routing); every read/write path is wrapped so a
+# DB/logging error can never break a request (revert-safe, same as the
+# daily-cap guardrail). Out of scope: provider-level daily cap + HTTP-error
+# backoff (both already exist).
+#
+# Config (env, defaults):
+#   GARBAGE_CB_ENABLED            = "1"   (set "0"/"false"/"no" to disable)
+#   GARBAGE_MAX_COMPLETION_TOKENS = "32000"  (ceiling on completion_tokens)
+#   GARBAGE_MAX_TOKENS_PER_SEC    = "0"   (0 = disabled; pathological t/s rate)
+#   GARBAGE_CB_TTL_SECONDS        = "86400" (24h demotion window)
+#
+# Trigger: a successful completion with completion_tokens > the ceiling, OR
+# (when the t/s threshold is configured) with completion_tokens / elapsed >
+# the t/s threshold. Seeded from the observed 77k-token / 727s incident.
+_GARBAGE_CB_ENABLED = os.environ.get("GARBAGE_CB_ENABLED", "1").strip().lower() \
+    not in ("0", "false", "no", "")
+_GARBAGE_MAX_COMPLETION_TOKENS = int(os.environ.get(
+    "GARBAGE_MAX_COMPLETION_TOKENS", "32000"))
+_GARBAGE_MAX_TOKENS_PER_SEC = float(os.environ.get(
+    "GARBAGE_MAX_TOKENS_PER_SEC", "0"))
+GARBAGE_CB_TTL_SECONDS = float(os.environ.get(
+    "GARBAGE_CB_TTL_SECONDS", "86400"))
+# Demotion state: {(provider, model): {"healthy": bool, "retry_after": ts,
+#   "reason": str, "completion_tokens": int, "demoted_at": ts}}
+_garbage_cb: dict[tuple[str, str], dict] = {}
+# Once-per-trip alert tracking: {(provider, model): True} while demoted.
+_garbage_cb_alerted: dict[tuple[str, str], bool] = {}
+# Last seen completion window per pair — used only for the t/s path.
+_garbage_cb_last: dict[tuple[str, str], tuple] = {}
+
 def _get_ollama_quota_status(key_name: str = "ollama_cloud") -> dict:
     """Get cached or fresh ollama_cloud quota status for a specific key.
     Thread-safe.
@@ -1094,6 +1137,159 @@ def _is_key_healthy(name: str) -> bool:
     if not h or h.get("healthy", True):
         return True
     return time.time() >= h.get("retry_after", 0)
+
+
+# ── Garbage circuit-breaker helpers (per-(provider, model), task t_b7725426) ─
+# The breaker detects degenerate oversized completions per (provider, model)
+# and demotes ONLY that pair from rotation for 24h. These helpers are the
+# single source of truth; flat_router.select_provider() resolves
+# _is_pair_garbage_demoted() to skip a demoted pair while the provider stays
+# eligible for other models. All paths fail OPEN / never raise.
+
+def _garbage_cb_key(name: str, model: str) -> tuple[str, str]:
+    """Canonical composite key. Model is normalized lower/whitespace-stripped
+    so dispatch-time names ('glm-5.3', 'glm-5.3 ' etc.) map consistently."""
+    try:
+        return (str(name or "").strip().lower(),
+                str(model or "").strip().lower())
+    except Exception:
+        return (str(name or ""), str(model or ""))
+
+
+def _garbage_cb_pair_demoted(name: str, model: str) -> bool:
+    """True if THIS (provider, model) pair is currently demoted from rotation.
+
+    Pure function of in-memory state + wall clock. Never raises — on any error
+    it returns False (optimistic, never blocks routing). Sibling lanes on the
+    same provider are unaffected: the check is keyed by the COMPOSITE pair.
+    """
+    try:
+        if not _GARBAGE_CB_ENABLED:
+            return False
+        key = _garbage_cb_key(name, model)
+        st = _garbage_cb.get(key)
+        if not st or st.get("healthy", True):
+            return False
+        if time.time() < st.get("retry_after", 0):
+            return True
+        # Expired — clear so a future trip re-demotes + re-alerts.
+        _garbage_cb.pop(key, None)
+        _garbage_cb_alerted.pop(key, None)
+        return False
+    except Exception:
+        return False
+
+
+def _garbage_cb_alert(name: str, model: str, completion_tokens: int,
+                      duration_ms: int | None, reason: str) -> None:
+    """Fire exactly ONE alert per trip (mirrors the _key_alerted pattern).
+
+    Uses _garbage_cb_alerted[(name, model)] to suppress repeat alerts while the
+    pair is demoted; the flag is cleared on expiry in _garbage_cb_pair_demoted
+    so a LATER trip re-alerts. Writes a CRITICAL anomaly + journald line.
+    Never raises."""
+    try:
+        key = _garbage_cb_key(name, model)
+        if _garbage_cb_alerted.get(key):
+            return
+        _garbage_cb_alerted[key] = True
+        dur_s = (duration_ms or 0) / 1000.0
+        tps = (completion_tokens / dur_s) if (dur_s and completion_tokens) else 0.0
+        _text = (
+            f"GARBAGE CIRCUIT BREAKER: demoted ({name}, {model}) for "
+            f"{GARBAGE_CB_TTL_SECONDS/3600:.0f}h — {completion_tokens} "
+            f"completion tokens (~{tps:.0f} tok/s), reason: {reason}"
+        )
+        _log_anomaly("CRITICAL", "GARBAGE_CIRCUIT_BREAKER",
+                     f"({name}, {model}) demoted — garbage output",
+                     _text, key_name=name)
+        print(f"\n{'='*60}\n{_text}\n{'='*60}\n", flush=True)
+    except Exception:
+        pass
+
+
+def _check_garbage_cb(name: str, model: str, completion_tokens: int,
+                      duration_ms: int | None = None,
+                      finish_reason: str | None = None) -> bool:
+    """Detector + breaker: after a SUCCESSFUL completion, decide whether the
+    (provider, model) pair is degenerate and demote it.
+
+    Called on success (HTTP 200) when completion_tokens is known. Trips when:
+      * completion_tokens > GARBAGE_MAX_COMPLETION_TOKENS (primary, ceiling)
+      * GARBAGE_MAX_TOKENS_PER_SEC configured AND
+        completion_tokens/duration exceeds it (pathological sustained rate)
+    finish_reason is optional; when provided and != 'stop'/'length', it
+    strengthens the ceiling trip (rep-token spam that never reaches a coherent
+    stop). Returns True if the pair was (re)demoted this call, else False.
+
+    Restart-safe + revert-safe: every path is wrapped; a DB/log/anomaly error
+    never raises into the request handler. The breaker state is module-local
+    and cold-starts empty (optimistic).
+    """
+    try:
+        if not _GARBAGE_CB_ENABLED:
+            return False
+        completion_tokens = int(completion_tokens or 0)
+        if completion_tokens <= 0:
+            return False
+        key = _garbage_cb_key(name, model)
+        now = time.time()
+
+        # Already demoted + in window → no-op (do not re-trip, do not re-alert).
+        st = _garbage_cb.get(key)
+        if st and not st.get("healthy", True) and now < st.get("retry_after", 0):
+            return False
+
+        # ── Decide whether THIS completion is degenerate ──
+        tripped = False
+        reasons: list[str] = []
+        if completion_tokens > _GARBAGE_MAX_COMPLETION_TOKENS:
+            tripped = True
+            reasons.append(
+                f"completion_tokens {completion_tokens} > "
+                f"ceiling {_GARBAGE_MAX_COMPLETION_TOKENS}")
+        _dur_ms = (duration_ms or 0)
+        if _GARBAGE_MAX_TOKENS_PER_SEC > 0 and _dur_ms > 0:
+            tps = (completion_tokens / 1000.0) / (_dur_ms / 1000.0)
+            if tps > _GARBAGE_MAX_TOKENS_PER_SEC:
+                tripped = True
+                reasons.append(
+                    f"{tps:.0f} tok/s > "
+                    f"{_GARBAGE_MAX_TOKENS_PER_SEC:.0f} tok/s ceiling")
+        if finish_reason is not None and \
+                str(finish_reason).lower() not in ("stop", "length", ""):
+            # Non-terminating finish (still ends) OR missing stop — a weak
+            # signal on its own; only strengthens an already-tripped ceiling.
+            if tripped:
+                reasons.append(f"finish_reason={finish_reason!r} (not stop)")
+
+        if not tripped:
+            # Healthy completion — reset any expired/demoted state lazily and
+            # clear a stale alert flag so a future trip can fire.
+            _garbage_cb.pop(key, None)
+            return False
+
+        # ── Demote the pair for GARBAGE_CB_TTL_SECONDS ──
+        retry_after = now + GARBAGE_CB_TTL_SECONDS
+        _garbage_cb[key] = {
+            "healthy": False,
+            "retry_after": retry_after,
+            "reason": "; ".join(reasons) or "garbage completion",
+            "completion_tokens": completion_tokens,
+            "demoted_at": now,
+            "duration_ms": duration_ms,
+            "finish_reason": finish_reason,
+        }
+        # Fire exactly one alert per trip (suppressed by _garbage_cb_alerted
+        # while demoted; re-armed on expiry).
+        _garbage_cb_alert(name, model, completion_tokens, duration_ms,
+                          "; ".join(reasons))
+        print(f"[garbage-cb] demoted ({name}, {model}) for "
+              f"{GARBAGE_CB_TTL_SECONDS/3600:.0f}h — {'; '.join(reasons)}",
+              flush=True)
+        return True
+    except Exception:
+        return False
 
 
 def _parse_opencode_reset_seconds(text: str | None) -> float | None:
@@ -2905,9 +3101,10 @@ _MODEL_ID_TO_PROVIDER_ID: dict[str, dict[str, str]] = {
         "ppq": "z-ai/glm-5.2",
         "neuralwatt": "glm-5.2",
     },
-    "glm-5.3": {
-        "neuralwatt": "glm-5.3",
-    },
+    # glm-5.3 entry REMOVED (2026-09-05) — neuralwatt no longer routes glm-5.3
+    # (see flat_router PROVIDER_MODELS). This map (_MODEL_ID_TO_PROVIDER_ID) is
+    # cost-lookup only; the leftover "neuralwatt":"glm-5.3" identity entry is now
+    # dead and was a no-op (NEURALWATT_RATES has no glm-5.3 key).
     "kimi-k3": {
         "telnyx": "moonshotai/Kimi-K3",
         "openrouter": "moonshotai/kimi-k3",
@@ -5471,6 +5668,16 @@ class Handler(BaseHTTPRequestHandler):
                         session_id=getattr(self, "_session_id", None),
                         task_type=getattr(self, "_task_type", None),
                     )
+                    # Garbage circuit-breaker: a 200 with degenerate oversized
+                    # output demotes THIS (provider, model) pair for 24h.
+                    try:
+                        _check_garbage_cb(
+                            provider_name, actual_model or "",
+                            int(ext_usage.get("completion_tokens") or 0),
+                            duration_ms=int((time.time() - t0) * 1000),
+                        )
+                    except Exception:
+                        pass
                     return True
             except urllib.error.HTTPError as he:
                 if he.code == 401 or he.code == 403:
@@ -6005,6 +6212,21 @@ class Handler(BaseHTTPRequestHandler):
                             if not getattr(self, '_spend_recorded', False):
                                 _record_spend(_cand.name, _cand.model or original_model,
                                               _total_tokens if '_total_tokens' in dir() else 0)
+                        except Exception:
+                            pass
+
+                        # Garbage circuit-breaker (per-(provider, model)): check
+                        # a SUCCESSFUL completion for degenerate oversized output
+                        # and demote (provider, model) for 24h if tripped. Never
+                        # raises — a detector error must not break the response.
+                        try:
+                            _cb_model = (_cand.model or original_model or "")
+                            _cb_comp = int(_usage.get("completion_tokens") or 0) \
+                                if '_usage' in dir() else 0
+                            _check_garbage_cb(
+                                _cand.name, _cb_model, _cb_comp,
+                                duration_ms=int((time.time() - t0) * 1000),
+                            )
                         except Exception:
                             pass
 

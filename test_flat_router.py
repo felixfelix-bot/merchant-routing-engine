@@ -698,9 +698,11 @@ class TestDoubleResponseGuard:
         # (i.e. the check exists between the dispatch and the next-candidate
         # continuation). Verify the guard appears inside the loop body by
         # checking it comes after the dispatch call and before 'continue'.
+        # Window is generous: the loop body legitimately grew (garbage
+        # circuit-breaker detector block), so search well beyond the dispatch.
         loop_idx = source.find("for _cand in _candidates:")
         assert loop_idx != -1, "Flat router candidate loop not found"
-        loop_body = source[loop_idx:loop_idx + 6000]
+        loop_body = source[loop_idx:loop_idx + 10000]
         guard_idx = loop_body.find('getattr(self, "_response_started", False)')
         assert guard_idx != -1, \
             "_response_started guard must live inside the candidate loop"
