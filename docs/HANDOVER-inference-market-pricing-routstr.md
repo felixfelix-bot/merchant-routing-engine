@@ -86,6 +86,7 @@ When z.ai quota exhausts, internal fallback candidates: Neuralwatt glm-5.3 ($0.0
 | z.ai coding-plan credits discount cached tokens | OPEN — inline probe inconclusive (integer-credit quota API); 16k-prefix re-probe queued (QS-3 Part 1D) | — |
 | z.ai off-peak 50% credits (weekends) | VERIFIED (coding-plan terms) | z.ai coding-plan page |
 | **Our NW cache_hit telemetry** | **DARK since 2026-08-25** (meter bridge stopped writing `cache_hit`; 7d all-zero vs lifetime 81%) | zai_usage.db — fix queued (QS-6 scope) |
+| **Chutes.ai (SN64) GO-CONDITIONAL 2026-09-05** | 14 TEE models, USD-anchored ($227.09/TAO fixed); DS-V4-Flash $0.096/M eff (DeepInfra 4.3× cheaper, PPQ 1.45× dearer); **NO ToS resale ban** (routstr-legal, unlike DeepInfra §11(a)(viii)); PAYGO explicitly permits high-volume automation; 100% uptime 90d; NVFP4 GLM-5.2 = NVIDIA production quant; TAO-emission subsidy + balance-forfeiture/Nevis/$10K-cap risk | llm.chutes.ai/v1/models (authless), chutes.ai/terms verbatim, status.chutes.ai, 2-consultant pass — docs/provider-hunt/CHUTES-VERDICT-2026-09-05.md |
 
 ## 6. Pointers
 
