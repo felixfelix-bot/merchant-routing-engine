@@ -158,6 +158,52 @@ oxalpha:
   # restart to remove the tier completely (plan §6).
 
 # ── Strategy configuration ─────────────────────────────────────────────────
+# ── DeepSeek direct (GO-conditional, 2026-09-05 two-consultant batch pass) ───
+# Cheapest known DS-V4-Flash tokens after DeepInfra; NO batch API (Files API only).
+# Off-peak -50% claim consultant-fetched but manager re-check inconclusive
+# (JS-rendered docs) — verify at probe time with live key.
+# ToS resale: UNVERIFIED (platform 403) — keep routstr OFF this lane until read.
+deepseek_direct:
+  base_url: "https://api.deepseek.com/v1"
+  key_env: "DEEPSEEK_DIRECT_API_KEY"
+  status: "go_conditional_pending_account"   # Felix: account + ~$20 top-up
+  # Prices per M tokens (consultant-fetched 2026-09-05 via catalog mirror;
+  # re-verify live at probe): V4-Flash-0731 ~$0.065-0.08 in / ~$0.18 out
+  # (cached tier unconfirmed), V4-Pro ~$0.13 / ~$0.26 (cached 0.0769x per mirror).
+  batch_api: false
+  resale_legal: null
+
+# ── Moonshot direct (GO-conditional, niche) ─────────────────────────────────
+# Kimi-K3 native first-party: $3.00 in / $15.00 out / $0.30 cached-in (verified
+# platform.moonshot.ai/docs/pricing/chat-k3, 2026-09-05). Eff at h=0.9 99%-input
+# ~= $0.71/M — equal to Chutes Kimi-K3; only worth it for output-heavy work or
+# native-K3 parity. Batch API REAL but kimi-k2.7-code/k2.6 ONLY (40% off, 24h
+# window) — NO K3 batch. ToS resale: UNVERIFIED (404s).
+moonshot_direct:
+  base_url: "https://api.moonshot.ai/v1"
+  key_env: "MOONSHOT_DIRECT_API_KEY"
+  status: "go_conditional_pending_account"   # low priority — see verdict doc
+  kimi_k3_usd_per_m: { input: 3.00, cached_input: 0.30, output: 15.00 }
+  batch_api: "k2.7-code/k2.6 only, 40% off, 24h"
+  resale_legal: null
+
+# ── Chutes / Bittensor SN64 (GO-conditional, 2026-09-05 two-consultant pass) ─
+# Full verdict: docs/provider-hunt/CHUTES-VERDICT-2026-09-05.md.
+# DS-V4-Flash $0.096/M eff @h=0.9; the ONLY evaluated provider with NO ToS
+# resale ban (routstr-legal). CONDITIONS: PAYG Stripe USD only, $50 balance
+# ceiling, GLM-5.2 NVFP4 quality probe (<$0.05) before routing. No batch API
+# (docs batch-processing page = client-side concurrency recipe, no discount).
+chutes:
+  base_url: "https://llm.chutes.ai/v1"
+  key_env: "CHUTES_API_KEY"                  # keys prefixed cpk_
+  status: "go_conditional_pending_account"   # Felix: account + $50 Stripe ceiling
+  usd_per_m: { ds_v4_flash: { input: 0.44, cached_input: 0.044, output: 1.32 },
+               glm_5_2_nvfp4: { input: 1.25, cached_input: 0.125, output: 3.95 },
+               kimi_k3: { input: 3.00, cached_input: 0.30, output: 15.00 } }
+  tao_conversion_fixed: 227.09               # verified across all 14 catalog models
+  batch_api: false
+  resale_legal: true                          # verified 2026-09-05, no resale clause in ToS
+
 strategy:
   # Minimum effective price — never zero, even for free providers (ADR-004)
   min_effective_price: 0.001  # $/M
