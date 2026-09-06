@@ -277,6 +277,32 @@ strategy:
   exhausted_retry_seconds: 300
   unfunded_retry_seconds: 3600
 
+# ── Transient opportunistic lanes (ADR-014, accepted 2026-09-06) ────────────
+# Disposable cheap lanes: canary+garbage-CB gate BEFORE traffic, deposit cap
+# $50, internal workloads only (never routstr, never privacy-sensitive).
+# Onboarding = 5-step fast path; balance bridge/ratification deferred.
+transient_lanes:
+  openinference:
+    status: transient_candidate          # gates: canary pass + operator key
+    base_url: "https://api.openinference.ai/v1"
+    key_env: "OPENINFERENCE_API_KEY"     # NOT YET SET — operator signup pending
+    models:                              # canonical -> provider-native (verbatim HF ids)
+      "deepseek/deepseek-v4-flash": "deepseek-ai/DeepSeek-V4-Flash"
+    prices_per_m: {input: 0.03, output: 0.075, cache_read: 0.007}
+    eff_input_h09: 0.0093                # cheapest DS-V4-Flash measured (2026-09-06)
+    deposit_ceiling_usd: 50
+    notes: "ex-Inducta/.xyz, Open Research Inc DE; below-TPU-floor loss-leader = ride until dead; ToS no-refund (cap exposure); service-bureau ban = internal-only anyway"
+  baidu_via_openrouter:
+    status: transient_candidate          # gates: canary + OR top-up (key 401, -$0.18 Aug 20)
+    base_url: "https://openrouter.ai/api/v1"
+    key_env: "OPENROUTER_API_KEY"        # EXISTING key disabled (neg balance) — top-up needed
+    models:
+      "deepseek/deepseek-v4-flash": "baidu/deepseek-v4-flash-0731"   # verify exact OR slug at wiring time
+    prices_per_m: {input: 0.04998, output: 0.09996, cache_read: 0.009996}  # +5.5% OR credit fee
+    eff_input_h09: 0.0148
+    deposit_ceiling_usd: 50
+    notes: "stable big-co lane via OR aggregator; undercuts OI-0731; OR ToS = internal-only"
+
 # ── Shadow mode configuration (Phase 1) ────────────────────────────────────
 shadow_mode:
   enabled: false  # set true when shadow logger is wired
