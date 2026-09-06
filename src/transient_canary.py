@@ -248,15 +248,20 @@ def _chat_completion(
     model: str,
     prompt: str,
     timeout: float = REQUEST_TIMEOUT_S,
+    max_tokens: Optional[int] = None,
 ) -> Tuple[dict, float]:
     """POST <endpoint>/chat/completions (OpenAI-compatible). Returns
-    (parsed_json, elapsed_seconds). Raises urllib.error.* on failure."""
+    (parsed_json, elapsed_seconds). Raises urllib.error.* on failure.
+
+    max_tokens: reasoning/thinking models burn the cap on hidden CoT before
+    emitting visible content (observed: Chutes GLM-5.2-TEE at 512 → 4 empty
+    responses with completion_tokens == cap). Pass 2048+ for those."""
     url = endpoint.rstrip("/") + "/chat/completions"
     body = json.dumps({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": TEMPERATURE,
-        "max_tokens": MAX_COMPLETION_TOKENS,
+        "max_tokens": max_tokens or MAX_COMPLETION_TOKENS,
     }).encode()
     req = urllib.request.Request(
         url,
@@ -306,7 +311,7 @@ def _cost(payload: dict) -> float:
 # ── gate ─────────────────────────────────────────────────────────────────────
 
 def _sanity_check(
-    payload: dict, prompt_tokens_estimate: int
+    payload: dict, prompt_tokens_estimate: int, max_tokens: Optional[int] = None
 ) -> Tuple[bool, Optional[Failure], int]:
     """Run the mechanical sanity checks on one response payload.
 
@@ -320,7 +325,7 @@ def _sanity_check(
         return False, Failure("empty_response", -1,
                               "empty or missing choices[0].message.content"), \
             completion_tokens
-    bound = 3 * prompt_tokens_estimate + MAX_COMPLETION_TOKENS
+    bound = 3 * prompt_tokens_estimate + (max_tokens or MAX_COMPLETION_TOKENS) + 1
     if completion_tokens > bound:
         return False, Failure(
             "completion_tokens_over_bound", -1,
@@ -344,13 +349,16 @@ def run_canary(
     reference_model: Optional[str] = None,
     n_prompts: int = DEFAULT_N_PROMPTS,
     out_dir: Optional[str] = None,
+    max_tokens: Optional[int] = None,
 ) -> CanaryReport:
     """Run the ADR-014 canary gate against a candidate lane.
 
     Sends the first ``n_prompts`` of CANARY_PROMPTS to the candidate
-    (temperature=0, max_tokens=512, 60s timeout, urllib only), checks each
-    response mechanically, optionally mirrors the run against a reference
-    lane and compares per-prompt similarity, then applies the pass bar.
+    (temperature=0, max_tokens=512 or ``max_tokens``, 60s timeout, urllib
+    only), checks each response mechanically, optionally mirrors the run
+    against a reference lane and compares per-prompt similarity, then
+    applies the pass bar. Pass ``max_tokens=2048`` for reasoning models
+    whose hidden CoT eats the default 512 cap (empty-content artifact).
 
     When ``out_dir`` is given, the full raw report (per-prompt responses
     truncated to 2000 chars, timings, failures) is dumped as JSON there.
@@ -371,7 +379,8 @@ def run_canary(
         for p in prompts:
             try:
                 rp, _ = _chat_completion(
-                    reference_endpoint, ref_key, ref_model, p.text)
+                    reference_endpoint, ref_key, ref_model, p.text,
+                    max_tokens=max_tokens)
                 reference_payloads.append(rp)
             except Exception:
                 reference_payloads.append(None)
@@ -380,7 +389,8 @@ def run_canary(
         prompt_tokens_estimate = len(_tokens(p.text))
         entry: dict = {"prompt_idx": p.idx, "category": p.category}
         try:
-            payload, elapsed = _chat_completion(endpoint, api_key, model, p.text)
+            payload, elapsed = _chat_completion(
+                endpoint, api_key, model, p.text, max_tokens=max_tokens)
         except urllib.error.HTTPError as e:
             failures.append(Failure("http_error", p.idx, f"HTTP {e.code}: {e}"))
             entry.update(ok=False, reason="http_error", latency_s=None)
@@ -394,7 +404,8 @@ def run_canary(
 
         latencies.append(elapsed)
         total_cost += _cost(payload)
-        ok, failure, completion_tokens = _sanity_check(payload, prompt_tokens_estimate)
+        ok, failure, completion_tokens = _sanity_check(
+            payload, prompt_tokens_estimate, max_tokens=max_tokens)
         entry.update(latency_s=round(elapsed, 4),
                      completion_tokens=completion_tokens,
                      content_head=_content(payload)[:2000])

@@ -254,7 +254,7 @@ def test_latency_and_cost_math(tmp_path, monkeypatch):
     state = {"i": 0}
     lat_iter = iter(latencies)
 
-    def counting(endpoint, api_key, model, prompt, timeout=60.0):
+    def counting(endpoint, api_key, model, prompt, timeout=60.0, max_tokens=None):
         i = state["i"]
         state["i"] += 1
         return payloads[i], next(lat_iter)

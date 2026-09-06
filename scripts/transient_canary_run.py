@@ -71,6 +71,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help=f"report output directory (default: {DEFAULT_OUT_DIR})")
     p.add_argument("--n-prompts", type=int, default=20,
                    help="number of canary prompts (default: 20)")
+    p.add_argument("--max-tokens", type=int, default=None,
+                   help="max_tokens per request; pass 2048+ for reasoning models "
+                        "whose hidden CoT eats the 512 default (empty-content artifact)")
     return p
 
 
@@ -110,6 +113,7 @@ def main(argv=None) -> int:
             reference_model=args.reference_model,
             n_prompts=args.n_prompts,
             out_dir=args.out,
+            max_tokens=args.max_tokens,
         )
     except Exception as e:  # unexpected — gate never ran to completion
         print(f"error: canary run crashed: {e!r}", file=sys.stderr)
