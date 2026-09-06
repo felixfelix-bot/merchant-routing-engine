@@ -199,8 +199,15 @@ def _tokens(text: str) -> List[str]:
 
 
 def _max_repetition_ratio(text: str) -> float:
-    """Highest share any single token takes inside any 50-token window."""
+    """Highest share any single token takes inside any 50-token window.
+
+    Short correct answers ("391", "Canberra") would trip the check although
+    they are the *expected* response to one-word prompts — repetition
+    degeneracy is a LONG-output pathology. Responses shorter than the
+    window are exempt (they cannot contain a pathological window)."""
     toks = _tokens(text)
+    if len(toks) < REPETITION_WINDOW:
+        return 0.0
     worst = 0.0
     for start in range(0, max(1, len(toks) - REPETITION_WINDOW + 1)):
         window = toks[start:start + REPETITION_WINDOW]
