@@ -37,8 +37,11 @@ ollama_cloud:
   key_env: "OLLAMA_CLOUD_API_KEY"
   monthly_fee_usd: 25   # grandfathered flat ~$25/mo (Aug-7 analysis; was stale 100, fixed 2026-09-02)
   # Cost formula: 25 / tokens_consumed_this_month * 1e6 = $/M
-  # NOTE: we hold TWO ollama subs (ollama_cloud + ollama_cloud_2) — any future
-  # per-sub migration price doubles.
+  # NOTE: we hold FOUR ollama subs (2026-09-06): ollama_cloud (oc),
+  # ollama_cloud_2, ollama_cloud_3=stoic_herschel_499 (monthly-budget plan),
+  # ollama_cloud_4=sleepy_easley_477 (weekly pool, added 2026-09-06).
+  # Per-key registration lives in zai_proxy._load_external_keys() +
+  # _OLLAMA_CLOUD_KEYS; this stanza documents the shared service economics.
   # When rate-limited (429): effective_price = infinity (health_factor)
   # Quota: 5h session window + 7d weekly window (consultant-verified)
   usage_api: "https://ollama.com/api/usage"

@@ -1,0 +1,211 @@
+{
+  "generated_at": "20260906T005034Z",
+  "endpoint": "https://llm.chutes.ai/v1",
+  "model": "deepseek-ai/DeepSeek-V4-Flash-0731-TEE",
+  "reference_endpoint": null,
+  "reference_model": null,
+  "pass": false,
+  "n_pass": 15,
+  "n_total": 20,
+  "sanity_pass_rate": 0.75,
+  "similarity_pass_rate": null,
+  "avg_latency_s": 1.8875,
+  "p95_latency_s": 4.5166,
+  "total_cost_estimate": 0.003439,
+  "failures": [
+    {
+      "reason": "repetition_blowup",
+      "prompt_idx": 1,
+      "detail": "single token = 100% of a 50-token window (max 40%)"
+    },
+    {
+      "reason": "repetition_blowup",
+      "prompt_idx": 10,
+      "detail": "single token = 100% of a 50-token window (max 40%)"
+    },
+    {
+      "reason": "http_error",
+      "prompt_idx": 12,
+      "detail": "HTTP 502: HTTP Error 502: Bad Gateway"
+    },
+    {
+      "reason": "repetition_blowup",
+      "prompt_idx": 15,
+      "detail": "single token = 44% of a 50-token window (max 40%)"
+    },
+    {
+      "reason": "repetition_blowup",
+      "prompt_idx": 16,
+      "detail": "single token = 100% of a 50-token window (max 40%)"
+    }
+  ],
+  "results": [
+    {
+      "prompt_idx": 0,
+      "category": "coding",
+      "latency_s": 2.8959,
+      "completion_tokens": 196,
+      "content_head": "Here's a Python function that checks if a string is a palindrome, ignoring case:\n\n```python\ndef is_palindrome(s):\n    \"\"\"\n    Returns True if the string reads the same forwards and backwards,\n    ignoring case.\n    \"\"\"\n    # Convert to lowercase and remove non-alphanumeric characters\n    cleaned = ''.join(char.lower() for char in s if char.isalnum())\n    # Check if the cleaned string equals its reverse\n    return cleaned == cleaned[::-1]\n\n# Test with an assertion\nassert is_palindrome(\"A man, a plan, a canal: Panama\") == True\nprint(\"Test passed!\")\n```\n\nThis function:\n1. Converts the string to lowercase\n2. Removes all non-alphanumeric characters (spaces, punctuation, etc.)\n3. Compares the cleaned string with its reverse\n\nThe assertion tests the classic palindrome \"A man, a plan, a canal: Panama\" which should return `True`.",
+      "ok": true
+    },
+    {
+      "prompt_idx": 1,
+      "category": "coding",
+      "latency_s": 1.6656,
+      "completion_tokens": 2,
+      "content_head": "391",
+      "ok": false,
+      "reason": "repetition_blowup",
+      "detail": "single token = 100% of a 50-token window (max 40%)"
+    },
+    {
+      "prompt_idx": 2,
+      "category": "coding",
+      "latency_s": 2.0409,
+      "completion_tokens": 97,
+      "content_head": "We can use the formula for the sum of the first \\( n \\) integers:\n\n\\[\nS = \\frac{n(n+1)}{2}\n\\]\n\nHere, \\( n = 100 \\):\n\n\\[\nS = \\frac{100(100+1)}{2} = \\frac{100 \\times 101}{2} = \\frac{10100}{2} = 5050\n\\]\n\n**Final answer:**  \n\\[\n\\boxed{5050}\n\\]",
+      "ok": true
+    },
+    {
+      "prompt_idx": 3,
+      "category": "coding",
+      "latency_s": 1.4834,
+      "completion_tokens": 19,
+      "content_head": "{'a': 2, 'b': 1, 'c': 1}",
+      "ok": true
+    },
+    {
+      "prompt_idx": 4,
+      "category": "coding",
+      "latency_s": 4.5166,
+      "completion_tokens": 356,
+      "content_head": "Here's how to reverse a list in Python without using `reversed()` or slicing:\n\n```python\ndef reverse_list(lst):\n    left = 0\n    right = len(lst) - 1\n    \n    while left < right:\n        # Swap elements\n        lst[left], lst[right] = lst[right], lst[left]\n        left += 1\n        right -= 1\n    \n    return lst\n\n# Test with the given list\nmy_list = [1, 2, 3, 4, 5]\nprint(reverse_list(my_list))  # Output: [5, 4, 3, 2, 1]\n```\n\n**Alternative approach using a new list:**\n\n```python\ndef reverse_list_new(lst):\n    new_list = []\n    for i in range(len(lst) - 1, -1, -1):\n        new_list.append(lst[i])\n    return new_list\n\nmy_list = [1, 2, 3, 4, 5]\nprint(reverse_list_new(my_list))  # Output: [5, 4, 3, 2, 1]\n```\n\n**Another approach using list comprehension:**\n\n```python\ndef reverse_list_comprehension(lst):\n    return [lst[i] for i in range(len(lst) - 1, -1, -1)]\n\nmy_list = [1, 2, 3, 4, 5]\nprint(reverse_list_comprehension(my_list))  # Output: [5, 4, 3, 2, 1]\n```\n\nThe first approach (two-pointer swap) is the most efficient as it modifies the list in-place with O(1) extra space and O(n) time complexity.",
+      "ok": true
+    },
+    {
+      "prompt_idx": 5,
+      "category": "coding",
+      "latency_s": 2.4159,
+      "completion_tokens": 124,
+      "content_head": "```bash\ngrep -c \"404\" access.log\n```\n\nThis command:\n- `grep` searches for lines containing \"404\"\n- `-c` counts the number of matching lines (instead of printing them)\n- The result is the count of lines containing \"404\" in `access.log`\n\nIf you want to count lines that contain \"404\" as a status code (not just any occurrence), you could use:\n```bash\ngrep \" 404 \" access.log | wc -l\n```\nBut the simplest version is just `grep -c \"404\" access.log`.",
+      "ok": true
+    },
+    {
+      "prompt_idx": 6,
+      "category": "coding",
+      "latency_s": 2.7756,
+      "completion_tokens": 176,
+      "content_head": "To find the median, we first sort the list in ascending order.\n\nOriginal list:  \n[3, 1, 4, 1, 5, 9, 2, 6]\n\nSorted list:  \n[1, 1, 2, 3, 4, 5, 6, 9]\n\nThere are 8 numbers (an even count), so the median is the average of the two middle numbers.  \nThe middle two numbers are the 4th and 5th values: 3 and 4.\n\nMedian = (3 + 4) / 2 = 7 / 2 = 3.5\n\n**Answer:**  \nSorted list: [1, 1, 2, 3, 4, 5, 6, 9]  \nMedian: 3.5",
+      "ok": true
+    },
+    {
+      "prompt_idx": 7,
+      "category": "coding",
+      "latency_s": 1.7693,
+      "completion_tokens": 163,
+      "content_head": "Here's a SQL query to select the 5 most recent rows from the events table:\n\n```sql\nSELECT id, created_at\nFROM events\nORDER BY created_at DESC\nLIMIT 5;\n```\n\nThis query:\n1. Selects the `id` and `created_at` columns from the `events` table\n2. Orders the results by `created_at` in descending order (most recent first)\n3. Limits the results to only 5 rows\n\n**Note:** If you need to handle ties (multiple events with the exact same timestamp), you might want to add a secondary sort criterion:\n\n```sql\nSELECT id, created_at\nFROM events\nORDER BY created_at DESC, id DESC\nLIMIT 5;\n```\n\nThis ensures deterministic results when multiple events share the same timestamp.",
+      "ok": true
+    },
+    {
+      "prompt_idx": 8,
+      "category": "coding",
+      "latency_s": 2.0273,
+      "completion_tokens": 77,
+      "content_head": "On average, quicksort achieves O(n log n) because each partition step places one pivot in its final position and divides the remaining elements into two roughly equal subarrays, leading to log n levels of partitioning with O(n) work per level; its worst case is O(n²), which occurs when the pivot is consistently the smallest or largest element, causing highly unbalanced partitions.",
+      "ok": true
+    },
+    {
+      "prompt_idx": 9,
+      "category": "coding",
+      "latency_s": 1.8849,
+      "completion_tokens": 248,
+      "content_head": "Here's a Python function that implements FizzBuzz and returns the list for n=5:\n\n```python\ndef fizzbuzz(n):\n    result = []\n    for i in range(1, n + 1):\n        if i % 3 == 0 and i % 5 == 0:\n            result.append(\"FizzBuzz\")\n        elif i % 3 == 0:\n            result.append(\"Fizz\")\n        elif i % 5 == 0:\n            result.append(\"Buzz\")\n        else:\n            result.append(i)\n    return result\n\n# Get the result for n=5\nresult = fizzbuzz(5)\nprint(result)\n```\n\nWhen you run this, the output will be:\n\n```\n[1, 2, 'Fizz', 4, 'Buzz']\n```\n\nThe function works by:\n1. Iterating from 1 to n (inclusive)\n2. Checking if the number is divisible by both 3 and 5 (i.e., 15) → \"FizzBuzz\"\n3. Checking if divisible by 3 → \"Fizz\"\n4. Checking if divisible by 5 → \"Buzz\"\n5. Otherwise, appending the number itself",
+      "ok": true
+    },
+    {
+      "prompt_idx": 10,
+      "category": "factual",
+      "latency_s": 0.8112,
+      "completion_tokens": 3,
+      "content_head": "Canberra",
+      "ok": false,
+      "reason": "repetition_blowup",
+      "detail": "single token = 100% of a 50-token window (max 40%)"
+    },
+    {
+      "prompt_idx": 11,
+      "category": "factual",
+      "latency_s": 2.7344,
+      "completion_tokens": 21,
+      "content_head": "The first human walked on the Moon in 1969, and it was American astronaut Neil Armstrong.",
+      "ok": true
+    },
+    {
+      "prompt_idx": 12,
+      "category": "factual",
+      "ok": false,
+      "reason": "http_error",
+      "latency_s": null
+    },
+    {
+      "prompt_idx": 13,
+      "category": "factual",
+      "latency_s": 1.8088,
+      "completion_tokens": 13,
+      "content_head": "Jupiter\nSaturn\nUranus\nNeptune",
+      "ok": true
+    },
+    {
+      "prompt_idx": 14,
+      "category": "factual",
+      "latency_s": 1.287,
+      "completion_tokens": 10,
+      "content_head": "George Orwell wrote the novel *1984*.",
+      "ok": true
+    },
+    {
+      "prompt_idx": 15,
+      "category": "instruction",
+      "latency_s": 1.2197,
+      "completion_tokens": 14,
+      "content_head": "2, 3, 5, 7, 11",
+      "ok": false,
+      "reason": "repetition_blowup",
+      "detail": "single token = 44% of a 50-token window (max 40%)"
+    },
+    {
+      "prompt_idx": 16,
+      "category": "instruction",
+      "latency_s": 1.2062,
+      "completion_tokens": 2,
+      "content_head": "ready",
+      "ok": false,
+      "reason": "repetition_blowup",
+      "detail": "single token = 100% of a 50-token window (max 40%)"
+    },
+    {
+      "prompt_idx": 17,
+      "category": "instruction",
+      "latency_s": 1.0736,
+      "completion_tokens": 60,
+      "content_head": "1  \n2  \n3  \n4  \n5  \n6  \n7  \n8  \n9  \n10  \n11  \n12  \n13  \n14  \n15  \n16  \n17  \n18  \n19  \n20  \n21  \n22  \n23  \n24  \n25  \n26  \n27  \n28  \n29  \n30",
+      "ok": true
+    },
+    {
+      "prompt_idx": 18,
+      "category": "instruction",
+      "latency_s": 0.8314,
+      "completion_tokens": 13,
+      "content_head": "Bonjour\nBuenos días\nGuten Morgen",
+      "ok": true
+    },
+    {
+      "prompt_idx": 19,
+      "category": "instruction",
+      "latency_s": 1.4155,
+      "completion_tokens": 7,
+      "content_head": "Blue, clear, bright.",
+      "ok": true
+    }
+  ]
+}

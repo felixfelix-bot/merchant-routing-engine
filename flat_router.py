@@ -184,6 +184,18 @@ PROVIDER_MODELS: dict[str, set[str]] = {
         "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro",
         "minimax-m3",
     },
+    # ollama_cloud_4 (sleepy_easley_477) — 4th $20/mo WEEKLY-pool subscription
+    # (same shape as oc/oc2: 500M/wk included + 5h session windows; no monthly
+    # special-casing). Added 2026-09-06 — fleet demand outpaces 3 pools
+    # (~1.78B in-tok/wk) and relief fell to metered lanes.
+    "ollama_cloud_4": {
+        "glm-5.2", "glm-5.3", "glm-5.3-flash", "kimi-k3", "kimi-k2.7-code",
+        "gpt-oss:120b", "gpt-oss:20b", "gemma4:31b", "qwen3.5:397b",
+        "glm-5.1", "kimi-k2.6", "minimax-m2.7", "mistral-large-3:675b",
+        "nemotron-3-nano:30b", "nemotron-3-super", "nemotron-3-ultra",
+        "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro",
+        "minimax-m3",
+    },
     # OpenCode Go — flat-rate $10/mo, native glm-5.3, 29 models.
     # deepseek stays in SLASHED canonical form (FR-1 direction).
     "opencode_go": {
@@ -251,6 +263,7 @@ _SEED_RATES: dict[str, float] = {
     "ollama_cloud":  0.40,
     "ollama_cloud_2": 0.40,
     "ollama_cloud_3": 0.40,
+    "ollama_cloud_4": 0.40,
     "opencode_go":   0.40,
     "neuralwatt":    2.21,
     "deepinfra":     1.30,
@@ -282,6 +295,7 @@ PROVIDER_TIER: dict[str, str] = {
     "ollama_cloud":   "included",
     "ollama_cloud_2": "included",
     "ollama_cloud_3": "included",
+    "ollama_cloud_4": "included",
     "deepinfra":      "per_token",
     "ppq":            "per_token",
     "telnyx":         "per_token",
@@ -400,7 +414,7 @@ _ZAI_KEYS = frozenset({"ours", "friend"})
 
 # Names that are flat-rate / included (no balance tracking)
 _FLAT_RATE_PROVIDERS = frozenset({
-    "ollama_cloud", "ollama_cloud_2", "ollama_cloud_3", "opencode_go",
+    "ollama_cloud", "ollama_cloud_2", "ollama_cloud_3", "ollama_cloud_4", "opencode_go",
 })
 
 
@@ -877,7 +891,7 @@ def _make_dispatch_fn(name: str) -> Callable | None:
         return _dispatch_zai
 
     # ollama_cloud → _try_ollama_cloud_any
-    if name in ("ollama_cloud", "ollama_cloud_2", "ollama_cloud_3"):
+    if name in ("ollama_cloud", "ollama_cloud_2", "ollama_cloud_3", "ollama_cloud_4"):
         def _dispatch_ollama(handler, body, model, buffer, t0):
             # Pass an accurate reason so _try_ollama_cloud()'s self-log does
             # NOT emit the legacy "zai_both_keys_exhausted_ollama_fallback" /

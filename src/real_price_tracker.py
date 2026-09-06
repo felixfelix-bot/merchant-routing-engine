@@ -198,6 +198,7 @@ LAST_RESORT_RATES: dict[str, float] = {
     "ollama_cloud":       0.0155,   # MEASURED included rate (pre-RP-3 observation)
     "ollama_cloud_extra": 0.15,     # above-quota rate (above PPQ $0.14/M so optimizer reroutes)
     "ollama_cloud_2":     0.0155,   # second subscription, same economics as #1
+    "ollama_cloud_4":     0.0155,   # fourth subscription (sleepy_easley_477, 2026-09-06)
     "opencode_go":        0.0155,   # $10/mo flat-rate → marginal $0, floored
     "neuralwatt":         0.21,     # deepseek-v4-flash blended: (0.14+0.28)/2 ≈ 0.21
     "ppq":                0.14,     # known list price
@@ -234,6 +235,7 @@ PROVIDER_WINDOW_HOURS: dict[str, float] = {
     "friend":         365 * 24,   # 8760 — z.ai amortization
     "ollama_cloud":   90 * 24,    # 2160 — slow-moving subscription
     "ollama_cloud_2": 90 * 24,    # 2160 — second subscription, same window
+    "ollama_cloud_4": 90 * 24,     # 2160 — fourth subscription, same window
     "opencode_go":    90 * 24,    # 2160 — flat-rate subscription
     "neuralwatt":     30 * 24,    # 720  — pay-per-token
     "ppq":            30 * 24,    # 720  — pay-per-token
@@ -256,6 +258,7 @@ SEED_RATES: dict[str, float] = {
     "ollama_cloud": 0.0155,   # measured blended rate (pre-RP-3)
     "ollama_cloud_2": 0.0155, # second subscription, same economics
     "ollama_cloud_3": 0.0155, # third subscription (stoic_herschel_499, monthly-budget plan, 2026-09-02)
+    "ollama_cloud_4": 0.0155, # fourth subscription (sleepy_easley_477, weekly pool, 2026-09-06)
     "neuralwatt":   0.21,     # deepseek-v4-flash blended
     "ppq":          0.14,     # list price
     "openrouter":   0.135,    # list price
