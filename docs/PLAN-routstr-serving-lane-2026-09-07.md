@@ -136,11 +136,13 @@ T-B (routstr wiring + canary) ──► T-E (pricing)  ──► T-F (transparen
 - **Do NOT re-enable the `zai-coding` ToS-exposed upstream row** on the friends node (resale breach). Disable-capable, stays off.
 - **Resale-legal public lane = Chutes PAYGO only** (per provider-resale-tos-audit-2026-09-06). z.ai subscription resale and OpenRouter resale are ToS breaches — do not route sold traffic to them.
 - **OPERATOR POLICY (Felix, 2026-09-07): OUR z.ai key is RESALE-ALLOWED; FRIEND'S z.ai key is NOT.** Felix's z.ai account ($80/mo, disposable, identity NOT tied to it) may legally carry the sold lane — a ban/reclaim on it is a cheap, isolated loss. The `friend` key is a shared/trust-relationship key with a different risk profile — never route sold traffic to it. Sold-lane design: prioritize OUR `ours` z.ai key, then Chutes PAYGO; keep `friend` strictly internal.
+- **IMPLEMENTED (T-B, 2026-09-07): sold-lane provider allowlist.** `flat_router.SOLD_ALLOWLIST = frozenset({"ours", "chutes"})` — a request with `caller_class='sold'` may ONLY dispatch to `ours` + `chutes`. `friend`, `openrouter`, and every other non-allowlisted provider are EXCLUDED for sold (they remain valid for internal). Enforced in `select_provider()` (core filter) + a defense-in-depth guard in the `zai_proxy.py` flat-router dispatch loop. If no allowlisted provider serves the requested model → 503 (never silent fallthrough to a non-allowlisted lane). Internal requests unaffected (full candidate list).
 
 ## 9. Files that will be touched (track in PRs)
 
-- `flat_router.py` — `select_provider` signature, `ProviderCandidate`, caller-class branch.
-- `production/zai_proxy.py` — entry handler (line ~5133), routstr/routstrd provider rows (~809), routing DB writes (~6042).
-- `flat-router-design.md` / ADR — caller-class design doc update.
+- `flat_router.py` — `select_provider` signature, `ProviderCandidate`, caller-class branch, **`SOLD_ALLOWLIST` constant + sold candidate filter (T-B)**.
+- `production/zai_proxy.py` — entry handler (line ~5133), routstr/routstrd provider rows (~809), routing DB writes (~6042), **flat-router dispatch-loop allowlist guard (T-B)**.
+- `flat-router-design.md` / ADR — caller-class + sold-lane allowlist design doc updates.
+- `test_flat_router.py` — T-A sold-429 tests + **T-B sold-lane allowlist tests**.
 - VPS2 routstr-public upstream row (DB), + `X-Priority: sold` tagging.
 - `~/.hermes/bot/stress_test.py`, `~/.hermes/bot/scripts/routstr_delist.py`.

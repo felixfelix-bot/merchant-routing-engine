@@ -6169,6 +6169,7 @@ class Handler(BaseHTTPRequestHandler):
                     _dispatch_to_provider as _flat_dispatch,
                     _update_kalman_after_request as _flat_kalman_update,
                     shadow_compare as _flat_router_shadow_compare,
+                    SOLD_ALLOWLIST as _SOLD_ALLOWLIST,
                 )
             except Exception:
                 # Import failed — fall through to old path as safety net
@@ -6231,6 +6232,19 @@ class Handler(BaseHTTPRequestHandler):
 
                 for _cand in _candidates:
                     if _cand.name == "fallback" or _cand.dispatch_fn is None:
+                        continue
+
+                    # SOLD-lane allowlist (T-B): sold traffic may ONLY dispatch
+                    # to SOLD_ALLOWLIST ('ours' + 'chutes'). Defense-in-depth
+                    # guard on top of select_provider()'s own filter — if a
+                    # non-allowlisted candidate ever reaches the dispatch loop
+                    # for a sold request, skip it (never silent fallthrough to
+                    # 'friend' / 'openrouter' / any non-allowlisted lane). When
+                    # every candidate is excluded, the loop exhausts and the
+                    # 503 fallthrough below fires. Internal traffic is
+                    # unaffected (full candidate list).
+                    if (getattr(self, "_caller_class", "internal") == "sold"
+                            and _cand.name not in _SOLD_ALLOWLIST):
                         continue
 
                     _flat_key_used = _cand.name

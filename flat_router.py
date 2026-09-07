@@ -96,6 +96,22 @@ class ProviderCandidate:
 # is NEVER gated. Callers may override via the `safety_hours` parameter.
 SOLD_SAFETY_HOURS: float = 2.0
 
+# ── Sold-lane provider allowlist (routstr selling lane, T-B) ────────────────
+# POLICY (Felix 2026-09-07, PLAN-routstr-serving-lane §8):
+#   - OUR z.ai key ('ours') IS resale-allowed — Felix's $80/mo account is
+#     disposable and identity-not-tied, so a ToS ban there is a cheap
+#     isolated loss.
+#   - Chutes PAYGO ('chutes') is the resale-legal public lane.
+#   - The 'friend' z.ai key is a SHARED trust key — NEVER route sold traffic
+#     to it; keep strictly internal.
+#   - OpenRouter resale is a ToS breach — never route sold traffic to it.
+# So a request with caller_class='sold' may ONLY dispatch to this allowlisted
+# set. 'friend', 'openrouter', and any non-allowlisted provider stay valid for
+# INTERNAL traffic but are excluded from the sold candidate list. If no
+# allowlisted provider serves the requested model, the sold request 503s
+# (never silent fallthrough to a non-allowlisted lane).
+SOLD_ALLOWLIST: frozenset[str] = frozenset({"ours", "chutes"})
+
 
 def sold_429_gate(
     caller_class: str | None,
@@ -1062,9 +1078,11 @@ def select_provider(
         - effective_cost: float ($/M effective)
         - dispatch_fn: callable (the _try_* method to invoke)
         - reason: str (why this provider was chosen/ranked)
-        - caller_class: str ('internal'|'sold' — recorded on every candidate
-          for observability; the sold 429 gate is the only decision change
-          it drives, handled separately in the proxy, NOT here).
+        - caller_class: str ('internal'|'sold' — recorded on every candidate;
+          for 'sold' it restricts the candidate set to SOLD_ALLOWLIST so
+          non-allowlisted providers ('friend', 'openrouter', …) never receive
+          sold traffic; for 'internal' the full candidate list is returned).
+          The sold 429-pressure gate is handled separately in the proxy.
 
     Never returns empty list — if no provider is viable, returns
     [ProviderCandidate(name="fallback", ...)] so the caller can send a 503.
@@ -1080,6 +1098,15 @@ def select_provider(
         candidates: list[ProviderCandidate] = []
 
         for name, models in PROVIDER_MODELS.items():
+            # 0. SOLD-lane allowlist (T-B, routstr selling lane): sold traffic
+            # may ONLY dispatch to SOLD_ALLOWLIST ('ours' + 'chutes'). Any
+            # provider outside the allowlist — 'friend', 'openrouter', and every
+            # other lane — is categorically excluded for `sold` regardless of
+            # health or price (never silent fallthrough to a non-allowlisted
+            # lane). `internal` traffic is unaffected (full candidate list).
+            if caller_class == "sold" and name not in SOLD_ALLOWLIST:
+                continue
+
             # 1. Model filter — only providers that can serve this model
             if model_id not in models:
                 # Exact match only — model translation happens at dispatch time.

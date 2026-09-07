@@ -432,18 +432,59 @@ whereas a sold customer's request may be throttled to protect the meter.
 - `'internal'` — every other (or absent) authorization.
 
 The class is threaded into `select_provider(..., caller_class=...)` and
-recorded on every `ProviderCandidate`. It is **observability-only** with
-respect to provider ranking — it carries NO cost or ordering weight in
-`select_provider`. The ONE decision it drives is the sold-pressure gate.
+recorded on every `ProviderCandidate`. It carries NO cost or ordering weight in
+`select_provider` — it does not change *how* candidates are ranked. It drives
+two policy decisions, both exclusive to `sold` traffic:
 
-**The sold 429 gate (the only routing-decision change in T-A).**
-`flat_router.sold_429_gate(caller_class, predictions, safety_hours=2)` returns
+1. **The sold 429 pressure gate** (T-A, below) — returns a 429 instead of routing.
+2. **The sold-lane provider allowlist** (T-B, §2.5) — restricts *which* providers
+   may receive sold traffic at all.
+
+**The sold 429 gate.** `flat_router.sold_429_gate(caller_class, predictions, safety_hours=2)` returns
 `True` when the request is `'sold'` AND any `predict_exhaustion()` prediction
 shows the sold-class quota exhausting within `safety_hours` (default 2). When
 gated, `_proxy()` responds `HTTP 429` with a `Retry-After` header, interrupting
 the sold caller's failover — it does NOT fall through to the candidate loop.
 Internal requests are never gated, and the gate fails OPEN when the predictor
-is unavailable or returns no data. No other routing decision changes.
+is unavailable or returns no data.
+
+### 2.5 Sold-Lane Provider Allowlist (T-B): sold → ours/chutes only
+
+**Policy (Felix 2026-09-07, PLAN-routstr-serving-lane §8).** SOLD traffic (a
+routstr/routstrd customer paying for inference) may ONLY be dispatched to the
+providers in `flat_router.SOLD_ALLOWLIST`:
+
+```python
+SOLD_ALLOWLIST = frozenset({"ours", "chutes"})
+```
+
+- **`ours`** — OUR z.ai key. Resale-allowed: Felix's $80/mo account is
+  disposable and identity-not-tied, so a ToS ban there is a cheap isolated loss.
+- **`chutes`** — Chutes PAYGO, the resale-legal public lane.
+
+**Strictly excluded for sold traffic** (remain valid for internal):
+- **`friend`** — the shared/trust z.ai key. NEVER route sold traffic to it.
+- **`openrouter`** — z.ai/OpenRouter subscription resale is a ToS breach.
+- every other non-allowlisted provider (ollama*, opencode_go, neuralwatt,
+  deepinfra, ppq, telnyx, routstr, routstrd, …).
+
+**Mechanism.** Two layers:
+
+1. **`select_provider()` core filter (flat_router.py)** — for a `sold` request,
+   any provider not in `SOLD_ALLOWLIST` is skipped before the health/cost
+   stages, so it can NEVER appear in the sold candidate list. Internal requests
+   see the full candidate list unchanged.
+2. **Dispatch-loop guard (production/zai_proxy.py, defense-in-depth)** — in the
+   flat-router dispatch loop, a `sold` request skips any candidate not in
+   `SOLD_ALLOWLIST`. This guarantees no silent fallthrough even if the candidate
+   list were ever built by a path that bypassed the core filter.
+
+**No allowlisted provider serves the model → 503.** If the requested model is
+only served by non-allowlisted providers (e.g. deepseek, which `ours` and
+`chutes` do not serve), `select_provider()` returns only the `fallback`
+candidate and the request 503s. Sold traffic NEVER silently falls through to a
+non-allowlisted lane — a 503 is always preferred to a ToS breach or an
+unauthorized resale of the shared key.
 
 ---
 

@@ -1266,5 +1266,119 @@ class TestCallerClassSchema:
             "routing_live_decisions schema must include a caller_class column"
 
 
+# ── T-B SOLD-LANE PROVIDER ALLOWLIST (routstr selling lane) ─────────────────
+# POLICY (Felix 2026-09-07, PLAN-routstr-serving-lane §8): OUR z.ai key
+# ('ours') IS resale-allowed (disposable, identity-not-tied). The 'friend'
+# z.ai key is a shared trust key — NEVER route SOLD traffic to it. OpenRouter
+# resale is a ToS breach — never route SOLD traffic to it. So sold traffic may
+# dispatch ONLY to SOLD_ALLOWLIST = {'ours', 'chutes'}; 'friend', 'openrouter'
+# and any non-allowlisted provider are EXCLUDED for sold (they remain valid
+# for internal). If no allowlisted provider serves the requested model the
+# sold request must 503 — never silent fallthrough to a non-allowlisted lane.
+
+class TestSoldLaneAllowlist:
+    """Gate 1 (TDD): sold traffic may only dispatch to SOLD_ALLOWLIST.
+
+    'friend' and OpenRouter (and any non-allowlisted provider) must NEVER
+    appear in a sold candidate list, while internal traffic keeps the full
+    candidate list. If no allowlisted provider serves the model, sold must
+    fall back to a 503-able fallback candidate (never a non-allowlisted
+    provider). Tests are written to be independent of provider health so they
+    never flake on which lanes happen to be healthy in the test env."""
+
+    def test_sold_allowlist_constant_policy(self):
+        """SOLD_ALLOWLIST anchors the policy: ours+chutes in, friend/OpenRouter out."""
+        from flat_router import SOLD_ALLOWLIST
+        assert "ours" in SOLD_ALLOWLIST, "our z.ai key is resale-allowed"
+        assert "chutes" in SOLD_ALLOWLIST, "Chutes PAYGO is the resale-legal lane"
+        assert "friend" not in SOLD_ALLOWLIST, \
+            "the shared 'friend' key is strictly internal"
+        assert "openrouter" not in SOLD_ALLOWLIST, \
+            "OpenRouter resale is a ToS breach"
+
+    def test_sold_candidates_exclude_friend(self):
+        """sold glm traffic must NOT include the shared 'friend' z.ai key."""
+        from flat_router import select_provider
+        candidates = select_provider(model="glm-5.2", caller_class="sold")
+        names = [c.name for c in candidates if c.name != "fallback"]
+        assert "friend" not in names, \
+            "sold traffic must never dispatch to the shared 'friend' key"
+
+    def test_sold_candidates_exclude_openrouter(self):
+        """sold traffic must NOT include OpenRouter (resale ToS breach)."""
+        from flat_router import select_provider
+        candidates = select_provider(model="glm-5.2", caller_class="sold")
+        names = [c.name for c in candidates if c.name != "fallback"]
+        assert "openrouter" not in names, \
+            "sold traffic must never dispatch to OpenRouter"
+
+    def test_sold_drops_every_non_allowlisted_internal_candidate(self):
+        """Every provider that would be an internal candidate but is NOT in
+        SOLD_ALLOWLIST must be dropped for sold traffic — regardless of health.
+        Any allowlisted provider that IS an internal candidate may remain."""
+        from flat_router import select_provider, SOLD_ALLOWLIST
+        internal = {c.name for c in select_provider(
+            "glm-5.2", caller_class="internal") if c.name != "fallback"}
+        sold = {c.name for c in select_provider(
+            "glm-5.2", caller_class="sold") if c.name != "fallback"}
+        non_allowlisted_internal = internal - set(SOLD_ALLOWLIST)
+        assert non_allowlisted_internal.intersection(sold) == set(), \
+            f"non-allowlisted providers must be dropped for sold: got {sold & non_allowlisted_internal}"
+        assert sold <= set(SOLD_ALLOWLIST), \
+            f"sold candidates must be allowlisted only, got {sold}"
+
+    def test_sold_allowlisted_candidate_may_remain(self):
+        """An allowlisted provider that is an internal candidate may stay for
+        sold (it is legal to resell); nothing outside the allowlist appears."""
+        from flat_router import select_provider, SOLD_ALLOWLIST
+        internal = {c.name for c in select_provider(
+            "glm-5.3", caller_class="internal") if c.name != "fallback"}
+        sold = {c.name for c in select_provider(
+            "glm-5.3", caller_class="sold") if c.name != "fallback"}
+        allowed_internal = internal & set(SOLD_ALLOWLIST)
+        assert sold <= set(SOLD_ALLOWLIST)
+        # any allowlisted provider healthy for internal must still be reachable
+        # for sold (filter never removes an allowlisted lane).
+        for name in allowed_internal:
+            if name == "chutes" and name not in internal:
+                continue  # chutes may be unregistered in this tree
+            assert name in sold, \
+                f"allowlisted '{name}' must remain a sold candidate when internal"
+
+    def test_internal_never_restricted(self):
+        """Internal traffic must keep the FULL candidate list — the allowlist
+        applies to sold only, so internal is a superset (or equal) of sold."""
+        from flat_router import select_provider
+        internal = {c.name for c in select_provider(
+            "glm-5.2", caller_class="internal") if c.name != "fallback"}
+        sold = {c.name for c in select_provider(
+            "glm-5.2", caller_class="sold") if c.name != "fallback"}
+        assert sold <= internal, \
+            "internal must be a superset of sold (allowlist never expands internal)"
+
+    def test_internal_default_not_restricted(self):
+        """default caller_class ('internal') is not allowlist-restricted; it
+        must contain every candidate the explicit internal path contains."""
+        from flat_router import select_provider
+        names = {c.name for c in select_provider("glm-5.2")
+                 if c.name != "fallback"}
+        internal = {c.name for c in select_provider(
+            "glm-5.2", caller_class="internal") if c.name != "fallback"}
+        assert names == internal, "default caller_class == internal"
+
+    def test_sold_model_not_served_by_allowlist_falls_back_to_503(self):
+        """deepseek is served only by non-allowlisted providers → sold returns
+        a 503-able fallback (dispatch_fn None), never a non-allowlisted lane."""
+        from flat_router import select_provider
+        candidates = select_provider(
+            model="deepseek/deepseek-v4-flash", caller_class="sold")
+        names = [c.name for c in candidates if c.name != "fallback"]
+        assert names == [], \
+            f"sold deepseek must NOT reach non-allowlisted providers, got {names}"
+        fallbacks = [c for c in candidates if c.name == "fallback"]
+        assert fallbacks, \
+            "sold traffic with no allowlisted provider must yield a 503 fallback"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
