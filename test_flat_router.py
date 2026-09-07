@@ -1156,5 +1156,115 @@ class TestOllamaDispatchReasonRelabel:
             "legacy label must remain for the rollback path"
 
 
+# ── T-A caller-class capture: sold 429 gate + candidate/schema plumbing ────
+
+class TestCallerClassSoldGateway:
+    """Gate 1 (TDD): the sold-pressure branch must reject `sold` requests with
+    a 429 when predicted exhaustion is imminent, while `internal` requests are
+    NEVER gated. The gate is the ONLY routing-decision change in T-A."""
+
+    def test_sold_drops_to_429_when_exhaustion_imminent(self):
+        """sold request + a prediction of exhaustion in < 2h → gate returns True."""
+        from flat_router import sold_429_gate
+        predictions = [
+            {"key": "routstr", "will_exhaust": True, "exhausts_in_hours": 0.7},
+        ]
+        assert sold_429_gate("sold", predictions) is True
+
+    def test_internal_never_gated_same_predictions(self):
+        """The SAME imminent-exhaustion predictions must NEVER gate internal."""
+        from flat_router import sold_429_gate
+        predictions = [
+            {"key": "routstr", "will_exhaust": True, "exhausts_in_hours": 0.7},
+        ]
+        assert sold_429_gate("internal", predictions) is False
+
+    def test_sold_not_gated_when_exhaustion_far_out(self):
+        """Hours-to-exhaustion >= SOLD_SAFETY_HOURS → sold still served."""
+        from flat_router import sold_429_gate
+        predictions = [
+            {"key": "routstr", "will_exhaust": False, "exhausts_in_hours": 24.0},
+        ]
+        assert sold_429_gate("sold", predictions) is False
+
+    def test_sold_not_gated_when_no_predictions(self):
+        """Empty prediction list (predictor unavailable) → no gate (fail-open)."""
+        from flat_router import sold_429_gate
+        assert sold_429_gate("sold", []) is False
+        assert sold_429_gate("sold", None) is False
+
+    def test_gate_uses_safety_hours_parameter(self):
+        """A caller-supplied safety window overrides the 2h default."""
+        from flat_router import sold_429_gate
+        predictions = [
+            {"key": "routstr", "will_exhaust": True, "exhausts_in_hours": 1.7},
+        ]
+        assert sold_429_gate("sold", predictions) is True          # default 2h → gated
+        assert sold_429_gate("sold", predictions, safety_hours=1.0) is False
+
+
+class TestCallerClassInSelectProvider:
+    """caller_class must thread from select_provider() into every candidate and
+    be recorded on the candidate object (observability only — no decision
+    change beyond the sold gate)."""
+
+    def test_caller_class_threaded_into_candidates(self):
+        from flat_router import select_provider
+        candidates = select_provider(model="glm-5.2", caller_class="sold")
+        assert isinstance(candidates, list)
+        if candidates and candidates[0].name != "fallback":
+            assert all(
+                getattr(c, "caller_class", None) == "sold"
+                for c in candidates if c.name != "fallback"
+            ), "every non-fallback candidate must carry caller_class='sold'"
+
+    def test_internal_default_on_candidate(self):
+        from flat_router import select_provider
+        candidates = select_provider(model="glm-5.2")
+        if candidates and candidates[0].name != "fallback":
+            assert all(
+                getattr(c, "caller_class", None) == "internal"
+                for c in candidates if c.name != "fallback"
+            ), "default caller_class must be 'internal'"
+
+    def test_candidate_field_present_on_fallback(self):
+        from flat_router import ProviderCandidate
+        c = ProviderCandidate(
+            name="fallback", model="x", effective_cost=float("inf"),
+            dispatch_fn=None, reason="no viable provider",
+        )
+        assert getattr(c, "caller_class", None) == "internal", \
+            "ProviderCandidate must default caller_class to 'internal'"
+
+
+class TestCallerClassSchema:
+    """caller_class must be present in the routing decision schemas."""
+
+    def test_flat_router_shadow_schema_has_caller_class(self):
+        import sqlite3, tempfile, os
+        from flat_router import _log_flat_router_shadow, ProviderCandidate
+        db_path = os.path.join(tempfile.mkdtemp(), "shadow_cc.db")
+        _log_flat_router_shadow(
+            db_path=db_path,
+            best_key_choice="friend",
+            candidates=[ProviderCandidate(
+                name="friend", model="glm-5.2", effective_cost=0.082,
+                dispatch_fn=None, reason="cheapest", caller_class="internal")],
+            model="glm-5.2",
+        )
+        conn = sqlite3.connect(db_path)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(flat_router_shadow_decisions)")]
+        conn.close()
+        assert "caller_class" in cols, \
+            "flat_router_shadow_decisions schema must include caller_class"
+
+    def test_proxy_live_schema_has_caller_class(self):
+        import zai_proxy
+        src = open(zai_proxy.__file__).read()
+        assert "CREATE TABLE IF NOT EXISTS routing_live_decisions" in src
+        assert "caller_class" in src, \
+            "routing_live_decisions schema must include a caller_class column"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -180,6 +180,7 @@ def select_provider(
     task_type: str = "coding",
     estimated_tokens: int = 10000,
     difficulty: str = "medium",
+    caller_class: str = "internal",
 ) -> list[ProviderCandidate]:
     """Flat-hierarchy provider selection.
 
@@ -193,6 +194,8 @@ def select_provider(
         - effective_cost: float ($/M effective)
         - dispatch_fn: callable (the _try_* method to invoke)
         - reason: str (why this provider was chosen/ranked)
+        - caller_class: str ('internal'|'sold' — the traffic class this
+          candidate list was built for; recorded for observability only.)
 
     Never returns empty list — if no provider is viable, returns
     [ProviderCandidate(name="fallback", model=..., cost=inf, ...)]
@@ -410,6 +413,37 @@ Caller iterates the list:
         else:
             mark failure, try next
 ```
+
+### 2.4 Caller-Class Capture: sold vs internal routing (X-Priority)
+
+**Motivation.** The routstr SALE (an advertised, Cashu-metered endpoint) sells
+inference to external customers, while our own Hermes fleet uses the same
+proxy internally. Under quota pressure these two populations have different
+SLOs: internal traffic must NEVER be blocked by our own routing decisions,
+whereas a sold customer's request may be throttled to protect the meter.
+
+**Traffic classification.** `caller_class` is derived once at request entry in
+`production/zai_proxy.py` (`_derive_caller_class`):
+
+- `'sold'` — the request's `Authorization` Bearer token equals our own
+  `routstr` or `routstrd` meter key (`ROUTSTR_API_KEY` / `ROUTSTRD_API_KEY`,
+  loaded in `_load_external_keys`, zai_proxy.py ~646/650). These are the same
+  keys a sold customer presents when buying from the routstr service.
+- `'internal'` — every other (or absent) authorization.
+
+The class is threaded into `select_provider(..., caller_class=...)` and
+recorded on every `ProviderCandidate`. It is **observability-only** with
+respect to provider ranking — it carries NO cost or ordering weight in
+`select_provider`. The ONE decision it drives is the sold-pressure gate.
+
+**The sold 429 gate (the only routing-decision change in T-A).**
+`flat_router.sold_429_gate(caller_class, predictions, safety_hours=2)` returns
+`True` when the request is `'sold'` AND any `predict_exhaustion()` prediction
+shows the sold-class quota exhausting within `safety_hours` (default 2). When
+gated, `_proxy()` responds `HTTP 429` with a `Retry-After` header, interrupting
+the sold caller's failover — it does NOT fall through to the candidate loop.
+Internal requests are never gated, and the gate fails OPEN when the predictor
+is unavailable or returns no data. No other routing decision changes.
 
 ---
 
