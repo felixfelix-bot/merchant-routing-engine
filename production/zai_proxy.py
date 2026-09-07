@@ -2373,6 +2373,57 @@ def _will_exhaust(predictions: list[dict]) -> dict | None:
     return None
 
 
+# ── T-A caller-class capture (routstr X-Priority sold/internal routing) ─────
+# A request's caller_class distinguishes SOLD traffic (a routstr/routstrd
+# customer presenting one of OUR routstr meter keys as its Bearer token) from
+# INTERNAL traffic (every other authorized caller on the loopback proxy).
+# The only decision the class drives is the sold-pressure 429 gate below;
+# internal requests are never affected.
+
+_SOLD_BEARER_KEYS: tuple[str, ...] = (
+    _EXTERNAL_KEYS.get("routstr", "") or "",
+    _EXTERNAL_KEYS.get("routstrd", "") or "",
+)
+
+
+def _derive_caller_class(auth_header: str | None) -> str:
+    """Classify a request as 'internal' or 'sold' from its Authorization header.
+
+    A request whose Bearer token equals our routstr or routstrd meter key is
+    SOLD traffic (a customer buying tokens through the sold routstr service).
+    Any other authorization (or none) is INTERNAL. Case-insensitive header
+    match; returns 'internal' on any ambiguity. Never raises.
+    """
+    try:
+        if not auth_header:
+            return "internal"
+        token = auth_header.strip()
+        lower = token.lower()
+        if not lower.startswith("bearer "):
+            return "internal"
+        token = token[len("bearer "):].strip()
+        if not token:
+            return "internal"
+        if any(token == k for k in _SOLD_BEARER_KEYS if k):
+            return "sold"
+        return "internal"
+    except Exception:
+        return "internal"
+
+
+def _sold_429_gated(caller_class: str, predictions: list[dict] | None) -> bool:
+    """True when a SOLD request must be rejected with HTTP 429 + Retry-After.
+
+    Delegates to flat_router.sold_429_gate() (the SOLD_SAFETY_HOURS default of
+    2h lives there). Internal requests never gate. Fail-open on predictor
+    unavailability. Never raises."""
+    try:
+        from flat_router import sold_429_gate as _sold_gate
+        return bool(_sold_gate(caller_class, predictions))
+    except Exception:
+        return False
+
+
 def _usage_db() -> sqlite3.Connection:
     """Lazy WAL-mode connection to the usage DB; creates schema on first call.
     Double-checked-locked singleton. Returns the shared autocommit connection."""
@@ -2750,13 +2801,15 @@ CREATE TABLE IF NOT EXISTS routing_live_decisions (
     tokens INTEGER,
     agree INTEGER,
     reason TEXT,
-    pace_mults TEXT
+    pace_mults TEXT,
+    caller_class TEXT
 );
 """
 
 
 def _log_live_decision(*, provider, model=None, fallback=None,
-                       fallback_model=None, reason="", pace_mults=None):
+                       fallback_model=None, reason="", pace_mults=None,
+                       caller_class="internal"):
     """Log one LIVE LiveRouter failover decision to ``routing_live_decisions``.
 
     Column mapping (deliberate reuse of the shadow schema for direct
@@ -2780,10 +2833,12 @@ def _log_live_decision(*, provider, model=None, fallback=None,
         db.execute(
             "INSERT INTO routing_live_decisions "
             "(ts, live_provider, live_model, shadow_provider, shadow_model, "
-            " shadow_cost, live_cost, tokens, agree, reason, pace_mults) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            " shadow_cost, live_cost, tokens, agree, reason, pace_mults, "
+            " caller_class) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (time.time(), provider, model, fallback, fallback_model,
-             None, None, 0, 1, reason if reason is not None else "", pace_json))
+             None, None, 0, 1, reason if reason is not None else "", pace_json,
+             caller_class))
     except Exception:
         pass
 
@@ -5960,6 +6015,49 @@ class Handler(BaseHTTPRequestHandler):
         # respect to the body — the forwarded request is untouched.
         self._task_type = _resolve_task_type(self.headers, body)
 
+        # ── T-A caller-class capture + sold-pressure gate ────────────────
+        # Classify the request as 'internal' or 'sold' before ANY routing.
+        # SOLD = a routstr/routstrd customer presenting one of our routstr
+        # meter keys as its Bearer token; everything else is INTERNAL.
+        # The ONLY routing-decision change this task makes: if the request is
+        # SOLD and the sold-class quota is predicted to exhaust within
+        # SOLD_SAFETY_HOURS (default 2h, flat_router.sold_429_gate), reject
+        # with HTTP 429 + Retry-After to interrupt the sold caller's failover.
+        # Internal requests are never gated. Predictions are fetched from the
+        # routstr balance node(s); read-only and fail-open.
+        self._caller_class = _derive_caller_class(
+            self.headers.get("Authorization"))
+
+        # Only SOLD requests ever consult the pressure gate — internal traffic
+        # never pays for the prediction fetch. _get_predictions is a cached
+        # wrapper (TTL 60s, de-dups the self-HTTP /quota roundtrip); fail over
+        # to the pure cache on any error (never block the request on the gate).
+        if self._caller_class == "sold":
+            try:
+                _sold_preds: list[dict] = []
+                try:
+                    _sold_preds = _get_predictions("routstr")
+                except Exception:
+                    _sold_preds = _get_cached_predictions("routstr") or []
+                if _sold_429_gated(self._caller_class, _sold_preds):
+                    _err429 = json.dumps({
+                        "error": "sold quota pressure — temporarily unavailable; "
+                                 "the sold meter is predicted to exhaust within "
+                                 "the safety window. Retry after the "
+                                 "Retry-After delay.",
+                        "caller_class": self._caller_class,
+                    }).encode()
+                    self.send_response(429)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Retry-After", "120")
+                    self.send_header("Content-Length", str(len(_err429)))
+                    self.end_headers()
+                    self.wfile.write(_err429)
+                    return
+            except Exception:
+                # Gate must never break the request path — fail open.
+                pass
+
         # Early bail: model-only probe (no messages field) — return 400
         # immediately. These are health-check/model-availability probes that
         # every provider rejects with 422. Don't waste time cycling providers.
@@ -6085,7 +6183,9 @@ class Handler(BaseHTTPRequestHandler):
                 # the legacy cascade (the flag check already passed, so the old
                 # path is not a valid fallback here).
                 try:
-                    _candidates = _flat_select_provider(model=original_model)
+                    _candidates = _flat_select_provider(
+                        model=original_model,
+                        caller_class=getattr(self, "_caller_class", "internal"))
                 except Exception as _fr_err:
                     import traceback as _tb
                     print("[flat-router] select_provider raised "
@@ -6106,7 +6206,9 @@ class Handler(BaseHTTPRequestHandler):
 
                 # Shadow log: record what the flat router chose
                 try:
-                    _flat_router_shadow_compare(None, original_model)
+                    _flat_router_shadow_compare(
+                        None, original_model,
+                        caller_class=getattr(self, "_caller_class", "internal"))
                 except Exception:
                     pass
 

@@ -77,12 +77,67 @@ class ProviderCandidate:
         dispatch_fn: callable — the Handler._try_* method to invoke.
                      None for the fallback candidate.
         reason: why this provider was chosen/ranked
+        caller_class: 'internal'|'sold' traffic class this candidate was
+                      selected for (observability only — the sold 429 gate is
+                      the ONLY decision change it drives).
     """
     name: str
     model: str
     effective_cost: float
     dispatch_fn: Callable | None
     reason: str = ""
+    caller_class: str = "internal"
+
+
+# ── Sold / internal traffic classes (routstr X-Priority, T-A) ───────────────
+
+# Default safety margin in hours ahead of predicted quota exhaustion at which
+# `sold` traffic is gated (429 + Retry-After) rather than served. `internal`
+# is NEVER gated. Callers may override via the `safety_hours` parameter.
+SOLD_SAFETY_HOURS: float = 2.0
+
+
+def sold_429_gate(
+    caller_class: str | None,
+    predictions: list[dict] | None,
+    safety_hours: float = SOLD_SAFETY_HOURS,
+) -> bool:
+    """Return True if a `sold` request must be gated to HTTP 429.
+
+    The gate is the ONLY routing-decision change introduced for X-Priority
+    sold/internal separation. It interrupts a sold caller's failover by
+    returning True so the handler sends 429 + Retry-After instead of routing.
+
+    Rules:
+      - caller_class != 'sold'            → False (internal NEVER gated).
+      - predictions is None or empty      → False (fail-open, predictor down).
+      - any prediction with will_exhaust=True whose exhausts_in_hours is
+        < safety_hours                     → True (gated).
+
+    `predictions` is the flat list returned by predict_exhaustion(): each
+    entry is a dict with keys like `key`, `will_exhaust`, `exhausts_in_hours`
+    (and optionally `note`). Entries that carry a non-empty `note` are
+    'Insufficient data' placeholders and are ignored, mirroring the proxy's
+    `_will_exhaust()` semantics. Never raises.
+    """
+    if caller_class != "sold":
+        return False
+    if not predictions:
+        return False
+    try:
+        for p in predictions:
+            if not p.get("will_exhaust"):
+                continue
+            if p.get("note"):
+                continue  # 'Insufficient data' placeholder — not a real window
+            try:
+                if float(p.get("exhausts_in_hours", float("inf"))) < safety_hours:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+    except Exception:
+        return False  # gate must never raise
 
 
 # ── Model alias canonicalization (2026-08-27 fix) ───────────────────────────
@@ -994,6 +1049,7 @@ def select_provider(
     task_type: str = "coding",
     estimated_tokens: int = 10000,
     difficulty: str = "medium",
+    caller_class: str = "internal",
 ) -> list[ProviderCandidate]:
     """Flat-hierarchy provider selection.
 
@@ -1006,6 +1062,9 @@ def select_provider(
         - effective_cost: float ($/M effective)
         - dispatch_fn: callable (the _try_* method to invoke)
         - reason: str (why this provider was chosen/ranked)
+        - caller_class: str ('internal'|'sold' — recorded on every candidate
+          for observability; the sold 429 gate is the only decision change
+          it drives, handled separately in the proxy, NOT here).
 
     Never returns empty list — if no provider is viable, returns
     [ProviderCandidate(name="fallback", ...)] so the caller can send a 503.
@@ -1070,6 +1129,7 @@ def select_provider(
                 effective_cost=cost,
                 dispatch_fn=dispatch_fn,
                 reason=reason,
+                caller_class=caller_class,
             ))
 
         # Sort cheapest first (inf sorts to end)
@@ -1085,6 +1145,7 @@ def select_provider(
                 effective_cost=float("inf"),
                 dispatch_fn=None,
                 reason="no viable provider found",
+                caller_class=caller_class,
             ))
 
         return candidates
@@ -1096,6 +1157,7 @@ def select_provider(
             effective_cost=float("inf"),
             dispatch_fn=None,
             reason="select_provider error",
+            caller_class=caller_class,
         )]
 
 
@@ -1167,6 +1229,7 @@ CREATE TABLE IF NOT EXISTS flat_router_shadow_decisions (
     flat_router_top_cost REAL,
     agreement INTEGER,
     model TEXT,
+    caller_class TEXT,
     candidate_list TEXT
 );
 """
@@ -1177,6 +1240,7 @@ def _log_flat_router_shadow(
     best_key_choice: str | None = None,
     candidates: list[ProviderCandidate] | None = None,
     model: str | None = None,
+    caller_class: str | None = None,
 ) -> None:
     """Log a flat router shadow comparison to the DB.
 
@@ -1185,6 +1249,7 @@ def _log_flat_router_shadow(
       - best_key choice
       - select_provider top candidate
       - agreement (yes=1/no=0)
+      - caller_class ('internal'|'sold') the candidates were built for
       - full candidate list with prices (JSON)
 
     Uses a separate table 'flat_router_shadow_decisions' so it doesn't
@@ -1203,6 +1268,10 @@ def _log_flat_router_shadow(
         top = candidates[0] if candidates else None
         top_name = top.name if top else None
         top_cost = top.effective_cost if top else None
+        # caller_class: explicit param wins; else take it from the top
+        # candidate (the candidates were built with a single class).
+        if caller_class is None:
+            caller_class = getattr(top, "caller_class", "internal") if top else "internal"
 
         # Agreement: does best_key's choice match the flat router's top pick?
         # Normalize names: "zai_friend" == "friend", "zai_ours" == "ours"
@@ -1227,6 +1296,7 @@ def _log_flat_router_shadow(
                 "model": c.model,
                 "effective_cost": c.effective_cost if not math.isinf(c.effective_cost) else None,
                 "reason": c.reason[:200] if c.reason else "",
+                "caller_class": getattr(c, "caller_class", "internal"),
             }
             for c in candidates
         ], default=str)
@@ -1236,10 +1306,10 @@ def _log_flat_router_shadow(
         conn.execute(
             "INSERT INTO flat_router_shadow_decisions "
             "(ts, best_key_choice, flat_router_top, flat_router_top_cost, "
-            " agreement, model, candidate_list) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " agreement, model, caller_class, candidate_list) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (time.time(), best_key_choice, top_name, top_cost,
-             agreement, model, candidate_list)
+             agreement, model, caller_class, candidate_list)
         )
         conn.commit()
         conn.close()
@@ -1249,7 +1319,8 @@ def _log_flat_router_shadow(
 
 # ── Shadow hook — called from _proxy() after best_key() decision ────────────
 
-def shadow_compare(best_key_choice: str | None, model: str | None) -> None:
+def shadow_compare(best_key_choice: str | None, model: str | None,
+                   caller_class: str = "internal") -> None:
     """Run select_provider() in shadow and log the comparison.
 
     Called after best_key() makes its decision. Runs select_provider()
@@ -1257,11 +1328,12 @@ def shadow_compare(best_key_choice: str | None, model: str | None) -> None:
     the best_key() pick. Never raises — shadow mode must not break production.
     """
     try:
-        candidates = select_provider(model=model)
+        candidates = select_provider(model=model, caller_class=caller_class)
         _log_flat_router_shadow(
             best_key_choice=best_key_choice,
             candidates=candidates,
             model=model,
+            caller_class=caller_class,
         )
     except Exception:
         pass  # Shadow mode never blocks production
