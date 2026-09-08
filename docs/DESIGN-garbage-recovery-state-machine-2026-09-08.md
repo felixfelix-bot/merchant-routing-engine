@@ -49,7 +49,7 @@ Add to `garbage_detector.py` a per-`(provider, model)` **recovery state machine*
 
 **Escalation curve — BINARY EXPONENTIAL (operator decision, 2026-09-08):** the operator chose binary-exponential price bumps, mirroring the router's existing binary-exponential backoff convention for HTTP failures (30s→60s→120s→…→1h cap). So both components escalate by ~doubling:
 - **Price:** `BASE = 2.0` → bump = `2^n` per strike in window (2×, 4×, 8×…), `inf` at `PRICE_MAX_STRIKES` (4). (Was `3^n`; operator prefers base-2 to match backoff.)
-- **Hold interval (Escalated):** the recovery cooldown itself escalates binarily too — `ESCALATE_TTL = 15m → 30m → 60m` on successive escalations, cap at 60m (`GARBAGE_ESCALATE_TTL_CAP`), so a *repeatedly* re-broken pair gets held out progressively longer — the direct fix for the neuralwatt 101-strike pendulum.
+- **Hold interval (Escalated):** the recovery cooldown itself escalates binarily too — `ESCALATE_TTL = 15m → 30m → 60m → 2h → 4h → …` doubling on successive re-escalations, cap at **24h** (`GARBAGE_ESCALATE_TTL_CAP = 86400`), so a *repeatedly* re-broken pair gets held out progressively longer — the direct fix for the neuralwatt 101-strike pendulum. A chronically-garbling endpoint (strikes≥4 recurring each day for days) is held out for up to a full day before it gets another chance to re-prove itself.
 
 **Three-tier multiplier** (all via `garbage_price_mult`, fail-open 1.0):
 
