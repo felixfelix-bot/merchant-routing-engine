@@ -68,6 +68,25 @@ def tcp_ok(ip, port=22, t=6):
     except Exception as e:
         return f"DOWN {str(e)[:40]}"
 
+def ppq_live():
+    remote = ("K=$(cat ~/routstr-public/secrets/ppq_key.txt 2>/dev/null); "
+              "A=\"Authorization: Bearer ${K}\"; "
+              "curl -s -X POST https://api.ppq.ai/credits/balance "
+              "-H \"$A\" -H \"Content-Type: application/json\" "
+              "-d '{}' --max-time 12")
+    out, rc = ssh(remote, timeout=30)
+    if rc != 0 or not out.strip():
+        return None
+    try:
+        bal = float(json.loads(out.strip().splitlines()[-1]).get("balance"))
+    except Exception:
+        return None
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    s = f"ppq balance LIVE: ${bal:.2f} (pulled {ts})"
+    if bal < 1.00:
+        s += " LOW — top up soon"
+    return s
+
 def ppq_cache():
     db = os.path.expanduser("~/hermes-bot/api_burn.db")
     try:
@@ -94,8 +113,18 @@ for c in CONTAINERS:
     if "error" in data:
         print("COLLECT ERROR:", data["error"]); continue
     provs = data.get("providers", [])
-    bad = [p for p in provs if isinstance(p, list) and len(p) > 1 and p[1] is not None and float(p[1]) < 1.27]
-    print("providers:", provs, "| MARGIN OK" if not bad else f"| !! FEE BELOW 1.27: {bad}")
+    # R1-R4 chain-pricing model (30% margin on revenue => fee = 1.43). The margin
+    # lives ONCE on the selling hop; downstream passthrough hops normalize to 1.0.
+    # So a valid chain totals 1.43, and a provisional fee below ~1.27 on a
+    # passthrough/1.0 hop is EXPECTED (not a margin violation) under R4. The flag
+    # below only lists provider_fee values that exceed the 30% cap (nothing > 1.43).
+    bad = [p for p in provs if isinstance(p, list) and len(p) > 2 and p[2] and p[1] is not None and float(p[1]) > 1.43]
+    print("providers:", provs, "| MARGIN OK" if not bad else f"| !! ENABLED FEE ABOVE 1.43 (over-margin): {bad}")
+    enabled = [p for p in provs if isinstance(p, list) and len(p) > 2 and p[2]]
+    if not enabled:
+        print("SERVING: DEAD — ALL PROVIDERS DISABLED (node cannot serve customers)")
+    else:
+        print(f"serving: {len(enabled)} provider(s) enabled")
     k = data.get("keys", [[]])[0]
     if k and k[0] != "ERR":
         _pk = prev.get("keys") or []
@@ -109,11 +138,32 @@ for c in CONTAINERS:
     print("recent tx:", data.get("tx_recent"))
     state[c] = data
 
+# R1-R4 CHAIN SUMMARY — compounded end-to-end markup across both nodes
+# (public selling hop x friends passthrough hop; settings blobs now normalized
+# to exchange_fee x upstream_provider_fee = 1.0 x 1.0). Docs: ROUTSTR-COMPETITIVE-PRICING.md.
+try:
+    pub_fe = {p[0]: float(p[1]) for p in state.get("routstr-public", {}).get("providers", []) if len(p) > 1 and p[1] is not None}
+    prox_fe = {p[0]: float(p[1]) for p in state.get("routstr-proxy", {}).get("providers", []) if len(p) > 1 and p[1] is not None}
+    selling = pub_fe.get("zai-proxy", None)
+    passthru = prox_fe.get("zai-proxy-tunnel", None)
+    if selling is not None and passthru is not None:
+        chain = selling * passthru
+        print(f"\nchain: public zai-proxy {selling} x friends zai-proxy-tunnel {passthru} = {chain:.3f} (settings 1.0x1.0) | "
+              f"{'MARGIN OK (1.43)' if abs(chain-1.43) < 0.01 else f'!! NOT 1.43 ({chain:.3f})'}")
+    else:
+        print("\nchain: could not compute (selling/passthrough hop missing)")
+except Exception as e:
+    print("\nchain: compute error:", str(e)[:80])
+
 print("\n--- INFRA ---")
 print("TLS routstr.orangesync.tech/v1/models:", https_code("https://routstr.orangesync.tech/v1/models"))
 print("hermes2 64.188.7.239 ssh:", tcp_ok("64.188.7.239"))
 print("hermes 23.182.128.219 ssh:", tcp_ok("23.182.128.219"))
-print(ppq_cache())
+live = ppq_live()
+if live:
+    print(live)
+else:
+    print("ppq LIVE pull FAILED, cache fallback:", ppq_cache())
 
 os.makedirs(os.path.dirname(STATE), exist_ok=True)
 tmp = STATE + ".tmp"
