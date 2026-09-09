@@ -1,8 +1,8 @@
 # T-B — Routstr Wiring Canary: Implementation Report
 
-**Task:** T-B from PLAN-routstr-serving-lane-2026-09-07.md  
+**Task:** T-B from PLAN-routstr-serving-lane-2026-09-07.md; P0-4 from PLAN-wire-full-provider-pool-rugpull-resilience-2026-09-08.md  
 **Assignee:** worker-merchant  
-**Date:** 2026-09-07  
+**Date:** 2026-09-07 (updated 2026-09-08 — calibr.json rollup)  
 **Branch:** `t_5f45d48f/routstr-canary-sold-tag`
 
 ## Summary
@@ -26,11 +26,50 @@ A tiny HTTP proxy on `127.0.0.1:9097` that:
 - NEVER raises; logging failure cannot break the request path
 
 ### 3. `tests/test_routstr_sold_canary.py` (merchant-routing-engine)
-10 unit tests covering all canary module functions:
+14 unit tests covering all canary module functions:
 - Header injection/stripping
 - JSONL write/unwritable-path fallback
 - Model extraction from request body
 - DB mirror + no-DB graceful fallback
+- calibr.json rollup: shape/mode/routing_changed invariant, sold-row + would-be-route reads from a decision DB, missing-log/DB zero-fail, lookback windowing
+
+### 4. calibr.json snapshot (`build_calibr`, P0-4 scope)
+`~/.hermes/bot/routstr_sold_calibr.json` is the machine-readable canary
+calibration snapshot. `python3 -m src.routstr_sold_canary --calibr
+--calibr-db ~/.hermes/bot/zai_usage.db` rolls the canary JSONL + decision DB
+into one file:
+
+```json
+{
+  "canary": "routstr_sold_calibr",
+  "mode": "shadow",
+  "priority_header": "X-Priority: sold",
+  "lane": "routstr",
+  "routing_changed": false,
+  ...
+  "requests_total": 288,
+  "requests_by_status": {"200": 287, "400": 1},
+  "sold_chat_requests": 0,
+  "probe_or_other": 288,
+  "sold_decision_rows": 288,
+  "would_be_routes": {}
+}
+```
+
+Key semantics:
+- `mode: shadow` + `routing_changed: false` assert the shadow invariant — the
+  canary NEVER alters routing (Phase B), it only labels + logs.
+- `sold_decision_rows` = `caller_class='sold'` rows mirrored into
+  `routing_live_decisions` (the "sold-class request row" the P&L collector and
+  Gate-1 readiness feed read).
+- `would_be_routes` = upstream provider keys that served `routstrd_sale` calls
+  in the window; under shadow the actual route == the would-be route.
+- `sold_chat_requests` vs `probe_or_other` split: chat-completions requests
+  carry a `model`, health/probe GETs do not, so probes never pollute the
+  sold-traffic signal.
+- Missing log/DB → zeroed counters, never raises (a snapshot glitch cannot
+  break the request path). Tests write to tmp paths only — never the live
+  `~/.hermes/bot/routstr_sold_calibr.json`.
 
 ## Verification results
 
@@ -63,13 +102,34 @@ SSH tunnel PID 4433  -R 0.0.0.0:9099:127.0.0.1:9097 root@VPS2
 - **PPQ balance**: $0.97 (LOW)
 - **TLS**: routstr.orangesync.tech/v1/models → 200
 
+### calibr.json live snapshot (2026-09-08, P0-4)
+Regenerated from the live canary log + zai_usage.db (48h window, 316 rows):
+- 316 canary rows observed; 315×HTTP 200 + 1×400 (probe/health GETs dominate — they carry no chat body)
+- 315 `caller_class='sold'` rows visible in `routing_live_decisions` (the sold-class request row; mirrors canary 1:1 via tag-sidecar)
+- 1 sold chat-completion E2E probe in window (model glm-5.2 → HTTP 200, served by key_name `ours`) → `sold_chat_requests: 1`, `would_be_routes: {"ours": 1}` (actual route under shadow == would-be route)
+- 229 `routstrd_sale` api_calls on record (key_name routstr/ours/chutes/ollama_cloud, all 200) — the Sep-06/07 E2E batch
+- `routing_changed: false` on every snapshot — shadow invariant holds
+
 ## Quality gates
-- ✅ Gate 1 (TDD): 10 tests written, pass
-- ✅ Gate 2 (tests pass): 269/289 pass; 20 pre-existing failures (ollama_cloud_2 rename, unrelated)
+- ✅ Gate 1 (TDD): 14 tests written, pass
+- ✅ Gate 2 (tests pass): canary file 14/14 green; full-suite baseline 269/289 with 20 pre-existing unrelated failures (see below)
 - [pending] Gate 2.5 (cold review): reviewer to verify
-- ✅ Gate 3: This doc + plan doc
-- [pending] Gate 4: Atomic commit + push
+- ✅ Gate 3: This doc updated in the SAME commit as the calibr code + tests
+- ✅ Gate 4: Atomic commit + push (calibr commit 49e7a4f+)
 - [pending] Gate 6: Manager review before merge
+
+## Known pre-existing test-suite noise (NOT caused by this change)
+- `tests/test_urgency_cost_estimator.py` fails at collection on this host:
+  it imports `display_urgency_costs`, which exists in neither this tree nor
+  the sibling `~/merchant-routing-engine` checkout at these commits (stale
+  test from an earlier CG-3→CG-12 refactor). Verified pre-existing at HEAD by
+  stashing this change and re-running — identical error.
+- Host sys.path hazard: `flat_router.py`/`conftest.py` insert
+  `~/.hermes/bot` and `~/merchant-routing-engine` (production + sibling
+  checkout on a different branch) ahead of this worktree's `src`, so a few
+  import-time messages and the urgency module can resolve to the sibling
+  tree. The canary module and its tests are unaffected (verified by direct
+  import path checks).
 
 ## Open issues / follow-up
 1. Canary log rotated during proxy restart — implement log rotation or append-only guarantee

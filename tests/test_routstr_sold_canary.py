@@ -104,3 +104,101 @@ def test_extract_model_empty_or_bad_returns_none():
 def test_log_sold__db_is_none_writes_false():
     from src.routstr_sold_canary import log_sold_decision
     assert log_sold_decision(None, model="x")["wrote"] is False
+
+
+# ── build_calibr() (calibr.json canary rollup — P0-4 scope) ─────────────────
+def _mklog(tmp_path, rows):
+    """Write canary JSONL rows to a tmp file; return the path."""
+    import time as _t
+    lp = str(tmp_path / "canary.jsonl")
+    with open(lp, "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    return lp
+
+
+def _mkdb(tmp_path):
+    """Create a decision DB with api_calls + routing_live_decisions tables."""
+    import sqlite3
+    dbp = str(tmp_path / "zai_usage.db")
+    con = sqlite3.connect(dbp)
+    con.execute("CREATE TABLE api_calls (id INTEGER PRIMARY KEY, ts REAL, key_name TEXT, "
+                "task_type TEXT, model TEXT, status_code INTEGER)")
+    con.execute("CREATE TABLE routing_live_decisions (id INTEGER PRIMARY KEY, ts REAL, "
+                "live_provider TEXT, live_model TEXT, caller_class TEXT, reason TEXT)")
+    con.commit()
+    return dbp, con
+
+
+def test_build_calibr_basic_shape(tmp_path):
+    from src.routstr_sold_canary import build_calibr, CALIBR_KEY
+    import time
+    now = time.time()
+    lp = _mklog(tmp_path, [
+        {"canary": "routstr_sold_canary", "ts": now, "caller_class": "sold",
+         "lane": "routstr", "model": "glm-5.2", "status": 200},   # chat request
+        {"canary": "routstr_sold_canary", "ts": now, "caller_class": "sold",
+         "lane": "routstr", "status": 200},                        # probe / no model
+    ])
+    out = str(tmp_path / "calibr.json")
+    res = build_calibr(log_path=lp, db_path=None, out_path=out, lookback_hours=1.0)
+    assert res["canary"] == CALIBR_KEY
+    assert res["mode"] == "shadow"
+    assert res["routing_changed"] is False
+    assert res["requests_total"] == 2
+    assert res["sold_chat_requests"] == 1
+    assert res["probe_or_other"] == 1
+    assert res["requests_by_status"] == {"200": 2}
+    # file written and round-trips
+    with open(out, encoding="utf-8") as fh:
+        assert json.load(fh) == res
+
+
+def test_build_calibr_reads_db_for_sold_rows_and_routes(tmp_path):
+    from src.routstr_sold_canary import build_calibr
+    import time
+    now = time.time()
+    lp = _mklog(tmp_path, [
+        {"canary": "routstr_sold_canary", "ts": now, "caller_class": "sold",
+         "lane": "routstr", "model": "glm-5.2", "status": 200},
+    ])
+    dbp, con = _mkdb(tmp_path)
+    con.execute("INSERT INTO api_calls (ts, key_name, task_type, model, status_code) "
+                "VALUES (?,?,?,?,?)", (now, "ours", "routstrd_sale", "glm-5.2", 200))
+    con.execute("INSERT INTO routing_live_decisions (ts, live_provider, live_model, "
+                "caller_class, reason) VALUES (?,?,?,?,?)",
+                (now, "routstr", "glm-5.2", "sold", "routed_routstr"))
+    con.commit()
+    out = str(tmp_path / "calibr.json")
+    res = build_calibr(log_path=lp, db_path=dbp, out_path=out, lookback_hours=1.0)
+    assert res["sold_decision_rows"] == 1
+    assert res["would_be_routes"] == {"ours": 1}
+    con.close()
+
+
+def test_build_calibr_missing_log_and_db_yields_zeros(tmp_path):
+    from src.routstr_sold_canary import build_calibr
+    out = str(tmp_path / "calibr.json")
+    res = build_calibr(log_path="/nonexistent/nope/canary.jsonl", db_path=None,
+                       out_path=out, lookback_hours=24.0)
+    assert res["requests_total"] == 0
+    assert res["sold_decision_rows"] == 0
+    assert res["would_be_routes"] == {}
+    assert res["routing_changed"] is False
+    assert os.path.exists(out)
+
+
+def test_build_calibr_excludes_rows_outside_lookback(tmp_path):
+    from src.routstr_sold_canary import build_calibr
+    import time
+    now = time.time()
+    lp = _mklog(tmp_path, [
+        {"canary": "routstr_sold_canary", "ts": now, "caller_class": "sold",
+         "lane": "routstr", "model": "glm-5.2", "status": 200},
+        {"canary": "routstr_sold_canary", "ts": now - 7200.0, "caller_class": "sold",
+         "lane": "routstr", "status": 200},   # 2h old, outside 1h lookback
+    ])
+    out = str(tmp_path / "calibr.json")
+    res = build_calibr(log_path=lp, db_path=None, out_path=out, lookback_hours=1.0)
+    assert res["requests_total"] == 1
+    assert res["sold_chat_requests"] == 1
