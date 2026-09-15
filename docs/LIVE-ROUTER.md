@@ -138,6 +138,14 @@ request
 ## 8. Deployment & config
 
 - Engine: **role 29 `live-router`** (writes `state/fleet/*.json` + engine copies).
+- Shared runtime state: **`scripts/engine/router_state.py`** (role 29
+  `router_engine_files`) is the single source of truth for provider funding,
+  decayed delivery health, key backoff, and recovery counters. It must deploy
+  **atomically** with `zai_proxy.py` + `flat_router.py` — a partial deploy makes
+  `zai_proxy` `import router_state` fail (crash loop).
+- Upstream timeout: **`ROUTER_UPSTREAM_TIMEOUT_S`** (default `60`s) bounds a
+  pre-first-byte stall so a large-context prefill fails fast and is re-priced
+  instead of hanging ~180s.
 - Probe: **role 43 `provider-probe`** → `~/.hermes/bot/provider_probe.json` (the
   canonical path `flat_router._PROBE_PATH` reads).
 - Pressure dispatch: **role 44** (planned) — CPU/mem/disk/gateway/LLM pressure.
@@ -151,6 +159,13 @@ request
 1. Read **this file**, then ADR-001…ADR-019.
 2. Confirm the source of truth: `git log` on `main`; the live files are artifacts.
 3. Redeploy: run **role 29** (and 43) from the orchestration repo.
+   - **Make the role current first:** if the node's orchestration checkout is on
+     a stale branch, `router_engine_files` may omit `router_state.py` → the new
+     `zai_proxy.py` crash-loops with `ModuleNotFoundError: router_state`
+     (2026-09-15). Deploy from the canonical checkout (or `git pull` first).
+   - **Split-brain check:** `~/.hermes/bot/router_state.py` exists **and**
+     `zai_proxy._provider_health is router_state.provider_health` (one shared
+     object, not a per-module copy). See fleet ADR-008.
 4. Verify: probe fresh at `~/.hermes/bot/provider_probe.json`; `deepseek-flash` → 200;
    no all-∞; `kalman_pricing.json` updating.
 5. If history was lost: restore from the ADR commits + `backup/*` tags/bundles
@@ -171,3 +186,7 @@ request
   **ADR-015** per-(endpoint,LLM) health Kalman · **ADR-016** health-derived price +
   target-pressure controller · **ADR-017** quota phase-sync · **ADR-018** three-price
   model + self-charge · **ADR-019** compression cost/quality optimizer.
+
+Fleet-side ADRs (dispatch/pressure/Ansible/live-router policy and the shared
+router runtime state) live in `hermes-orchestration/docs/adr/` (ADR-001…008);
+**fleet ADR-008** = shared router runtime state (single source of truth).
