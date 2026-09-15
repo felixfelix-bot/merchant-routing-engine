@@ -731,6 +731,7 @@ def compute_effective_price(
     failure_count: int = 0,
     breaker_tripped: bool = False,
     pace_mult: float = 1.0,
+    health_mult: float = 1.0,
     extra_usage_regime: str = "included",
     extra_usage_mult: float | None = None,
     quota_pressure: float | None = None,
@@ -856,6 +857,11 @@ def compute_effective_price(
     else:
         scarcity = scarcity_factor(quota_pct)
     health = health_pricing_factor(failure_count, breaker_tripped)
+    # ADR-015/016: HealthKalman-derived multiplier on top of the streak penalty
+    # (error-bump / success-decay). Defensive: bad input → neutral 1.0; +inf is
+    # preserved so an excluded lane stays unreachable.
+    if health_mult and health_mult > 0:
+        health = health * float(health_mult)
 
     # Extra-usage multiplier: prefer the continuous quota-pressure value when
     # the caller supplies it (RP-PRICING); otherwise fall back to the legacy
