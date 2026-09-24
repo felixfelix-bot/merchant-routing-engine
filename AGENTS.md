@@ -26,6 +26,12 @@ python3 -m py_compile src/*.py
 ## Key Constraints
 
 - NEVER commit API keys (`.env`, `config.yaml` are in .gitignore)
-- The production proxy (`production/zai_proxy.py`) is the source of truth — it imports `flat_router.select_provider`; LiveRouter (Kalman-based) runs as the primary
+- The LIVE proxy is `~/.hermes/bot/zai_proxy.py`; `production/zai_proxy.py` in this
+  repo is a stale snapshot (do not grep it for current behavior). The primary routing
+  selector is **`flat_router.select_provider`** (cheapest-first + hysteresis).
+  LiveRouter (Kalman-based) is **failover-only**, kill-switched by `.enable_live_routing`
+  — corrected 2026-09-24 after a live audit (`docs/provider-hunt/JEV-VERDICT-2026-09-24.md`
+  §4): `zai_usage.db` holds 242,524 `flat_router_shadow_decisions` vs 1,587
+  `routing_live_decisions`.
 - All changes to production must have a revert plan (see `docs/migration-plan.md`)
 - All providers are equal (no z.ai preference) — routing picks the cheapest healthy provider (see `flat_router.py`)
