@@ -4,8 +4,11 @@
 It is separate from `.github/workflows/` (this repo has none), so GitHub
 Actions is untouched; this is the repo's first automated gate.
 `felixfelix-bot/merchant-routing-engine` is **not a fork** (`gh api … fork:false`,
-default `main`, public), so the workflow is committed on `ci/ngit-workflows`
-(cut from `origin/main`).
+default `main`, public). The file was authored on the branch `ci/ngit-workflows`
+(cut from `main`), merged to `main` as `2ccbbb91`, and the lane tip `4e55c8f`
+was additionally pushed to the ngit mirror as the plain ref
+`refs/heads/ci/ngit-workflow-lane` so a maintainer-directed manual replay of the
+same workflow could be run at it (see "Triggering and reading results").
 
 ## What the workflow runs (job `tests`)
 
@@ -18,14 +21,40 @@ default `main`, public), so the workflow is committed on `ci/ngit-workflows`
 | root suites | `python -m pytest test_garbage_circuit_breaker.py test_quality_floor.py -q` | **not in the docs** — two root-level suites outside `tests/`; cheap (33 passed) and additive |
 | module suite | `python -m pytest tests/ -q` + the 24 ignores below and one `--deselect` | AGENTS.md "Run tests" (`tests/ -v`) |
 
-Triggers: `push`, `pull_request` (any branch) and `workflow_dispatch`.
-`runs-on: ubuntu-latest`, 30-min timeout, no `container:`/`services:`, no
-job-level `uses:`, no secrets, no `GITHUB_TOKEN` (the coordinator supplies
-none); Python pinned to `3.14`.
+Triggers: `push` on `main` only (branch-filtered, so no other branch can
+start an unintended coordinator run), `pull_request` on any branch, and
+`workflow_dispatch` (manual replay). `runs-on: ubuntu-latest`, 30-min timeout,
+no `container:`/`services:`, no job-level `uses:`, no secrets, no `GITHUB_TOKEN`
+(the coordinator supplies none).
 
-**Verified with the repo's local workflow driver, before and after the commit:
-`ALL RUN STEPS PASSED` — 91 passed (flat router), 33 passed (root suites), 1893
-passed (module suite), every `run:` step exit 0.**
+Pins: `actions/checkout@v5` / `actions/setup-python@v5` are explicit literal
+version tags (the ngit-ci recipe's "literal pin" means a concrete version, not
+`-file`/`latest`/an expression); the interpreter is pinned to the literal
+`3.14`. The pip line is deliberately unpinned: this repo ships no lockfile, so
+there is no repo pin to mirror — the four packages are the test-time
+dependencies named in `REPRODUCE.md` plus `requests` (see the table above).
+
+**Verified locally with the workflow driver
+(`…/skills/devops/nostr-ci-ngit/scripts/run-workflow-locally.py`) on the commit
+that carries this file, run CLEAN-ROOM (empty `HOME`, so the optional host paths
+the tests probe do not exist — which is what `act` gives you): `ALL RUN STEPS
+PASSED`, every `run:` step exit 0 — 91 passed (flat router), 33 passed (two root
+suites), 1912 passed / 1 deselected (module suite) — matching the module-suite
+count the CI runs report for this suite.**
+
+Two steps are host-dependent, so a naive "reproduce it on my box" can go red for
+reasons that have nothing to do with the commit:
+
+- *Root-level suites* read LIVE router state: `flat_router.py` consults
+  `~/.hermes/bot/zai_usage.db`, the live flag files and the balance bridges.
+  Measured on the operator's host 2026-09-25: `3 failed, 30 passed`
+  (`neuralwatt` demoted by live state). In the clean CI workspace the step is
+  green — treat the kind-9842 result, not a host run, as this step's verdict.
+- `~/.hermes/bot/zai_proxy.py` (the 420 KB live proxy) is not in this repo, so
+  the modules listed below that load it cannot run here at all.
+
+Both driver logs (clean-room and host) are attached to the tracking kanban card
+(`merchant-routing:t_433b9ad7`).
 
 ### Repo docs vs reality
 - REPRODUCE.md says `test_flat_router.py` is "77 tests → 77 passed"; it is **91
@@ -36,7 +65,7 @@ passed (module suite), every `run:` step exit 0.**
 ## ⚠️ 22 of the 80 `tests/` modules are RED — the ignore list is debt
 
 The ignores are not a claim that the repo is green. Excluding them keeps the job
-useful (it reports on the other 57 modules / 1912 tests); each one is listed with
+useful (it reports on the other 56 modules); each one is listed with
 its measured signature, and removing ignores as modules are fixed is the point.
 
 **One test deselected for the CI environment (2026-09-25, run at `de4c73d4`):**
@@ -88,6 +117,34 @@ Two of the 24 ignores are **not** red, and deleting them is the first debt item:
 is green at **1934 passed in 259 s**. They stayed in the measured set as slow
 modules the classification pass did not finish.
 
+## Scope: what a green run does and does NOT certify
+
+Read this before quoting the lane as evidence for a card.
+
+- **It certifies the public tree of THIS repo at the exact commit of the run** —
+  the steps in the table above, at that SHA, run by a coordinator and signed as
+  a kind-9842 result (see the next section for how to bind the result to a
+  signer).
+- **It does NOT certify the 24 excluded `tests/` modules.** 22 of them are red
+  at this commit for reasons recorded row by row above; a green lane is not a
+  green `pytest tests/`, and must not be reported as one.
+- **It does NOT certify the LIVE engine code.** The live engine
+  (`~/.hermes/bot/`) is AHEAD of this public tree, and the delta is not in this
+  repo:
+
+  | File | Live (private) | This repo | Note |
+  |---|---|---|---|
+  | `zai_proxy.py` | `~/.hermes/bot/zai_proxy.py`, 9 011 lines | `production/zai_proxy.py`, 7 852 lines | live-only work: caller-class routing, tier alias/shadow resolution, ollama paywall disarm, quota-bench persistence, garbage-check integration, egress hints, upstream timeout |
+  | `flat_router.py` | `~/.hermes/bot/flat_router.py`, 2 169 lines | `flat_router.py`, 1 338 lines | live-only provider/lane selection work |
+  | `garbage_detector.py` | `~/.hermes/bot/garbage_detector.py`, 653 lines | **absent** | no counterpart in this repo |
+
+  A card whose deliverable is a change to the LIVE engine therefore cannot be
+  certified by this lane as it stands: the green run's commit does not contain
+  the code under review. For honest evidence such a card must first publish the
+  sanitized delta of the files above to this repo (public tree — no `.env`, no
+  keys, no `nsec`) and re-run the lane at that commit. Line counts are measured
+  on the operator's machine (2026-09-25); re-measure rather than trust them.
+
 ## Deliberately not covered
 
 - The 24 modules above, for the reasons in their rows.
@@ -123,4 +180,32 @@ git config --local --unset nostr.nsec
 - Results are signed by whoever's coordinator ran the job — a green mark in a
   viewer (gitworkshop.dev) can come from a relay's own coordinator. Trust our
   own coordinator's signature (`765cd47b…`, DQ05) for gate evidence.
-- Gate evidence line shape: `ci_evidence repo=merchant-routing-engine head=<40-hex> ref=refs/heads/ci/<slug>`.
+- Gate evidence line shape: `ci_evidence repo=merchant-routing-engine head=<40-hex> ref=<ref>`.
+
+### Observed runs (both green, both signed by the same coordinator)
+
+| Commit | Ref | Trigger | Conclusion | kind-9842 event |
+|---|---|---|---|---|
+| `2ccbbb91` (merged `main`) | `refs/heads/main` | `push` | `success` | `126f2258ce745050858e432193bcce4938e47da81f4e349dd4f9cfeaa694d144` |
+| `4e55c8f` (lane tip) | `refs/heads/ci/ngit-workflow-lane` | `manual` (maintainer-directed) | `success` | `5706173c272916c402f38b25a4a89b87e59a9eedf4304fd8855bc804082808c4` |
+| `4e55c8f` (lane tip) | `refs/heads/ci/ngit-workflow-lane` | `push` | `success` | `a6c2d1ac5ff3e6c2741fe1e201931ef0d9ea24b6ff01fb0b1ce01bce937e2bc8` |
+
+`4e55c8f` is the branch tip of the change that merged as `2ccbbb91`, so the
+manual replay proves the maintainer-directed path on a plain `ci/<slug>` ref as
+well as the push path on `main`. An earlier run at `de4c73d4` (before the
+deselect) concluded `failure`; it is the source of the classification data in
+the ignore list above.
+
+Bind a result to a signer before quoting it:
+
+```bash
+# the kind-9842 event's own pubkey (must be the coordinator you trust)
+nak req -k 9842 -l 200 wss://relay.ngit.dev wss://gitnostr.com \
+  | python3 -c 'import sys,json
+for l in sys.stdin:
+    if l.startswith("{"):
+        e=json.loads(l); t={x[0]:x[1:] for x in e["tags"] if x}
+        if "merchant-routing-engine" in str(t.get("a")): print(e["pubkey"], t.get("conclusion"), t.get("c"))'
+
+ngit ci status <commit>       # trust context + integrity ("commit present, workflow hash matches")
+```

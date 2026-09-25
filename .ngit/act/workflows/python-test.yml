@@ -5,7 +5,12 @@ name: Python Tests
 # `AGENTS.md` ("Build/Test Commands") and `REPRODUCE.md` ("Verification").
 
 on:
+  # Branch-filtered on purpose: only the default branch may start a
+  # push-triggered run, so no side branch can burn a coordinator run by
+  # accident. A run at any other ref (e.g. a `ci/<slug>` lane ref) goes
+  # through the one-shot manual maintainer trigger (kind 9840) instead.
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -19,6 +24,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # Action pins are explicit literal version tags (the ngit-ci recipe's
+      # "literal pin"); the interpreter below is a literal too. The pip line is
+      # unpinned because this repo ships no lockfile to mirror.
       - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v5
@@ -50,6 +58,9 @@ jobs:
       - name: Router suite (documented 77-test suite)
         run: python -m pytest test_flat_router.py -q
 
+      # Two root-level suites outside `tests/`. Not named in AGENTS.md /
+      # REPRODUCE.md; added deliberately: they are cheap (33 passed), they cover
+      # the live circuit breaker and quality floor, and they are green.
       - name: Root-level suites
         run: python -m pytest test_garbage_circuit_breaker.py test_quality_floor.py -q
 

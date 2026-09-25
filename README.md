@@ -13,7 +13,8 @@ git clone https://gitnostr.com/npub1nng5mxkdh2mu593twukfr7j3fk5wxfy0v8ujf0e5g8nw
 ```
 
 - **Browse / open PRs:** https://gitworkshop.dev/npub1nng5mxkdh2mu593twukfr7j3fk5wxfy0v8ujf0e5g8nwwtzlphhqksqpew/relay.ngit.dev/merchant-routing-engine
-- **CI (the decision of record):** engine work is certified by **this public repo's** Nostr CI lane, `.ngit/act/workflows/python-test.yml`. The ngit mirror is the build of record; GitHub Actions runs nothing here (this repo has no `.github/workflows/`).
+- **CI (the decision of record):** work that lands in **this public tree** is certified at its exact commit by this repo's Nostr CI lane, `.ngit/act/workflows/python-test.yml` (green kind-9842 results at `2ccbbb91` on `refs/heads/main` and at the lane tip `4e55c8f` on `refs/heads/ci/ngit-workflow-lane`). The ngit mirror is the build of record; GitHub Actions runs nothing here (this repo has no `.github/workflows/`).
+- **⚠️ Scope of that certificate:** it covers the files in THIS repo at that commit — **not** the live engine tree, which is ahead of this repo (`~/.hermes/bot/zai_proxy.py`, `flat_router.py` and `garbage_detector.py` are newer/absent here). A change to the live engine must publish its sanitized delta into this repo and re-run the lane before this CI can honestly certify it. Details, per-file line counts and the excluded `tests/` modules: [`.ngit/README.md` § Scope](.ngit/README.md#scope-what-a-green-run-does-and-does-not-certify).
 - **Announcement (source of truth for the URLs above):** kind `30617`, `d=merchant-routing-engine`, by `9cd14d9acdbab7ca162b772c91fa514da8e3248f61f924bf3441e6e72c5f0dee` (2026-09-14), relays `wss://relay.ngit.dev wss://gitnostr.com`.
 
 ### CI surface (what runs where)
