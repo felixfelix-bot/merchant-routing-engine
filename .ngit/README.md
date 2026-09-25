@@ -16,7 +16,7 @@ default `main`, public), so the workflow is committed on `ci/ngit-workflows`
 | byte-compile | `python -m py_compile src/*.py` | AGENTS.md "Lint" |
 | router suite | `python -m pytest test_flat_router.py -q` | REPRODUCE.md "Verification" |
 | root suites | `python -m pytest test_garbage_circuit_breaker.py test_quality_floor.py -q` | **not in the docs** — two root-level suites outside `tests/`; cheap (33 passed) and additive |
-| module suite | `python -m pytest tests/ -q` + the 24 ignores below | AGENTS.md "Run tests" (`tests/ -v`) |
+| module suite | `python -m pytest tests/ -q` + the 24 ignores below and one `--deselect` | AGENTS.md "Run tests" (`tests/ -v`) |
 
 Triggers: `push`, `pull_request` (any branch) and `workflow_dispatch`.
 `runs-on: ubuntu-latest`, 30-min timeout, no `container:`/`services:`, no
@@ -36,8 +36,18 @@ passed (module suite), every `run:` step exit 0.**
 ## ⚠️ 22 of the 80 `tests/` modules are RED — the ignore list is debt
 
 The ignores are not a claim that the repo is green. Excluding them keeps the job
-useful (it reports on the other 54 modules / 1893 tests); each one is listed with
+useful (it reports on the other 57 modules / 1912 tests); each one is listed with
 its measured signature, and removing ignores as modules are fixed is the point.
+
+**One test deselected for the CI environment (2026-09-25, run at `de4c73d4`):**
+`tests/test_oxalpha_tier.py::test_model_map_additions_are_scoped_to_oxalpha_only`
+runs `git show HEAD:config/providers.yaml` via `subprocess.run(check=True,
+cwd=REPO)`. In the ngit-ci act workspace `git show` exits **128** (the workspace
+is not a git checkout the way a clone is), so the test errored with
+`CalledProcessError` — the only failure of that run (1 failed, 1912 passed,
+43 s). It passes in a normal clone, so it is deselected here rather than
+ignored-whole-module; the deselect is the first thing to revisit if the
+coordinator's workspace ever carries a real `.git`.
 
 **Cannot pass off the operator's machine — `FileNotFoundError:
 $HOME/.hermes/bot/zai_proxy.py`** (they load the 420 KB *live* production proxy,

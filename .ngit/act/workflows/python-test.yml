@@ -63,9 +63,17 @@ jobs:
       # 70-80 s runtimes. This is a measured ignore-list, NOT a claim that the
       # repo is green, and removing ignores as the modules are fixed is
       # tracked debt.
+      #
+      # One test is deselected: test_oxalpha_tier.py::test_model_map_
+      # additions_are_scoped_to_oxalpha_only runs `git show HEAD:config/
+      # providers.yaml` (check=True). The act workspace has no usable .git
+      # for that (exit 128, observed 2026-09-25 run at de4c73d4: 1 failed,
+      # 1912 passed), so it cannot pass in this CI environment. It passes in
+      # a normal clone (locally verified); reason recorded in .ngit/README.md.
       - name: Module test suite (AGENTS.md; 24 modules excluded — see .ngit/README.md)
         run: |
           python -m pytest tests/ -q \
+            --deselect tests/test_oxalpha_tier.py::test_model_map_additions_are_scoped_to_oxalpha_only \
             --ignore=tests/test_cpvo_calculator.py \
             --ignore=tests/test_cpvo_live_router.py \
             --ignore=tests/test_cpvo_model_aware.py \
