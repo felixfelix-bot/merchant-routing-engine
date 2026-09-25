@@ -86,15 +86,31 @@ modules the classification pass did not finish.
   the running production proxy and its live DB, not a checkout.
 
 ## Triggering and reading results
-This deployment uses the **`request-required`** policy and a standing Service
-Request (kind `9843`, id `15249e4d`) already exists for this repository, so a
-push carrying `.ngit/act/workflows/` is picked up without further authorization
-(a one-shot kind `9840` trigger bypasses the gate too).
+This deployment uses the **`request-required`** policy: push-triggered runs
+wait until a maintainer publishes a standing Service Request (kind `9843`) that
+names **this repo's** `a=30617:<maintainer-hex>:merchant-routing-engine`
+coordinate. An old SR (`15249e4d`, 2026-09-12) still on the relays targets the
+rotated-away `36bdeb…` coordinate and covers nothing here — the current SR for
+the live `9cd14d9a…` coordinate is what authorizes runs; a one-shot kind `9840`
+manual trigger bypasses the gate regardless.
 
-- `ngit ci status <commit|pr>` — ngit ≥ v3 only; the fleet's v2.6.1 CLI has no
-  `ci` subcommand, so read the relays directly.
+A maintainer trigger signs with the repo's maintainer key (git config
+`nostr.nsec`, set locally for the duration of the push/trigger and unset after):
+
+```bash
+git config --local nostr.nsec <maintainer-nsec>
+git push ngit HEAD:refs/heads/ci/<slug>          # plain ci/ ref, NOT a pr/ ref
+git ls-remote ngit refs/heads/ci/<slug>          # must show the sha first
+ngit -d ci trigger --workflow .ngit/act/workflows/python-test.yml \
+     --ref refs/heads/ci/<slug> <COORDINATOR_HEX> <COMMIT_SHA>
+git config --local --unset nostr.nsec
+```
+
+- `ngit ci status <commit|pr>` — available on this fleet's ngit v3.0.1 CLI.
 - Kind **39842** = workflow progress, **9841** = per-job result (log tail in
   `content`), **9842** = workflow conclusion:
   `nak req -k 9842 -a "<coordinator-hex>" -l 5 wss://relay.ngit.dev`
 - Results are signed by whoever's coordinator ran the job — a green mark in a
-  viewer (gitworkshop.dev) can come from a relay's own coordinator.
+  viewer (gitworkshop.dev) can come from a relay's own coordinator. Trust our
+  own coordinator's signature (`765cd47b…`, DQ05) for gate evidence.
+- Gate evidence line shape: `ci_evidence repo=merchant-routing-engine head=<40-hex> ref=refs/heads/ci/<slug>`.
