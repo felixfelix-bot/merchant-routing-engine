@@ -7,6 +7,17 @@
 #   * healthy + sats remaining   → SILENT (empty stdout)
 #   * healthy but wallet EMPTY   → one-line alert
 #   * collection failed          → one-line alert
+#
+# 2026-09-26 — WALLET MIGRATION AUDIT: this collector does NOT touch the local
+# wallet and therefore needed no path repoint. It reads a DIFFERENT wallet —
+# the remote VPS2 Routstr node's, over ROUTSTR_BASE (http://localhost:8009,
+# routstr-tunnel.service → VPS2 loopback-only bind), authenticated with
+# ROUTSTR_API_KEY (src/balance_collectors.py:fetch_routstr_balance_sats →
+# GET /v1/balance/info). The local cocod→routstrd wallet migration
+# (~/.cocod/coco.db → ~/.routstrd/wallet/coco.db) is handled by
+# routstrd_balance_cron.sh + routstrd_funding_guard.py, which write the
+# separate provider='routstrd' / 'routstrd_network' rows. Do not merge the two:
+# provider='routstr' is the upstream node's float, provider='routstrd' is ours.
 set -u
 
 REPO="/home/c03rad0r/merchant-routing-engine"
