@@ -111,3 +111,94 @@ OUR-STACK FIT (economics, 7d lane volumes from zai_usage.db):
   bridge. Visibility task queued with probe.
 - Local llama-server warm-KV: NOT a cost lever (no local lane; T470-class CPU
   prefill hopeless at p99 181K). Offline-resilience only.
+
+## Vetting pass 2026-09-21 — "cheapest provider" AI-mode paste (cheap-provider list)
+
+Source: German AI-mode (Google) summary pasted by the operator: DeepInfra/Novita
+price leaders, Groq/Together/Fireworks mid-tier, OpenRouter + HF Inference
+Providers as smart routers, "free Kimi-K3 via Zenmux", FreeLLMAPI keyless
+pooling, Pollinations keyless. Every price claim re-checked LIVE against
+authless `/v1/models` catalogs (skill rule 11) — no consultant passes spent.
+
+### Verified REAL (authless catalogs, 2026-09-21) — $/M in / out / cache-read
+
+| Provider | Probed (no auth) | Rates for models we route |
+|---|---|---|
+| DeepInfra | api.deepinfra.com/v1/openai/models (192 models) | DS-V4-Flash-0731 0.06/0.18/0.015 · DS-V4-Flash 0.09/0.18/0.018 · DS-V4-Flash-Vision-Exp 0.44/1.32/0.014 · GLM-5.3 1.20/4.00/0.20 · GLM-5.3-Flash 0.15/0.50/0.03 · GLM-5.2 0.75/2.40/0.14 · Kimi-K3 2.85/14.25/0.285 |
+| inference.net | api.inference.net/v1/models (60 models) | DS-V4-Flash 0.23/0.62/**0.0028** (cache ratio 0.0122× = cheapest cache tier measured anywhere) · DS-V4-Flash-0731 0.53/1.58/0.017 · DS-V4.1-Flash 0.30/1.00/0.007 · GLM-5.3 0.90/3.00/0.15 · GLM-5.3-Flash 0.09/0.28/0.02 · Kimi-K3 2.10/10.95/0.23 |
+| HF Inference Providers | router.huggingface.co/v1/models (134 models, per-provider price + throughput + `is_free`) | cheapest live DS-V4-Flash-0731 = deepinfra 0.06/0.18; GLM-5.3-Flash = novita 0.15/0.50; `is_free` count = **0** (no free capacity at all) |
+| Zenmux | zenmux.ai/api/v1/models (194 models) + /llms.txt | explicit pass-through: GLM-5.3 1.4/4.4/0.26 (= z.ai list) · Kimi-K3 3/15/0.3 (= Moonshot list) · DS-V4.1-Flash 0.075/0.30/0.0015 · zero-price ids: z-ai/glm-4.7-flash-free, z-ai/glm-4.6v-flash-free, ling-3.0-* |
+| Novita | api.novita.ai/v3/openai/models | GLM-5.3-Flash 0.15/0.50/0.03 |
+| OneInfer | oneinfer.ai (no catalog API; prices in JS bundle, 450 provider/model rows) | own DeepSeek lane DS-V4-Flash 0.44/1.32/0.014 (cents-per-M scale calibrated against gpt-5 1.25/10 and claude-sonnet-5 2/4 in the same bundle) |
+| FreeLLMAPI | github tashfeenahmed/freellmapi (27.8k★, MIT) | BYO-key pooling router — ships NO capacity; 34 providers / 635 endpoints |
+| Pollinations | text.pollinations.ai/models | anonymous tier = exactly ONE model: openai-fast (GPT-OSS 20B, OVH) |
+| z.ai | docs.z.ai pricing (re-confirmed) | GLM-5.3 PAYG 1.4/0.26/4.4 and GLM-5.3-Flash 0.15/0.03 EXISTS, alongside the $18/mo Coding Plan Lite we run |
+
+### FABRICATED / EXPIRED / WRONG
+
+- **"Zenmux offers Kimi K3 free (Moonshot/Kimmy.K3-free promo)"** — no such id in
+  the live 194-model catalog. Zero-price ids are glm-4.7-flash-free,
+  glm-4.6v-flash-free and ling-3.0-* tiny models. Same fabrication class as
+  OpenRouter `:floor`.
+- **"GLM-5.3 has no token-based public API at Z.ai — subscription only"** — FALSE.
+  z.ai PAYG rates are live (table above); we run the $18/mo Lite plan as the
+  `ours` lane *and* hold PAYG rates.
+- **"Novita is the GLM-5.3-Flash price leader (~$0.50/M out)"** — real number,
+  wrong conclusion: 16.7× z.ai's $0.03/M flash output; inference.net lists the
+  same model at $0.28/M out.
+- **"Kimi-K3 $3.00/$15.00 direct is the most economical reference"** — irrelevant
+  to us: our neuralwatt kimi-k3 lane measures $0.0587/M.
+- **"Keyless endpoints (Pollinations) usable in code"** — the live anonymous tier
+  is a single 20B model; below our quality bar by construction.
+
+### Economics vs our lanes (eff input $/M at h=0.90, our ~99%-input mix)
+
+- Measured 7d (zai_usage.db): neuralwatt DS-flash 0.0065–0.0162 ·
+  ollama_cloud_2 glm-5.3 0.0155 · **deepseek direct 0.0355 blended (dominant cost:
+  5.24B tok / $185.98 in 7d)** · ppq ~0.1391 · `ours` (coding plan) $0 marginal.
+- DeepInfra DS-V4-Flash-0731 → 0.006 + 0.9×0.015 = **$0.0195/M** (1.8× under the
+  DeepSeek-direct lane we are actually paying for).
+- inference.net DS-V4-Flash → 0.023 + 0.9×0.0028 = **$0.0255/M**.
+- DeepInfra DS-V4-Flash 0.0252 · inference.net DS-V4.1-Flash 0.0363 ·
+  Novita DS-V4-Flash 0.0392 · OneInfer own lane 0.0566.
+- GLM-5.3-Flash: z.ai PAYG 0.042 (promo 0.021) vs inference.net 0.027 vs
+  DeepInfra 0.042 vs Novita 0.043 — nothing beats the flat `ours` lane for models
+  already served there.
+
+### Verdicts
+
+- **DeepInfra — GO stands, but the GO is INERT.** Key is present in
+  `~/.hermes/.env`; the disable marker was renamed to
+  `.key_disabled_deepinfra.disabled-bak-20260915-211907`, which is NOT the exact
+  path the gate checks (`router_state.py:138` / `zai_proxy.py:1329`) → lane
+  ENABLED. Yet 0 calls in 7d. Cause: `flat_router.py` prices the lane with a
+  single stale seed (`deepinfra: 1.30`, PROVIDER_SEED) and no per-model rates, so
+  it never wins and only surfaces in the D-138 last-resort dial after `deepseek`.
+  Fix = per-model rates for DS-V4-Flash-0731 / GLM-5.3 + canary — not another
+  evaluation.
+- **inference.net — WATCH (new; cheapest cache tier ever measured, 0.0122×).**
+  Authless priced catalog, 60 models, not yet in KNOWN_PROVIDERS; ToS/resale
+  UNVERIFIED; no quality evidence. Probe before wiring.
+- **Zenmux — WATCH (free-lane candidate).** Real gateway, pass-through prices (no
+  discount on our set). Only interesting feature: 4 zero-price ids → an ADR-014
+  internal-only, $0-exposure canary candidate.
+- **HF Inference Providers — not a lane, a PRICE ORACLE.** Authless multi-provider
+  catalog with per-provider pricing + throughput; `:cheapest` / `:fastest` /
+  `:preferred` suffixes are REAL (HF docs). Nothing in it beats our lanes, so its
+  value is a free market index for the hunt gate.
+- **Novita / Groq / Together / Fireworks / OpenRouter / Moonshot-direct — NO NEW
+  ACTION.** Novita loses on output (16.7×); Groq/Together/Fireworks already in
+  KNOWN_PROVIDERS; OpenRouter already fenced (§7 no-resale); Moonshot direct
+  already go_conditional and beaten by neuralwatt.
+- **FreeLLMAPI / Pollinations — NO.** FreeLLMAPI ships no capacity (BYO keys; free
+  tiers are RPM/context-limited against p99 181K-token requests and ToS-hostile to
+  pooled automation, even though 34×~1.5k req/day nominally covers our ~13.7k
+  calls/day). Pollinations anonymous = one 20B model.
+
+### Live-system finding (2026-09-21 23:10–23:16, not in the paste)
+
+`journalctl --user -u zai-proxy.service` shows **171×**
+`[flat-router] pool priced out (all ∞) — dialing last-resort ['deepseek','deepinfra']`
+inside 60 minutes: the whole flat pool was priced unusable and the metered
+DeepSeek-direct lane carried everything. That condition is what makes the
+DeepInfra seed bug expensive rather than cosmetic.
