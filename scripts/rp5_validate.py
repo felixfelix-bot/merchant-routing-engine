@@ -24,8 +24,20 @@ import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
-REPO = "/home/c03rad0r/merchant-routing-engine"
+# Locate the repo from this file's own path (scripts/ -> repo root) so the
+# validator runs from any checkout, including a local clone. The previous
+# hardcoded value pointed at ~/merchant-routing-engine, a symlink onto the DQ05
+# sshfs mount: whenever DQ05 was unreachable, every access to that path raised
+# EIO and os.chdir() killed this process *before the first check ran*, so the
+# rp5-shadow-health cron could only ever report a spawn failure.
+# RP5_REPO overrides it when a caller (e.g. rp5_shadow_health.py) wants to target
+# a specific tree; callers must never point it at a network mount.
+REPO = os.environ.get("RP5_REPO") or str(Path(__file__).resolve().parent.parent)
+if not os.path.isdir(REPO):
+    print(f"rp5_validate: repo tree unavailable: {REPO}", file=sys.stderr)
+    raise SystemExit(2)
 sys.path.insert(0, REPO)
 os.chdir(REPO)
 
